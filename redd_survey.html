@@ -91,7 +91,7 @@
 
   /* 地図 */
   #map{height:calc(100vh - 300px); min-height:320px; border-radius:var(--radius); border:1px solid var(--line);}
-  #pickMap{height:320px; border-radius:var(--radius); border:1px solid var(--line);}
+  #pickMap,#unitMap{height:320px; border-radius:var(--radius); border:1px solid var(--line);}
   .seg.basemap{margin-bottom:8px;}
   .seg.basemap button{padding:6px 12px; font-size:14px;}
   .leaflet-container{background:#0d1218;}
@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v7';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v8';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -372,6 +372,7 @@ function reset(name,arg){ STACK=[{name:name||'home',arg:arg||null}]; render(); }
 function render(){
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
   closePickMap();
+  closeUnitMap();
   revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
   const cur = STACK[STACK.length-1];
   const scr = SCREENS[cur.name] || SCREENS.home;
@@ -1588,9 +1589,13 @@ SCREENS.unitEdit = (argStr)=>{
   const carry = SCREENS._unitCarry || {};
   let u;
   if(editing){ u = DB.get(DB.key.un, a.u); if(!u || u.deleted_at) return SCREENS.home(); }
-  else u = { uuid:uuid(), survey_uuid:sv, reach_uuid: cur?cur.uuid:'', name:'',
+  // 続けて記録するときは、前の区間の終点をそのまま始点にする（歩きながら区切っていくため）
+  const fromPrev = !editing && ptOf(carry.end_lat, carry.end_lon) != null;
+  if(!editing) u = null;
+  if(!editing) u = { uuid:uuid(), survey_uuid:sv, reach_uuid: cur?cur.uuid:'', name:'',
              river_form: carry.river_form||'', started_at:nowISO(), ended_at:'',
-             start_lat:'', start_lon:'', end_lat:'', end_lon:'',
+             start_lat: fromPrev?carry.end_lat:'', start_lon: fromPrev?carry.end_lon:'',
+             end_lat:'', end_lon:'',
              length_m_auto:'', length_m_manual:'', river_width_m:'',
              depth_cm_rep:'', velocity_ms_rep:'', env_points:[],
              substrate_rep:'', substrate_pct:{}, memo:'' };
@@ -1612,9 +1617,27 @@ SCREENS.unitEdit = (argStr)=>{
         <input id="uName" value="${esc(u.name||'')}" placeholder="自動"></label>
 
       <div class="sect">区間（始点〜終点）</div>
+      ${ fromPrev ? `<div class="card" style="border-color:var(--accent2)">
+        <div class="small">前の区間「${esc(carry.name||'')}」の終点を、始点に入れてあります。</div>
+        <div class="tiny muted" style="margin-top:6px">分流など、続きでない場合は下のボタンか地図で置き直してください。</div>
+        <div class="sp"></div>
+        <button class="btn ghost small" onclick="unitClearStart()">始点を消してやり直す</button>
+      </div>` : '' }
       <div class="btn-grid">
-        <button class="btn" onclick="unitMark('start')">ここを始点にする</button>
-        <button class="btn" onclick="unitMark('end')">ここを終点にする</button>
+        <button class="btn" onclick="unitMark('start')">今いる場所を始点に</button>
+        <button class="btn" onclick="unitMark('end')">今いる場所を終点に</button>
+      </div>
+      <div class="sp"></div>
+      ${baseMapButtonsHtml()}
+      <div class="btn-grid">
+        <button class="btn" id="uPickStart" onclick="unitPickMode('start')">地図で始点を置く</button>
+        <button class="btn" id="uPickEnd" onclick="unitPickMode('end')">地図で終点を置く</button>
+      </div>
+      <div class="sp"></div>
+      <div id="unitMap"></div>
+      <div class="tiny muted" style="margin-top:6px" id="uMapHint">
+        上のボタンで「始点」か「終点」を選んでから地図をタップします。置いた点は長押しで動かせます。
+        緑＝始点、赤＝終点、太い線＝記録済みの区間、小さい点＝産卵床です。
       </div>
       <div class="sp"></div>
       <div class="two">
@@ -1677,20 +1700,115 @@ SCREENS.unitEdit = (argStr)=>{
       renderEnvList();
       updateUnitLen();
       updateGrainTotal();
+      initUnitMap(sv, u.uuid);
     }
   };
 };
+
+/* ---------- 物理環境の入力画面に出す地図 ---------- */
+let UNITMAP=null, UNIT_MK={start:null, end:null}, UNIT_LINE=null, UNIT_MODE='start';
+function closeUnitMap(){
+  if(UNITMAP){ try{ UNITMAP.remove(); }catch(e){} }
+  UNITMAP=null; UNIT_MK={start:null, end:null}; UNIT_LINE=null;
+}
+function unitPickMode(which){
+  UNIT_MODE = which;
+  const bs=$('#uPickStart'), be=$('#uPickEnd');
+  if(bs) bs.classList.toggle('primary', which==='start');
+  if(be) be.classList.toggle('primary', which==='end');
+  toast(which==='start' ? '地図をタップすると始点を置きます' : '地図をタップすると終点を置きます');
+}
+function initUnitMap(sv, selfUuid){
+  if(typeof L==='undefined' || !$('#unitMap')) return;
+  UNITMAP = L.map('unitMap', { zoomControl:true });
+  applyBaseMap(UNITMAP, baseMapName());
+
+  // 目印：記録済みの区間と産卵床
+  DB.unitsOf(sv).forEach(x=>{
+    if(x.uuid===selfUuid) return;
+    const a=ptOf(x.start_lat,x.start_lon), b=ptOf(x.end_lat,x.end_lon);
+    if(!a||!b) return;
+    L.polyline([a,b], {color:formColor(x.river_form), weight:6, opacity:.6}).addTo(UNITMAP)
+      .bindTooltip(`${x.name||''}（${x.river_form||''}）`);
+  });
+  DB.reddsOf(sv).forEach(r=>{
+    const p=ptOf(r.latitude, r.longitude);
+    if(p) L.circleMarker(p, {radius:4, color:'#9aa8b4', weight:1, fillOpacity:.35}).addTo(UNITMAP);
+  });
+  if(lastFix){
+    L.circleMarker([lastFix.lat,lastFix.lon], {radius:5, color:'#fff', weight:2,
+      fillColor:'#4aa3dd', fillOpacity:1}).addTo(UNITMAP).bindTooltip('今いる場所（GPS）');
+  }
+
+  const s=ptOf($('#uSLat').value, $('#uSLon').value), e=ptOf($('#uELat').value, $('#uELon').value);
+  const center = s || e || (lastFix?[lastFix.lat,lastFix.lon]:null);
+  UNITMAP.setView(center || [43.5,142.5], center ? 17 : 9);
+  if(s) unitSetPoint('start', s, false);
+  if(e) unitSetPoint('end', e, false);
+  // 始点が決まっていれば、次のタップは終点にするのが自然
+  unitPickMode(s ? 'end' : 'start');
+  UNITMAP.on('click', ev=>unitSetPoint(UNIT_MODE, [ev.latlng.lat, ev.latlng.lng], true));
+  setTimeout(()=>{ if(UNITMAP) UNITMAP.invalidateSize(); }, 60);
+}
+function unitPinIcon(color){
+  return L.divIcon({ className:'', iconSize:[24,24], iconAnchor:[12,12],
+    html:`<div style="width:18px;height:18px;border-radius:50%;background:${color};
+      border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4)"></div>` });
+}
+// which: 'start'（緑）/ 'end'（赤）。advance=true なら始点を置いた後に終点モードへ進む
+function unitSetPoint(which, pt, advance){
+  if(!UNITMAP) return;
+  const color = which==='start' ? '#4ec38a' : '#e05555';
+  if(!UNIT_MK[which]){
+    UNIT_MK[which] = L.marker(pt, {draggable:true, icon:unitPinIcon(color)}).addTo(UNITMAP)
+      .bindTooltip(which==='start'?'始点':'終点');
+    UNIT_MK[which].on('dragend', ()=>{
+      const p=UNIT_MK[which].getLatLng();
+      unitWritePoint(which, [p.lat, p.lng]);
+      unitDrawLine();
+    });
+  }else{
+    UNIT_MK[which].setLatLng(pt);
+  }
+  unitWritePoint(which, pt);
+  unitDrawLine();
+  if(advance && which==='start' && !UNIT_MK.end) unitPickMode('end');
+}
+function unitWritePoint(which, pt){
+  const la = which==='start' ? $('#uSLat') : $('#uELat');
+  const lo = which==='start' ? $('#uSLon') : $('#uELon');
+  if(la) la.value = (+pt[0]).toFixed(6);
+  if(lo) lo.value = (+pt[1]).toFixed(6);
+  updateUnitLen();
+}
+function unitDrawLine(){
+  if(!UNITMAP) return;
+  const s=ptOf($('#uSLat').value, $('#uSLon').value), e=ptOf($('#uELat').value, $('#uELon').value);
+  if(UNIT_LINE){ try{ UNITMAP.removeLayer(UNIT_LINE); }catch(err){} UNIT_LINE=null; }
+  if(s && e) UNIT_LINE = L.polyline([s,e], {color:'#fff', weight:3, opacity:.9, dashArray:'6,6'}).addTo(UNITMAP);
+}
+function unitClearStart(){
+  ['#uSLat','#uSLon'].forEach(s=>{ const el=$(s); if(el) el.value=''; });
+  if(UNITMAP && UNIT_MK.start){ try{ UNITMAP.removeLayer(UNIT_MK.start); }catch(e){} UNIT_MK.start=null; }
+  unitDrawLine();
+  updateUnitLen();
+  unitPickMode('start');
+  toast('始点を消しました。地図か「今いる場所を始点に」で置き直せます');
+}
 
 function unitMark(which){
   if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
   toast('位置を取得中…');
   navigator.geolocation.getCurrentPosition(p=>{
     lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
-    const la = which==='start' ? $('#uSLat') : $('#uELat');
-    const lo = which==='start' ? $('#uSLon') : $('#uELon');
-    if(la) la.value = lastFix.lat.toFixed(6);
-    if(lo) lo.value = lastFix.lon.toFixed(6);
-    updateUnitLen();
+    if(UNITMAP) unitSetPoint(which, [lastFix.lat, lastFix.lon], false);
+    else {
+      const la = which==='start' ? $('#uSLat') : $('#uELat');
+      const lo = which==='start' ? $('#uSLon') : $('#uELon');
+      if(la) la.value = lastFix.lat.toFixed(6);
+      if(lo) lo.value = lastFix.lon.toFixed(6);
+      updateUnitLen();
+    }
     toast((which==='start'?'始点':'終点')+'を記録しました（誤差 約'+Math.round(lastFix.acc)+'m）');
   }, ()=>toast('位置を取れませんでした'), {enableHighAccuracy:true, timeout:15000, maximumAge:0});
 }
@@ -1756,7 +1874,8 @@ function saveUnit(u, sv, editing){
     memo: $('#uMemo').value||'',
   };
   if(!DB.upsert(DB.key.un, rec)) return;
-  SCREENS._unitCarry = { river_form:form };
+  // 次の区間の始点に使えるよう、終点と名前を覚えておく
+  SCREENS._unitCarry = { river_form:form, name, end_lat:rec.end_lat, end_lon:rec.end_lon };
   SCREENS._env = null;
   toast('保存しました');
   goBack();
