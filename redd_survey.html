@@ -91,6 +91,7 @@
 
   /* 地図 */
   #map{height:calc(100vh - 300px); min-height:320px; border-radius:var(--radius); border:1px solid var(--line);}
+  #pickMap{height:340px; border-radius:var(--radius); border:1px solid var(--line);}
   .leaflet-container{background:#0d1218;}
   .locate-btn{width:42px; height:42px; font-size:20px; line-height:1;
     background:var(--panel); color:var(--fg); border:1px solid var(--line);
@@ -133,7 +134,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v1';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v2';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -360,6 +361,7 @@ function reset(name,arg){ STACK=[{name:name||'home',arg:arg||null}]; render(); }
 
 function render(){
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
+  closePickMap();
   revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
   const cur = STACK[STACK.length-1];
   const scr = SCREENS[cur.name] || SCREENS.home;
@@ -1024,9 +1026,12 @@ SCREENS.reddEdit = (argStr)=>{
     if(!r || r.deleted_at) return SCREENS.home();
   }else{
     const reach_uuid = carry.reach_uuid || (cur?cur.uuid:'');
+    // 地図から追加した場合は、その場所を最初から入れておく
+    const fromMap = validPt([a.lat, a.lon]);
     r = { uuid:uuid(), survey_uuid:sv, reach_uuid,
       redd_no: nextReddNo(sv, reach_uuid), observed_at: nowISO(),
-      latitude:'', longitude:'', gps_accuracy:'',
+      latitude: fromMap ? (+a.lat).toFixed(6) : '', longitude: fromMap ? (+a.lon).toFixed(6) : '',
+      gps_accuracy:'', position_source: fromMap ? '地図' : '',
       species: carry.species||'', species_basis:'', age_class:'', state:'',
       length_cm:'', width_cm:'', depth_cm:'', velocity_ms:'',
       substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
@@ -1058,12 +1063,22 @@ SCREENS.reddEdit = (argStr)=>{
       <div class="sect">位置</div>
       <div class="two">
         <label class="field"><span class="lab">緯度</span>
-          <input id="fLat" inputmode="decimal" value="${esc(r.latitude??'')}"></label>
+          <input id="fLat" inputmode="decimal" value="${esc(r.latitude??'')}" oninput="markPosManual()"></label>
         <label class="field"><span class="lab">経度</span>
-          <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}"></label>
+          <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}" oninput="markPosManual()"></label>
       </div>
-      <button class="btn" onclick="grabGps()">現在地を取り込む</button>
-      <div class="small muted" style="margin-top:6px" id="accOut">${r.gps_accuracy!==''&&r.gps_accuracy!=null?'誤差 約'+r.gps_accuracy+'m':'位置が取れなくても保存できます'}</div>
+      <div class="btn-grid">
+        <button class="btn" onclick="grabGps()">現在地を取り込む</button>
+        <button class="btn" id="pickMapBtn" onclick="togglePickMap('${sv}')">地図で位置を指定</button>
+      </div>
+      <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
+      <div id="pickMapBox" style="display:none; margin-top:10px">
+        <div id="pickMap"></div>
+        <div class="tiny muted" style="margin-top:6px">
+          地図をタップすると、その場所に点が置かれます。ピンを長押しして動かすこともできます。
+          薄い点は同じ調査で記録済みの産卵床です。
+        </div>
+      </div>
 
       <div class="sect">魚種・状態</div>
       <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
@@ -1133,11 +1148,13 @@ SCREENS.reddEdit = (argStr)=>{
     onMount:()=>{
       SCREENS._reddUuid = r.uuid;
       SCREENS._acc = (r.gps_accuracy!==''&&r.gps_accuracy!=null) ? r.gps_accuracy : null;
+      SCREENS._posSrc = r.position_source||'';
       SCREENS._photos = (r.photos||[]).slice();
       renderPhotoPanel();
       updateArea();
-      // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）
-      if(!editing) grabGps();
+      // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）。
+      // ただし地図から追加した時は、せっかく指定した場所をGPSで上書きしない
+      if(!editing && !validPt([a.lat, a.lon])) grabGps();
     }
   };
 };
@@ -1154,13 +1171,26 @@ function updateArea(){
   const a = reddArea(L,W);
   el.textContent = a==='' ? '—' : a.toFixed(3)+' m²';
 }
+/* ---------- 位置の決め方（GPS／地図／手入力） ---------- */
+// どうやって位置を決めたかを残す。GPSが荒れた記録を後で見分けられるようにするため
+function posLabel(r){
+  const src=r.position_source||'';
+  if(src==='地図') return '地図で指定した位置';
+  if(src==='手入力') return '手で入力した位置';
+  if(r.gps_accuracy!=='' && r.gps_accuracy!=null) return 'GPSの位置（誤差 約'+r.gps_accuracy+'m）';
+  return '位置が取れなくても保存できます';
+}
+function markPosManual(){
+  SCREENS._posSrc='手入力'; SCREENS._acc='';
+  const out=$('#accOut'); if(out) out.textContent='手で入力した位置';
+}
 function grabGps(){
   if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
   const out=$('#accOut'); if(out) out.textContent='位置を取得中…';
   navigator.geolocation.getCurrentPosition(p=>{
     lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
     fillGps();
-  }, ()=>{ if(out) out.textContent='位置を取れませんでした。手で入れるか、空欄のままでも保存できます'; },
+  }, ()=>{ if(out) out.textContent='位置を取れませんでした。地図で指定するか、空欄のままでも保存できます'; },
   {enableHighAccuracy:true, timeout:15000, maximumAge:0});
 }
 function fillGps(){
@@ -1169,7 +1199,79 @@ function fillGps(){
   if(la) la.value = lastFix.lat.toFixed(6);
   if(lo) lo.value = lastFix.lon.toFixed(6);
   SCREENS._acc = Math.round(lastFix.acc);
-  if(out) out.textContent = '誤差 約'+SCREENS._acc+'m';
+  SCREENS._posSrc = 'GPS';
+  if(out) out.textContent = 'GPSの位置（誤差 約'+SCREENS._acc+'m）';
+  if(PICKMAP) movePickMarker([lastFix.lat, lastFix.lon], true);
+}
+
+/* ---------- 入力画面の中に出す「位置を決める地図」 ---------- */
+let PICKMAP=null, PICKMARKER=null;
+function togglePickMap(sv){
+  if(PICKMAP){ closePickMap(); return; }
+  const box=$('#pickMapBox'); if(!box) return;
+  box.style.display='';
+  const b=$('#pickMapBtn'); if(b) b.textContent='地図を閉じる';
+  // 表示してからでないと地図の大きさが決まらないので、描画を1回ぶん待つ
+  setTimeout(()=>initPickMap(sv), 0);
+}
+function closePickMap(){
+  if(PICKMAP){ try{ PICKMAP.remove(); }catch(e){} }
+  PICKMAP=null; PICKMARKER=null;
+  const box=$('#pickMapBox'); if(box) box.style.display='none';
+  const b=$('#pickMapBtn'); if(b) b.textContent='地図で位置を指定';
+}
+function initPickMap(sv){
+  if(typeof L==='undefined'){ toast('地図を読み込めませんでした'); return; }
+  const lat=parseFloat($('#fLat').value), lon=parseFloat($('#fLon').value);
+  const here = validPt([lat,lon]) ? [lat,lon]
+             : (lastFix ? [lastFix.lat, lastFix.lon] : null);
+
+  PICKMAP = L.map('pickMap', { zoomControl:true });
+  const b = BASEMAPS[baseMapName()];
+  L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR}).addTo(PICKMAP);
+
+  // 目印として、同じ調査の区間の線と記録済みの産卵床を薄く出す
+  DB.reachesOf(sv).forEach(r=>{
+    const pts=(r.track||[]).filter(validPt);
+    if(pts.length>=2) L.polyline(pts, {color:'#4aa3dd', weight:3, opacity:.5}).addTo(PICKMAP);
+  });
+  const self = SCREENS._reddUuid;
+  DB.reddsOf(sv).forEach(r=>{
+    if(r.uuid===self) return;
+    const p=[parseFloat(r.latitude), parseFloat(r.longitude)];
+    if(!validPt(p)) return;
+    L.circleMarker(p, {radius:5, color:'#9aa8b4', weight:1, fillOpacity:.35})
+      .addTo(PICKMAP).bindTooltip(`No.${r.redd_no||'—'}`);
+  });
+  // 現在地（GPS）も薄く出す。ずれの大きさが目で見て分かるように精度の円つき
+  if(lastFix){
+    L.circle([lastFix.lat,lastFix.lon], {radius:Math.max(5,lastFix.acc), color:'#4aa3dd', weight:1, fillOpacity:.1}).addTo(PICKMAP);
+    L.circleMarker([lastFix.lat,lastFix.lon], {radius:5, color:'#fff', weight:2, fillColor:'#4aa3dd', fillOpacity:1})
+      .addTo(PICKMAP).bindTooltip('今いる場所（GPS）');
+  }
+
+  PICKMAP.setView(here || [43.5,142.5], here ? 18 : 9);
+  if(here) movePickMarker(here, false);
+  PICKMAP.on('click', e=>movePickMarker([e.latlng.lat, e.latlng.lng], false));
+}
+function movePickMarker(pt, recenter){
+  if(!PICKMAP) return;
+  if(!PICKMARKER){
+    PICKMARKER = L.marker(pt, {draggable:true}).addTo(PICKMAP);
+    PICKMARKER.on('dragend', ()=>{ const p=PICKMARKER.getLatLng(); applyPickPos([p.lat, p.lng]); });
+  }else{
+    PICKMARKER.setLatLng(pt);
+  }
+  if(recenter) PICKMAP.setView(pt, Math.max(PICKMAP.getZoom(), 18));
+  applyPickPos(pt);
+}
+function applyPickPos(pt){
+  const la=$('#fLat'), lo=$('#fLon'), out=$('#accOut');
+  if(la) la.value = (+pt[0]).toFixed(6);
+  if(lo) lo.value = (+pt[1]).toFixed(6);
+  SCREENS._acc = '';          // 地図で置いた点にGPSの誤差という考えは当てはまらない
+  SCREENS._posSrc = '地図';
+  if(out) out.textContent = '地図で指定した位置';
 }
 
 function collectReddForm(){
@@ -1205,6 +1307,7 @@ function saveRedd(u, sv, editing, cont){
   const prev = DB.get(DB.key.rd, u) || {};
   const rec = Object.assign({ uuid:u, survey_uuid:sv }, f,
     { gps_accuracy: SCREENS._acc!=null ? SCREENS._acc : (prev.gps_accuracy??''),
+      position_source: SCREENS._posSrc!=null ? SCREENS._posSrc : (prev.position_source??''),
       photos: (SCREENS._photos||[]).slice() });
   if(!DB.upsert(DB.key.rd, rec)) return;
   revokePhotoUrls();
@@ -1214,7 +1317,7 @@ function saveRedd(u, sv, editing, cont){
   SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species,
     substrate_main:f.substrate_main, substrate_sub:f.substrate_sub, cover:f.cover,
     water_temp_c:f.water_temp_c, temp_depth_cm:f.temp_depth_cm };
-  SCREENS._acc = null;
+  SCREENS._acc = null; SCREENS._posSrc = null;
   toast('保存しました');
   if(cont){ STACK.pop(); nav('reddEdit', JSON.stringify({sv})); }
   else goBack();
@@ -1455,9 +1558,11 @@ SCREENS.map = (sv)=>{
     sub:[{text:s.name}],
     html:`<div id="map"></div>
       <div class="sp"></div>
+      <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして産卵床を追加</button>
+      <div class="sp"></div>
       <div class="card" id="legend"><div class="small muted">凡例</div></div>
       <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、線＝歩いた区間、四角＝メモ。丸をタップすると記録を開けます。</div>`,
-    onMount:()=>drawMap(sv)
+    onMount:()=>{ MAP_ADD_MODE=false; drawMap(sv); }
   };
 };
 
@@ -1507,9 +1612,27 @@ function drawMap(sv){
   if(group.getLayers().length){
     try{ MAP.fitBounds(group.getBounds().pad(0.2), {maxZoom:17}); }catch(e){}
   }
+  // GPSがずれている時のために、地図をタップした場所で新しい記録を始められるようにする
+  MAP.on('click', e=>{
+    if(!MAP_ADD_MODE) return;
+    MAP_ADD_MODE=false;
+    nav('reddEdit', JSON.stringify({sv, lat:+e.latlng.lat.toFixed(6), lon:+e.latlng.lng.toFixed(6)}));
+  });
+
   addLocateControl();
   if(lastFix) showCurrentPos();
   renderLegend(sv);
+}
+
+let MAP_ADD_MODE=false;
+function toggleMapAdd(){
+  MAP_ADD_MODE = !MAP_ADD_MODE;
+  const b=$('#mapAddBtn');
+  if(b){
+    b.textContent = MAP_ADD_MODE ? '追加をやめる' : '＋ 地図をタップして産卵床を追加';
+    b.classList.toggle('primary', MAP_ADD_MODE);
+  }
+  if(MAP_ADD_MODE) toast('産卵床のある場所を地図でタップしてください');
 }
 
 function closeMapPopupAndEdit(sv, u){
@@ -1589,7 +1712,8 @@ function exportBase(surveys){
 
 /* ---------- 産卵床 ---------- */
 const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
-  'reach_id','reach_name','reach_length_m','redd_no','observed_at','latitude','longitude','gps_accuracy',
+  'reach_id','reach_name','reach_length_m','redd_no','observed_at','latitude','longitude',
+  'gps_accuracy','position_source',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
   'depth_cm','velocity_ms','substrate_main','substrate_sub','embeddedness','cover',
   'water_temp_c','intragravel_temp_c','temp_depth_cm',
@@ -1607,6 +1731,7 @@ function reddRows(surveys){
         reach_id:r.reach_uuid||'', reach_name:re?re.name:'', reach_length_m:re?reachLength(re):'',
         redd_no:r.redd_no, observed_at:r.observed_at,
         latitude:r.latitude, longitude:r.longitude, gps_accuracy:r.gps_accuracy,
+        position_source:r.position_source||'',
         species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
         length_cm:r.length_cm, width_cm:r.width_cm, area_m2:r.area_m2,
         depth_cm:r.depth_cm, velocity_ms:r.velocity_ms,
