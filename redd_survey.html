@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v6';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v7';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -168,7 +168,7 @@ function numVal(sel){ const el=$(sel); if(!el) return ''; const v=String(el.valu
    削除は deleted_at を立てる論理削除のみ。完全消去はゴミ箱から明示的に行う。
    ============================================================ */
 const DB = {
-  key:{ sv:'rd_surveys', re:'rd_reaches', rd:'rd_redds', nt:'rd_notes' },
+  key:{ sv:'rd_surveys', re:'rd_reaches', rd:'rd_redds', nt:'rd_notes', un:'rd_units' },
   load(k){ try{ const a=JSON.parse(localStorage.getItem(k)||'[]'); return Array.isArray(a)?a:[]; }
            catch(e){ return []; } },
   // バックアップ・整合性確認用。壊れていたら例外にして「空」と誤認させない
@@ -204,6 +204,8 @@ const DB = {
     .sort((a,b)=>String(b.observed_at||'').localeCompare(String(a.observed_at||''))); },
   notesOf(sv){ return this.alive(this.key.nt).filter(x=>x.survey_uuid===sv)
     .sort((a,b)=>String(b.recorded_at||'').localeCompare(String(a.recorded_at||''))); },
+  unitsOf(sv){ return this.alive(this.key.un).filter(x=>x.survey_uuid===sv)
+    .sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||''))); },
 };
 
 /* ============================================================
@@ -345,13 +347,16 @@ const OPT = {
   basis:      ['親魚確認','形状から推定','不明'],   // 種の判断根拠
   age:        ['新しい','やや古い','古い','不明'],  // 新旧
   state:      ['掘削中','完成','産卵後','不明'],
-  substrate:  ['砂','細礫','中礫','大礫','巨礫','岩盤'],
+  // 粒径区分。産卵床の底質と物理環境の河床材料で同じ区分を使う
+  substrate:  ['泥','砂','細礫','中礫','大礫','巨礫','岩盤'],
   riverForm:  ['早瀬','平瀬','淵','瀬頭'],           // 河川形態（どこに産んだか）
   embedded:   ['少','中','多'],                     // 埋没度
   cover:      ['無','植生','倒木','淵','岸際'],
   behavior:   ['ペア形成','掘削','産卵','ホバリング','闘争','静止','その他'],
   noteCat:    ['調査条件','河川状況','特記事項','次回課題','その他'],
 };
+// 粒径区分の目安（画面に小さく出す）
+const GRAIN_HINT = '泥 0.06mm未満／砂 0.06〜2mm／細礫 2〜16mm／中礫 16〜64mm／大礫 64〜256mm／巨礫 256mm以上／岩盤';
 
 /* ============================================================
    画面遷移
@@ -420,7 +425,7 @@ function segMultiVal(field){
    ============================================================ */
 SCREENS.home = ()=>{
   const list = DB.surveys();
-  const trashCount = ['sv','re','rd','nt'].reduce((a,k)=>a+DB.deleted(DB.key[k]).length, 0);
+  const trashCount = ['sv','re','rd','nt','un'].reduce((a,k)=>a+DB.deleted(DB.key[k]).length, 0);
   const cards = list.map(s=>{
     const nRedd = DB.reddsOf(s.uuid).length;
     const nReach = DB.reachesOf(s.uuid).length;
@@ -559,7 +564,7 @@ function deleteSurvey(u){
   const n = DB.reddsOf(u).length;
   if(!confirm(`「${s.name}」を削除しますか？\n産卵床 ${n} 件も一緒にゴミ箱へ入ります。`)) return;
   // 調査を消したら、ぶら下がる記録もまとめてゴミ箱へ（片方だけ残らないように）
-  [[DB.key.re,'reachesOf'],[DB.key.rd,'reddsOf'],[DB.key.nt,'notesOf']].forEach(([k,fn])=>{
+  [[DB.key.re,'reachesOf'],[DB.key.rd,'reddsOf'],[DB.key.nt,'notesOf'],[DB.key.un,'unitsOf']].forEach(([k,fn])=>{
     DB[fn](u).forEach(x=>DB.softDelete(k, x.uuid));
   });
   DB.softDelete(DB.key.sv, u);
@@ -682,7 +687,7 @@ function resumeTracking(){
    ============================================================ */
 SCREENS.survey = (u)=>{
   const s = DB.survey(u); if(!s) return SCREENS.home();
-  const redds = DB.reddsOf(u), reaches = DB.reachesOf(u), notes = DB.notesOf(u);
+  const redds = DB.reddsOf(u), reaches = DB.reachesOf(u), notes = DB.notesOf(u), units = DB.unitsOf(u);
   const started = s.status==='調査中', finished = s.status==='終了';
   const cur = activeReach(u);
 
@@ -727,6 +732,8 @@ SCREENS.survey = (u)=>{
                <button class="btn" onclick="endReach('${u}')">この区間を終了</button>
              </div>`
           : `<button class="btn big" onclick="startReach('${u}')">区間をスタート</button><div class="sp"></div>` }
+        <button class="btn" onclick="nav('unitEdit','${esc(JSON.stringify({sv:u}))}')">＋ 物理環境を記録</button>
+        <div class="sp"></div>
         <button class="btn" onclick="nav('noteEdit','${esc(JSON.stringify({sv:u}))}')">メモを追加</button>
       ` : '' }
 
@@ -734,6 +741,7 @@ SCREENS.survey = (u)=>{
       <div class="btn-grid">
         <button class="btn" onclick="nav('redds','${u}')">産卵床の一覧（${redds.length}）</button>
         <button class="btn" onclick="nav('reaches','${u}')">区間の一覧（${reaches.length}）</button>
+        <button class="btn" onclick="nav('units','${u}')">物理環境（${units.length}）</button>
         <button class="btn" onclick="nav('notes','${u}')">調査メモ（${notes.length}）</button>
         <button class="btn" onclick="nav('map','${u}')">地図で見る</button>
         <button class="btn" onclick="nav('summary','${u}')">集計を見る</button>
@@ -1513,6 +1521,254 @@ function deleteRedd(u){
 }
 
 /* ============================================================
+   物理環境（河川構造ごとの区間）
+   早瀬・平瀬・淵・瀬頭といったまとまりごとに、始点と終点を取り、
+   その間の代表水深・代表流速・河床材料を記録する。
+   産卵床の「点」の記録とは別物なので、別の一覧として持つ。
+   ============================================================ */
+function unitLength(u){
+  if(u.length_m_manual!=='' && u.length_m_manual!=null) return +u.length_m_manual;
+  return +u.length_m_auto || 0;
+}
+// 空欄を 0 と読み替えないための変換。空なら null を返す
+// （`+''` は 0 になるため、そのまま使うと未入力が「緯度0・経度0」として地図に出てしまう）
+function ptOf(lat, lon){
+  if(lat===''||lat==null||lon===''||lon==null) return null;
+  const p=[parseFloat(lat), parseFloat(lon)];
+  return validPt(p) ? p : null;
+}
+function unitPointsOk(u){ return !!(ptOf(u.start_lat,u.start_lon) && ptOf(u.end_lat,u.end_lon)); }
+// 割合の合計。100にならなくても保存はできるが、画面で気づけるようにする
+function grainTotal(pct){
+  return OPT.substrate.reduce((a,g)=>a + (num((pct||{})[g])||0), 0);
+}
+function grainMain(pct){
+  let best='', v=-1;
+  OPT.substrate.forEach(g=>{ const x=num((pct||{})[g]); if(x!=null && x>v){ v=x; best=g; } });
+  return v>0 ? best : '';
+}
+function unitAutoName(sv, form){
+  const n = DB.unitsOf(sv).filter(x=>x.river_form===form).length + 1;
+  return (form||'区間') + n;
+}
+
+SCREENS.units = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const list = DB.unitsOf(sv);
+  const cards = list.map(u=>{
+    const rep = [
+      num(u.depth_cm_rep)!=null ? `水深${u.depth_cm_rep}cm` : '',
+      num(u.velocity_ms_rep)!=null ? `流速${u.velocity_ms_rep}m/s` : '',
+      u.substrate_rep || grainMain(u.substrate_pct) || ''
+    ].filter(Boolean).join(' ／ ');
+    return `<div class="card tap" onclick="nav('unitEdit','${esc(JSON.stringify({sv, u:u.uuid}))}')">
+      <div class="row">
+        <div class="grow"><b>${esc(u.name||'（名称未設定）')}</b>
+          <span class="badge">${esc(u.river_form||'形態なし')}</span></div>
+        <div class="small muted">${unitLength(u)>0?fmtDist(unitLength(u)):'—'}</div>
+      </div>
+      <div class="small muted" style="margin-top:6px">${esc(rep||'代表値の記入なし')}</div>
+    </div>`;
+  }).join('');
+  return {
+    title:'物理環境の一覧',
+    sub:[{text:s.name},{text:`${list.length} 区間`}],
+    html:`
+      <button class="btn primary big" onclick="nav('unitEdit','${esc(JSON.stringify({sv}))}')">＋ 物理環境を記録</button>
+      <div class="sp"></div>
+      ${ list.length ? cards : `<div class="empty">まだ物理環境の記録がありません。</div>` }`
+  };
+};
+
+SCREENS.unitEdit = (argStr)=>{
+  const a = JSON.parse(argStr||'{}');
+  const sv = a.sv, editing = !!a.u;
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const cur = activeReach(sv);
+  const carry = SCREENS._unitCarry || {};
+  let u;
+  if(editing){ u = DB.get(DB.key.un, a.u); if(!u || u.deleted_at) return SCREENS.home(); }
+  else u = { uuid:uuid(), survey_uuid:sv, reach_uuid: cur?cur.uuid:'', name:'',
+             river_form: carry.river_form||'', started_at:nowISO(), ended_at:'',
+             start_lat:'', start_lon:'', end_lat:'', end_lon:'',
+             length_m_auto:'', length_m_manual:'', river_width_m:'',
+             depth_cm_rep:'', velocity_ms_rep:'', env_points:[],
+             substrate_rep:'', substrate_pct:{}, memo:'' };
+
+  const pct = u.substrate_pct||{};
+  const grainInputs = OPT.substrate.map(g=>`
+    <label class="field" style="margin-bottom:8px"><span class="lab">${esc(g)}（％）</span>
+      <input class="grainpct" data-grain="${esc(g)}" type="number" step="1" min="0" max="100"
+        inputmode="decimal" value="${esc(pct[g]??'')}" oninput="updateGrainTotal()"></label>`).join('');
+
+  return {
+    title: editing ? '物理環境の編集' : '物理環境の記録',
+    sub:[{text:s.name}],
+    html:`
+      <div class="sect">河川形態</div>
+      <label class="field"><span class="lab">どの構造か <span class="req">*</span></span>
+        ${segHtml('uForm', OPT.riverForm, u.river_form, false)}</label>
+      <label class="field"><span class="lab">名前（空欄なら「早瀬1」のように自動で付けます）</span>
+        <input id="uName" value="${esc(u.name||'')}" placeholder="自動"></label>
+
+      <div class="sect">区間（始点〜終点）</div>
+      <div class="btn-grid">
+        <button class="btn" onclick="unitMark('start')">ここを始点にする</button>
+        <button class="btn" onclick="unitMark('end')">ここを終点にする</button>
+      </div>
+      <div class="sp"></div>
+      <div class="two">
+        <label class="field"><span class="lab">始点 緯度</span>
+          <input id="uSLat" inputmode="decimal" value="${esc(u.start_lat??'')}" oninput="updateUnitLen()"></label>
+        <label class="field"><span class="lab">始点 経度</span>
+          <input id="uSLon" inputmode="decimal" value="${esc(u.start_lon??'')}" oninput="updateUnitLen()"></label>
+      </div>
+      <div class="two">
+        <label class="field"><span class="lab">終点 緯度</span>
+          <input id="uELat" inputmode="decimal" value="${esc(u.end_lat??'')}" oninput="updateUnitLen()"></label>
+        <label class="field"><span class="lab">終点 経度</span>
+          <input id="uELon" inputmode="decimal" value="${esc(u.end_lon??'')}" oninput="updateUnitLen()"></label>
+      </div>
+      <div class="card"><div class="row"><div class="grow small muted">始点と終点の直線距離</div>
+        <div style="font-weight:700" id="uLenOut">—</div></div></div>
+      <div class="two">
+        <label class="field"><span class="lab">区間長の手入力（m）※入れるとこちらを使います</span>
+          <input id="uLenM" type="number" step="1" inputmode="decimal" value="${esc(u.length_m_manual??'')}"
+            placeholder="蛇行している場合など"></label>
+        <label class="field"><span class="lab">川幅（m）</span>
+          <input id="uWidth" type="number" step="0.1" inputmode="decimal" value="${esc(u.river_width_m??'')}"></label>
+      </div>
+
+      <div class="sect">代表水深・代表流速</div>
+      <div class="two">
+        <label class="field"><span class="lab">代表水深（cm）</span>
+          <input id="uDep" type="number" step="1" inputmode="decimal" value="${esc(u.depth_cm_rep??'')}"></label>
+        <label class="field"><span class="lab">代表流速（m/s）</span>
+          <input id="uVel" type="number" step="0.01" inputmode="decimal" value="${esc(u.velocity_ms_rep??'')}"></label>
+      </div>
+      <div class="tiny muted" style="margin-bottom:8px">
+        そのまま代表値を入れても、下に測点を足して平均を入れても構いません。
+      </div>
+      <div id="envList"></div>
+      <div class="btn-grid">
+        <button class="btn" onclick="envAdd()">＋ 測点を追加</button>
+        <button class="btn" onclick="unitRepFromPoints()">測点の平均を代表値に入れる</button>
+      </div>
+
+      <div class="sect">河床材料</div>
+      <label class="field"><span class="lab">代表河床材料</span>
+        <span class="tiny muted" style="display:block; margin:-2px 0 6px">${GRAIN_HINT}</span>
+        ${segHtml('uSub', OPT.substrate, u.substrate_rep, true)}</label>
+      <div class="small muted" style="margin:10px 0 6px">粒径区分ごとの割合（分かる範囲で。全部でなくても構いません）</div>
+      <div class="two">${grainInputs}</div>
+      <div class="card"><div class="row"><div class="grow small muted">合計</div>
+        <div style="font-weight:700" id="grainTotalOut">—</div></div></div>
+
+      <div class="sect">その他</div>
+      <label class="field"><span class="lab">メモ</span>
+        <textarea id="uMemo">${esc(u.memo||'')}</textarea></label>
+
+      <button class="btn primary big" onclick="saveUnit('${u.uuid}','${sv}',${editing})">保存する</button>
+      ${ editing ? `<div class="sp"></div><button class="btn danger" onclick="deleteUnit('${u.uuid}')">この記録を削除</button>` : '' }
+    `,
+    onMount:()=>{
+      SCREENS._unitUuid = u.uuid;
+      SCREENS._env = envPoints(u);
+      renderEnvList();
+      updateUnitLen();
+      updateGrainTotal();
+    }
+  };
+};
+
+function unitMark(which){
+  if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
+  toast('位置を取得中…');
+  navigator.geolocation.getCurrentPosition(p=>{
+    lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+    const la = which==='start' ? $('#uSLat') : $('#uELat');
+    const lo = which==='start' ? $('#uSLon') : $('#uELon');
+    if(la) la.value = lastFix.lat.toFixed(6);
+    if(lo) lo.value = lastFix.lon.toFixed(6);
+    updateUnitLen();
+    toast((which==='start'?'始点':'終点')+'を記録しました（誤差 約'+Math.round(lastFix.acc)+'m）');
+  }, ()=>toast('位置を取れませんでした'), {enableHighAccuracy:true, timeout:15000, maximumAge:0});
+}
+function unitStraightLength(){
+  const s=[parseFloat($('#uSLat').value), parseFloat($('#uSLon').value)];
+  const e=[parseFloat($('#uELat').value), parseFloat($('#uELon').value)];
+  if(!validPt(s) || !validPt(e)) return null;
+  return Math.round(distMeters(s,e));
+}
+function updateUnitLen(){
+  const el=$('#uLenOut'); if(!el) return;
+  const d = unitStraightLength();
+  el.textContent = d==null ? '—' : fmtDist(d);
+}
+function unitRepFromPoints(){
+  envSync();
+  const fake = { env_points: SCREENS._env||[] };
+  const d = envMean(fake,'depth_cm'), v = envMean(fake,'velocity_ms');
+  if(d==='' && v===''){ toast('測点に水深・流速を入れてください'); return; }
+  if(d!=='' && $('#uDep')) $('#uDep').value = d;
+  if(v!=='' && $('#uVel')) $('#uVel').value = v;
+  toast('測点の平均を代表値に入れました');
+}
+function collectGrainPct(){
+  const out={};
+  $$('.grainpct').forEach(el=>{
+    const g = el.getAttribute('data-grain');
+    const v = numOf(el);
+    if(v!=='') out[g]=v;
+  });
+  return out;
+}
+function updateGrainTotal(){
+  const el=$('#grainTotalOut'); if(!el) return;
+  const pct = collectGrainPct();
+  const keys = Object.keys(pct);
+  if(!keys.length){ el.textContent='—'; el.style.color=''; return; }
+  const t = grainTotal(pct);
+  el.textContent = t+'％';
+  // 100からずれていたら気づけるように色を変える（保存は止めない）
+  el.style.color = Math.abs(t-100) < 0.01 ? 'var(--accent)' : 'var(--warn)';
+}
+function saveUnit(u, sv, editing){
+  const form = segVal('uForm');
+  if(!form){ toast('河川形態を選んでください'); return; }
+  envSync();
+  const prev = DB.get(DB.key.un, u) || {};
+  const name = ($('#uName').value||'').trim() || prev.name || unitAutoName(sv, form);
+  const rec = {
+    uuid:u, survey_uuid:sv,
+    reach_uuid: prev.reach_uuid || (activeReach(sv)||{}).uuid || '',
+    name, river_form:form,
+    started_at: prev.started_at || nowISO(), ended_at: nowISO(),
+    start_lat: numVal('#uSLat'), start_lon: numVal('#uSLon'),
+    end_lat: numVal('#uELat'), end_lon: numVal('#uELon'),
+    length_m_auto: unitStraightLength() ?? '',
+    length_m_manual: numVal('#uLenM'),
+    river_width_m: numVal('#uWidth'),
+    depth_cm_rep: numVal('#uDep'), velocity_ms_rep: numVal('#uVel'),
+    env_points: (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note),
+    substrate_rep: segVal('uSub'),
+    substrate_pct: collectGrainPct(),
+    memo: $('#uMemo').value||'',
+  };
+  if(!DB.upsert(DB.key.un, rec)) return;
+  SCREENS._unitCarry = { river_form:form };
+  SCREENS._env = null;
+  toast('保存しました');
+  goBack();
+}
+function deleteUnit(u){
+  if(!confirm('この物理環境の記録を削除しますか？')) return;
+  DB.softDelete(DB.key.un, u);
+  toast('ゴミ箱へ入れました');
+  goBack();
+}
+
+/* ============================================================
    調査メモ（産卵床とは別に、調査全体に紐づくメモ）
    ============================================================ */
 SCREENS.notes = (sv)=>{
@@ -1639,6 +1895,7 @@ SCREENS.summary = (sv)=>{
   const withFish = all.filter(r=>hasTarget(r,'親魚'));
   const fishOnly = withFish.filter(r=>!hasTarget(r,'産卵床'));
   const carcass = all.filter(r=>hasTarget(r,'ホッチャレ'));
+  const units = DB.unitsOf(sv);
   const rows = reachStats(sv);
   const totalLen = DB.reachesOf(sv).reduce((a,r)=>a+reachLength(r),0);
 
@@ -1704,6 +1961,27 @@ SCREENS.summary = (sv)=>{
         <div class="small" style="margin-top:6px">流速 ${statLine(allEnvValues(all,'velocity_ms'),'m/s',2)}</div>
         <div class="tiny muted" style="margin-top:6px">1つの記録に複数の測点がある場合、すべての測点をまとめた値です。</div>
       </div>
+
+      ${ units.length ? `
+      <div class="sect">物理環境（河川構造ごと）</div>
+      <div class="tablewrap"><table>
+        <tr><th>形態</th><th class="num">区間数</th><th class="num">延長</th><th class="num">代表水深</th><th class="num">代表流速</th><th>主な河床材料</th></tr>
+        ${OPT.riverForm.map(f=>{
+          const list = units.filter(x=>x.river_form===f);
+          if(!list.length) return '';
+          const len = list.reduce((a,x)=>a+unitLength(x), 0);
+          const d = list.map(x=>num(x.depth_cm_rep)).filter(v=>v!=null);
+          const v = list.map(x=>num(x.velocity_ms_rep)).filter(v=>v!=null);
+          const mats = countBy(list.map(x=>({m:x.substrate_rep||grainMain(x.substrate_pct)||'未記入'})),'m','未記入');
+          return `<tr><td>${esc(f)}</td><td class="num">${list.length}</td>
+            <td class="num">${len>0?fmtDist(len):'—'}</td>
+            <td class="num">${d.length?fmtNum(d.reduce((a,b)=>a+b,0)/d.length,0)+'cm':'—'}</td>
+            <td class="num">${v.length?fmtNum(v.reduce((a,b)=>a+b,0)/v.length,2)+'m/s':'—'}</td>
+            <td>${esc(mats.map(([k,n])=>`${k}${n>1?`(${n})`:''}`).join('・'))}</td></tr>`;
+        }).join('')}
+      </table></div>
+      <div class="tiny muted" style="margin-top:8px">代表水深・代表流速は、各区間の代表値を平均したものです。</div>
+      ` : '' }
 
       <div class="sect">水温</div>
       <div class="card">
@@ -1778,6 +2056,10 @@ function speciesColor(name){
   const i = list.indexOf(name);
   return SPECIES_COLORS[(i<0 ? list.length : i) % SPECIES_COLORS.length];
 }
+// 河川形態ごとの色（物理環境の線に使う）
+const FORM_COLORS = {'早瀬':'#e0a030','平瀬':'#4ec38a','淵':'#7a6fd0','瀬頭':'#e07050'};
+function formColor(f){ return FORM_COLORS[f] || '#9aa8b4'; }
+
 function ageOpacity(age){
   return age==='新しい' ? 0.95 : age==='やや古い' ? 0.6 : age==='古い' ? 0.2 : 0.45;
 }
@@ -1820,6 +2102,20 @@ function drawMap(sv){
     const pts = (r.track||[]).filter(validPt);
     L.polyline(pts, { color:'#4aa3dd', weight:4, opacity:.8 }).addTo(group)
       .bindPopup(`<b>${esc(r.name)}</b><br>区間長 ${fmtDist(reachLength(r))}`);
+  });
+
+  // 物理環境の区間を、河川形態ごとの色の太い線で重ねる
+  DB.unitsOf(sv).forEach(u=>{
+    const a=ptOf(u.start_lat,u.start_lon), b=ptOf(u.end_lat,u.end_lon);
+    if(!a || !b) return;
+    L.polyline([a,b], { color:formColor(u.river_form), weight:7, opacity:.75, dashArray:'1,0' })
+      .addTo(group)
+      .bindPopup(`<b>${esc(u.name||'')}</b>（${esc(u.river_form||'')}）<br>
+        区間長 ${fmtDist(unitLength(u))}<br>
+        ${esc([num(u.depth_cm_rep)!=null?`代表水深 ${u.depth_cm_rep}cm`:'',
+               num(u.velocity_ms_rep)!=null?`代表流速 ${u.velocity_ms_rep}m/s`:'',
+               u.substrate_rep||grainMain(u.substrate_pct)||''].filter(Boolean).join(' ／ '))}<br>
+        <a href="#" onclick="nav('unitEdit','${esc(JSON.stringify({sv, u:u.uuid}))}'); return false;">この記録を開く</a>`);
   });
 
   redds.forEach(r=>{
@@ -1925,7 +2221,10 @@ function renderLegend(sv){
   const age = OPT.age.map(a=>`<span class="badge">
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9aa8b4;opacity:${ageOpacity(a)};margin-right:6px"></span>${esc(a)}</span>`).join(' ');
   const kind = `<span class="badge">● 産卵床</span> <span class="badge">■ 親魚のみ</span> <span class="badge">✕ ホッチャレのみ</span>`;
+  const forms = OPT.riverForm.map(f=>`<span class="badge">
+      <span style="display:inline-block;width:16px;height:5px;background:${formColor(f)};margin-right:6px;vertical-align:middle"></span>${esc(f)}</span>`).join(' ');
   box.innerHTML = `<div class="small muted">記録の種類（形）</div><div style="margin:6px 0 10px">${kind}</div>
+    <div class="small muted">物理環境の区間（太い線の色）</div><div style="margin:6px 0 10px">${forms}</div>
     <div class="small muted">魚種（色）</div><div style="margin:6px 0 10px">${sp||'—'}</div>
     <div class="small muted">新旧（塗りの濃さ・産卵床のみ）</div><div style="margin-top:6px">${age}</div>`;
 }
@@ -2031,21 +2330,68 @@ function reachRows(surveys){
   return rows;
 }
 
+/* ---------- 物理環境（河川構造ごとの区間） ---------- */
+function unitCols(){
+  return ['survey_id','survey_name','survey_date','river_name','reach_name',
+    'unit_id','unit_name','river_form','started_at','ended_at',
+    'start_lat','start_lon','end_lat','end_lon',
+    'length_m_straight','length_m_manual','length_m_used','river_width_m',
+    'depth_cm_rep','velocity_ms_rep','env_point_count',
+    'substrate_rep','substrate_main_pct','substrate_pct_total']
+    .concat(OPT.substrate.map(g=>'pct_'+g))
+    .concat(['memo']);
+}
+function unitRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    const reaches = DB.reachesOf(s.uuid);
+    DB.unitsOf(s.uuid).forEach(u=>{
+      const re = reaches.find(x=>x.uuid===u.reach_uuid);
+      const pct = u.substrate_pct||{};
+      const row = { survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+        river_name:s.river_name, reach_name:re?re.name:'',
+        unit_id:u.uuid, unit_name:u.name, river_form:u.river_form,
+        started_at:u.started_at||'', ended_at:u.ended_at||'',
+        start_lat:u.start_lat??'', start_lon:u.start_lon??'', end_lat:u.end_lat??'', end_lon:u.end_lon??'',
+        length_m_straight:u.length_m_auto??'', length_m_manual:u.length_m_manual??'',
+        length_m_used:unitLength(u), river_width_m:u.river_width_m??'',
+        depth_cm_rep:u.depth_cm_rep??'', velocity_ms_rep:u.velocity_ms_rep??'',
+        env_point_count:envPoints(u).length,
+        substrate_rep:u.substrate_rep||'', substrate_main_pct:grainMain(pct),
+        substrate_pct_total: Object.keys(pct).length ? grainTotal(pct) : '',
+        memo:u.memo||'' };
+      OPT.substrate.forEach(g=>{ row['pct_'+g] = pct[g]??''; });
+      rows.push(row);
+    });
+  });
+  return rows;
+}
+
 /* ---------- 測点（水深・流速）を1点1行で ---------- */
+// 産卵床の記録にも物理環境にも測点が付くので、どちらのものかを parent_type で示す
 const ENVPOINT_COLS = ['survey_id','survey_name','survey_date','river_name','reach_name',
-  'redd_id','redd_no','record_type','river_form','point_no','point_note','depth_cm','velocity_ms'];
+  'parent_type','parent_id','parent_name','river_form','point_no','point_note','depth_cm','velocity_ms'];
 function envPointRows(surveys){
   const rows=[];
   surveys.forEach(s=>{
     const reaches = DB.reachesOf(s.uuid);
+    const push=(parent_type, id, name, form, list)=>{
+      list.forEach((p,i)=>rows.push({ survey_id:s.uuid, survey_name:s.name,
+        survey_date:fmtDate(s.survey_date), river_name:s.river_name,
+        reach_name:'', parent_type, parent_id:id, parent_name:name, river_form:form||'',
+        point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'' }));
+    };
     DB.reddsOf(s.uuid).forEach(r=>{
       const re = reaches.find(x=>x.uuid===r.reach_uuid);
-      envPoints(r).forEach((p,i)=>{
-        rows.push({ survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
-          river_name:s.river_name, reach_name:re?re.name:'',
-          redd_id:r.uuid, redd_no:r.redd_no, record_type:targetLabel(r), river_form:r.river_form||'',
-          point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'' });
-      });
+      const before = rows.length;
+      push('産卵床記録', r.uuid, `No.${r.redd_no??''} ${targetLabel(r)}`, r.river_form, envPoints(r));
+      for(let i=before;i<rows.length;i++) rows[i].reach_name = re?re.name:'';
+    });
+    DB.unitsOf(s.uuid).forEach(u=>{
+      const re = reaches.find(x=>x.uuid===u.reach_uuid);
+      const before = rows.length;
+      push('物理環境', u.uuid, u.name||'', u.river_form, envPoints(u));
+      for(let i=before;i<rows.length;i++) rows[i].reach_name = re?re.name:'';
     });
   });
   return rows;
@@ -2053,11 +2399,12 @@ function envPointRows(surveys){
 
 function exportCSV(surveys){
   const base = exportBase(surveys);
-  const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys);
-  if(!rr.length && !er.length){ toast('書き出すものがありません'); return; }
+  const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys), ur = unitRows(surveys);
+  if(!rr.length && !er.length && !ur.length){ toast('書き出すものがありません'); return; }
   // Excelで文字化けしないよう先頭にBOMを付ける
   if(rr.length) download(`${base}_redds.csv`, '﻿'+toCsv(REDD_COLS, rr), 'text/csv;charset=utf-8');
   if(er.length) download(`${base}_reaches.csv`, '﻿'+toCsv(REACH_COLS, er), 'text/csv;charset=utf-8');
+  if(ur.length) download(`${base}_habitat_units.csv`, '﻿'+toCsv(unitCols(), ur), 'text/csv;charset=utf-8');
   // 水深・流速は1つの記録に何点でも入るので、1点1行の表も別に出す
   if(ep.length) download(`${base}_env_points.csv`, '﻿'+toCsv(ENVPOINT_COLS, ep), 'text/csv;charset=utf-8');
   toast('CSVを書き出しました');
@@ -2089,7 +2436,21 @@ function exportGeoJSON(surveys){
     });
   });
 
-  if(!pts.length && !lines.length){ toast('位置のついた記録がありません'); return; }
+  // 物理環境は始点→終点の線として出す（QGISで河川構造ごとに見られる）
+  const units=[];
+  surveys.forEach(s=>{
+    unitRows([s]).forEach(row=>{
+      const a=ptOf(row.start_lat, row.start_lon), b=ptOf(row.end_lat, row.end_lon);
+      if(!a || !b) return;
+      units.push({ type:'Feature',
+        geometry:{ type:'LineString', coordinates:[[a[1],a[0]],[b[1],b[0]]] },
+        properties: unitCols().reduce((p,c)=>{ p[c]=row[c]; return p; }, {}) });
+    });
+  });
+  if(units.length) download(`${base}_habitat_units.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:units}, null, 1), 'application/geo+json');
+
+  if(!pts.length && !lines.length && !units.length){ toast('位置のついた記録がありません'); return; }
   if(pts.length) download(`${base}_redds.geojson`,
     JSON.stringify({type:'FeatureCollection', features:pts}, null, 1), 'application/geo+json');
   if(lines.length) download(`${base}_reaches.geojson`,
@@ -2152,7 +2513,7 @@ async function exportPhotoZip(surveys){
 }
 
 /* ---------- バックアップと復元 ---------- */
-const CORE_KEYS = ['sv','re','rd','nt'];
+const CORE_KEYS = ['sv','re','rd','nt','un'];
 function buildBackup(){
   const data={};
   CORE_KEYS.forEach(k=>{ data[DB.key[k]] = DB.loadRaw(DB.key[k]); });   // 消したものも含めて丸ごと
@@ -2246,6 +2607,7 @@ const TRASH_GROUPS = [
   { key:'re', label:'区間',   name:x=>x.name||'(区間)' },
   { key:'rd', label:'産卵床', name:x=>`No.${x.redd_no||'—'} ${x.species||'種不明'}` },
   { key:'nt', label:'メモ',   name:x=>(x.content||'').slice(0,30)||'(メモ)' },
+  { key:'un', label:'物理環境', name:x=>`${x.name||'(区間)'} ${x.river_form||''}` },
 ];
 SCREENS.trash = ()=>{
   const blocks = TRASH_GROUPS.map(g=>{
