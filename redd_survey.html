@@ -91,9 +91,11 @@
 
   /* 地図 */
   #map{height:calc(100vh - 300px); min-height:320px; border-radius:var(--radius); border:1px solid var(--line);}
-  #pickMap{height:340px; border-radius:var(--radius); border:1px solid var(--line);}
+  #pickMap{height:320px; border-radius:var(--radius); border:1px solid var(--line);}
+  .seg.basemap{margin-bottom:8px;}
+  .seg.basemap button{padding:6px 12px; font-size:14px;}
   .leaflet-container{background:#0d1218;}
-  .locate-btn{width:42px; height:42px; font-size:20px; line-height:1;
+  .locate-btn{padding:8px 12px; font-size:14px; font-weight:700; line-height:1;
     background:var(--panel); color:var(--fg); border:1px solid var(--line);
     border-radius:10px; cursor:pointer; box-shadow:0 1px 5px rgba(0,0,0,.4);}
   .locate-btn:active{background:var(--panel2);}
@@ -134,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v2';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v3';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -1067,18 +1069,15 @@ SCREENS.reddEdit = (argStr)=>{
         <label class="field"><span class="lab">経度</span>
           <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}" oninput="markPosManual()"></label>
       </div>
-      <div class="btn-grid">
-        <button class="btn" onclick="grabGps()">現在地を取り込む</button>
-        <button class="btn" id="pickMapBtn" onclick="togglePickMap('${sv}')">地図で位置を指定</button>
+      ${baseMapButtonsHtml('pickBase')}
+      <div id="pickMap"></div>
+      <div class="tiny muted" style="margin-top:6px">
+        地図をタップすると、その場所に赤い点が置かれます。点は長押しして動かせます。
+        青い丸は今いる場所（GPS）、薄い灰色の点は記録済みの産卵床です。
       </div>
+      <div class="sp"></div>
+      <button class="btn" onclick="grabGps()">現在地を取り込む</button>
       <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
-      <div id="pickMapBox" style="display:none; margin-top:10px">
-        <div id="pickMap"></div>
-        <div class="tiny muted" style="margin-top:6px">
-          地図をタップすると、その場所に点が置かれます。ピンを長押しして動かすこともできます。
-          薄い点は同じ調査で記録済みの産卵床です。
-        </div>
-      </div>
 
       <div class="sect">魚種・状態</div>
       <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
@@ -1152,6 +1151,7 @@ SCREENS.reddEdit = (argStr)=>{
       SCREENS._photos = (r.photos||[]).slice();
       renderPhotoPanel();
       updateArea();
+      initPickMap(sv);   // 位置の地図は常に出しておく
       // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）。
       // ただし地図から追加した時は、せっかく指定した場所をGPSで上書きしない
       if(!editing && !validPt([a.lat, a.lon])) grabGps();
@@ -1204,31 +1204,20 @@ function fillGps(){
   if(PICKMAP) movePickMarker([lastFix.lat, lastFix.lon], true);
 }
 
-/* ---------- 入力画面の中に出す「位置を決める地図」 ---------- */
+/* ---------- 入力画面に常に出しておく「位置を決める地図」 ---------- */
 let PICKMAP=null, PICKMARKER=null;
-function togglePickMap(sv){
-  if(PICKMAP){ closePickMap(); return; }
-  const box=$('#pickMapBox'); if(!box) return;
-  box.style.display='';
-  const b=$('#pickMapBtn'); if(b) b.textContent='地図を閉じる';
-  // 表示してからでないと地図の大きさが決まらないので、描画を1回ぶん待つ
-  setTimeout(()=>initPickMap(sv), 0);
-}
 function closePickMap(){
   if(PICKMAP){ try{ PICKMAP.remove(); }catch(e){} }
   PICKMAP=null; PICKMARKER=null;
-  const box=$('#pickMapBox'); if(box) box.style.display='none';
-  const b=$('#pickMapBtn'); if(b) b.textContent='地図で位置を指定';
 }
 function initPickMap(sv){
-  if(typeof L==='undefined'){ toast('地図を読み込めませんでした'); return; }
+  if(typeof L==='undefined' || !$('#pickMap')) return;
   const lat=parseFloat($('#fLat').value), lon=parseFloat($('#fLon').value);
   const here = validPt([lat,lon]) ? [lat,lon]
              : (lastFix ? [lastFix.lat, lastFix.lon] : null);
 
   PICKMAP = L.map('pickMap', { zoomControl:true });
-  const b = BASEMAPS[baseMapName()];
-  L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR}).addTo(PICKMAP);
+  applyBaseMap(PICKMAP, baseMapName());
 
   // 目印として、同じ調査の区間の線と記録済みの産卵床を薄く出す
   DB.reachesOf(sv).forEach(r=>{
@@ -1251,27 +1240,34 @@ function initPickMap(sv){
   }
 
   PICKMAP.setView(here || [43.5,142.5], here ? 18 : 9);
-  if(here) movePickMarker(here, false);
-  PICKMAP.on('click', e=>movePickMarker([e.latlng.lat, e.latlng.lng], false));
+  if(here) movePickMarker(here, false, '');   // 既にある位置を置き直しただけ。決め方は変えない
+  PICKMAP.on('click', e=>movePickMarker([e.latlng.lat, e.latlng.lng], false, '地図'));
+  // 画面に入れた直後は大きさが確定していないことがあるので測り直す
+  setTimeout(()=>{ if(PICKMAP) PICKMAP.invalidateSize(); }, 60);
 }
-function movePickMarker(pt, recenter){
+// source: '地図'（タップ・ドラッグ）／'GPS'（現在地の取り込み）／''（表示だけ動かす）
+function movePickMarker(pt, recenter, source){
   if(!PICKMAP) return;
   if(!PICKMARKER){
-    PICKMARKER = L.marker(pt, {draggable:true}).addTo(PICKMAP);
-    PICKMARKER.on('dragend', ()=>{ const p=PICKMARKER.getLatLng(); applyPickPos([p.lat, p.lng]); });
+    PICKMARKER = L.marker(pt, {draggable:true, icon:reddPinIcon()}).addTo(PICKMAP);
+    PICKMARKER.on('dragend', ()=>{ const p=PICKMARKER.getLatLng(); applyPickPos([p.lat, p.lng], '地図'); });
   }else{
     PICKMARKER.setLatLng(pt);
   }
   if(recenter) PICKMAP.setView(pt, Math.max(PICKMAP.getZoom(), 18));
-  applyPickPos(pt);
+  applyPickPos(pt, source);
 }
-function applyPickPos(pt){
+function applyPickPos(pt, source){
+  if(source===undefined) source='地図';   // 既定は地図で置いた扱い
   const la=$('#fLat'), lo=$('#fLon'), out=$('#accOut');
   if(la) la.value = (+pt[0]).toFixed(6);
   if(lo) lo.value = (+pt[1]).toFixed(6);
-  SCREENS._acc = '';          // 地図で置いた点にGPSの誤差という考えは当てはまらない
-  SCREENS._posSrc = '地図';
-  if(out) out.textContent = '地図で指定した位置';
+  // GPSで入れた時は精度と表示を fillGps 側が持つので、ここで上書きしない
+  if(source==='地図'){
+    SCREENS._acc = '';        // 地図で置いた点にGPSの誤差という考えは当てはまらない
+    SCREENS._posSrc = '地図';
+    if(out) out.textContent = '地図で指定した位置';
+  }
 }
 
 function collectReddForm(){
@@ -1534,6 +1530,38 @@ const BASEMAPS = {
 const GSI_ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html">国土地理院</a>';
 function baseMapName(){ const v=localStorage.getItem('rd_basemap'); return BASEMAPS[v]?v:'航空写真'; }
 
+// 背景地図の切り替え。
+// Leaflet 標準の切替コントロールは画像アイコン（images/layers.png）を使うが、
+// その画像を同梱していないため「？」に化けて何のボタンか分からなかった。
+// 画像に頼らず、地図名をそのまま出す文字ボタンにする。
+function baseMapButtonsHtml(){
+  const cur = baseMapName();
+  return `<div class="seg basemap">` + Object.keys(BASEMAPS).map(n=>
+    `<button type="button" class="${n===cur?'on':''}" onclick="switchBaseMap(this,'${n}')">${n}</button>`
+  ).join('') + `</div>`;
+}
+function applyBaseMap(map, name){
+  if(!map) return;
+  const b = BASEMAPS[name] || BASEMAPS['航空写真'];
+  if(map._baseLayer){ try{ map.removeLayer(map._baseLayer); }catch(e){} }
+  map._baseLayer = L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR}).addTo(map);
+  if(map._baseLayer.bringToBack) map._baseLayer.bringToBack();
+}
+function switchBaseMap(btn, name){
+  if(!BASEMAPS[name]) return;
+  localStorage.setItem('rd_basemap', name);
+  // 同じ画面に地図が2つ出ることはないが、両方に効かせておく
+  [MAP, PICKMAP].forEach(m=>applyBaseMap(m, name));
+  // 押したボタンだけでなく、画面内のすべての切替ボタンの表示を合わせる
+  $$('.seg.basemap button').forEach(b=>b.classList.toggle('on', b.textContent===name));
+}
+// 産卵床の位置を示す赤い点。画像を使わないので同梱ファイルが増えない
+function reddPinIcon(){
+  return L.divIcon({ className:'', iconSize:[26,26], iconAnchor:[13,13],
+    html:`<div style="width:20px;height:20px;border-radius:50%;background:#e05555;
+      border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4)"></div>` });
+}
+
 // 魚種は色、新旧は塗りの濃さで見分ける
 const SPECIES_COLORS = ['#e05555','#4aa3dd','#4ec38a','#e0a030','#b070d0','#3fc0c0','#d06090','#9aa8b4'];
 function speciesColor(name){
@@ -1556,7 +1584,8 @@ SCREENS.map = (sv)=>{
   return {
     title:'地図',
     sub:[{text:s.name}],
-    html:`<div id="map"></div>
+    html:`${baseMapButtonsHtml()}
+      <div id="map"></div>
       <div class="sp"></div>
       <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして産卵床を追加</button>
       <div class="sp"></div>
@@ -1574,14 +1603,7 @@ function drawMap(sv){
   const notes = DB.notesOf(sv).filter(n=>validPt([parseFloat(n.latitude), parseFloat(n.longitude)]));
 
   MAP = L.map('map', { zoomControl:true }).setView([43.5,142.5], 9);
-  const layers = {};
-  Object.keys(BASEMAPS).forEach(name=>{
-    const b = BASEMAPS[name];
-    layers[name] = L.tileLayer(b.url, { maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR });
-  });
-  layers[baseMapName()].addTo(MAP);
-  L.control.layers(layers, null, {collapsed:true}).addTo(MAP);
-  MAP.on('baselayerchange', e=>{ if(BASEMAPS[e.name]) localStorage.setItem('rd_basemap', e.name); });
+  applyBaseMap(MAP, baseMapName());
 
   const group = L.featureGroup().addTo(MAP);
 
@@ -1652,8 +1674,9 @@ function addLocateControl(){
   const C = L.Control.extend({
     options:{ position:'topleft' },
     onAdd(){
+      // 絵文字は端末によって「？」に化けるので文字で出す
       const b = L.DomUtil.create('button','locate-btn');
-      b.innerHTML='📍'; b.title='現在地へ';
+      b.textContent='現在地'; b.title='現在地へ移動';
       L.DomEvent.on(b,'click', L.DomEvent.stop).on(b,'click',()=>{
         if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
         toast('現在地を探しています…');
