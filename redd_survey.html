@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v4';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v5';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -346,6 +346,7 @@ const OPT = {
   age:        ['新しい','やや古い','古い','不明'],  // 新旧
   state:      ['掘削中','完成','産卵後','不明'],
   substrate:  ['砂','細礫','中礫','大礫','巨礫','岩盤'],
+  riverForm:  ['早瀬','平瀬','淵','瀬頭'],           // 河川形態（どこに産んだか）
   embedded:   ['少','中','多'],                     // 埋没度
   cover:      ['無','植生','倒木','淵','岸際'],
   behavior:   ['ペア形成','掘削','産卵','ホバリング','闘争','静止','その他'],
@@ -874,7 +875,7 @@ SCREENS.redds = (sv)=>{
         <div class="small muted">${fmtTime(r.observed_at)}</div>
       </div>
       <div class="small muted" style="margin-top:6px">
-        ${esc([r.species||'種不明',
+        ${esc([r.species||'種不明', r.river_form,
                hasTarget(r,'産卵床')?r.age_class:'', hasTarget(r,'産卵床')?r.state:'',
                size, fish, car].filter(Boolean).join(' ／ '))}
         ${ (r.photos||[]).length ? ` ／ 写真${r.photos.length}枚` : '' }
@@ -917,6 +918,8 @@ const VOICE_SEG_FIELDS = [
     aliases:{'あたらしい':'新しい','新規':'新しい','ややふるい':'やや古い','ふるい':'古い'} },
   { field:'state', options:()=>OPT.state,
     aliases:{'くっさくちゅう':'掘削中','掘ってる':'掘削中','かんせい':'完成','産卵済み':'産卵後'} },
+  { field:'riverForm', options:()=>OPT.riverForm,
+    aliases:{'はやせ':'早瀬','ひらせ':'平瀬','ふち':'淵','せがしら':'瀬頭','瀬の頭':'瀬頭'} },
   { field:'subMain', options:()=>OPT.substrate,
     aliases:{'すな':'砂','さいれき':'細礫','ちゅうれき':'中礫','たいれき':'大礫',
              'きょれき':'巨礫','がんばん':'岩盤'} },
@@ -1069,6 +1072,7 @@ SCREENS.reddEdit = (argStr)=>{
       redd_no: nextReddNo(sv, reach_uuid), observed_at: nowISO(),
       latitude: fromMap ? (+a.lat).toFixed(6) : '', longitude: fromMap ? (+a.lon).toFixed(6) : '',
       gps_accuracy:'', position_source: fromMap ? '地図' : '',
+      river_form: carry.river_form||'',
       species: carry.species||'', species_basis:'', age_class:'', state:'',
       length_cm:'', width_cm:'', depth_cm:'', velocity_ms:'',
       substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
@@ -1125,6 +1129,14 @@ SCREENS.reddEdit = (argStr)=>{
       <button class="btn" onclick="grabGps()">現在地を取り込む</button>
       <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
 
+      <div class="sect">河川形態</div>
+      <label class="field"><span class="lab">どこか</span>
+        <span class="tiny muted" style="display:block; margin:-2px 0 6px">
+          瀬頭＝瀬の入り口（流れが速くなり始めるところ）／早瀬＝波立つ速い流れ／
+          平瀬＝波立たない浅い流れ／淵＝深くて流れの緩いところ
+        </span>
+        ${segHtml('riverForm', OPT.riverForm, r.river_form, true)}</label>
+
       <div class="sect">魚種</div>
       <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
       <label class="field"><span class="lab">種の判断根拠</span>${segHtml('basis', OPT.basis, r.species_basis, true)}</label>
@@ -1153,7 +1165,12 @@ SCREENS.reddEdit = (argStr)=>{
       </div>
       <label class="field"><span class="lab">底質（主）</span>${segHtml('subMain', OPT.substrate, r.substrate_main, true)}</label>
       <label class="field"><span class="lab">底質（副）</span>${segHtml('subSub', OPT.substrate, r.substrate_sub, true)}</label>
-      <label class="field"><span class="lab">埋没度</span>${segHtml('embedded', OPT.embedded, r.embeddedness, true)}</label>
+      <label class="field"><span class="lab">埋没度</span>
+        <span class="tiny muted" style="display:block; margin:-2px 0 6px">
+          石のすき間が砂や泥でどれくらい埋まっているか。
+          少＝石がごろごろしてすき間がある／中＝石の下半分ほどが埋まる／多＝砂泥に埋もれ川底が平ら
+        </span>
+        ${segHtml('embedded', OPT.embedded, r.embeddedness, true)}</label>
       <label class="field"><span class="lab">被覆</span>${segHtml('cover', OPT.cover, r.cover, true)}</label>
 
       <div class="sect">水温</div>
@@ -1345,6 +1362,7 @@ function collectReddForm(){
     observed_at: isNaN(d) ? nowISO() : d.toISOString(),
     latitude: ($('#fLat').value||'').trim(),
     longitude: ($('#fLon').value||'').trim(),
+    river_form: segVal('riverForm'),
     species: segVal('species'),
     species_basis: segVal('basis'),
     age_class: segVal('age'),
@@ -1378,6 +1396,7 @@ function saveRedd(u, sv, editing, cont){
 
   // 次の記録に引き継ぐ値。同じ瀬では条件がほぼ同じなので入力を減らせる
   SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species, targets:f.record_targets.slice(),
+    river_form:f.river_form,
     substrate_main:f.substrate_main, substrate_sub:f.substrate_sub, cover:f.cover,
     water_temp_c:f.water_temp_c, temp_depth_cm:f.temp_depth_cm };
   SCREENS._acc = null; SCREENS._posSrc = null;
@@ -1573,6 +1592,7 @@ SCREENS.summary = (sv)=>{
       ${reachTable}
 
       ${listTable('記録の種類別', countBy(all.map(r=>({t:targetLabel(r)})),'t','—'))}
+      ${listTable('河川形態別（産卵床）', countBy(redds,'river_form','未記入'))}
       ${listTable('魚種別（産卵床）', countBy(redds,'species','種不明'))}
       ${listTable('新旧別（産卵床）', countBy(redds,'age_class','未記入'))}
       ${listTable('状態別（産卵床）', countBy(redds,'state','未記入'))}
@@ -1835,7 +1855,7 @@ function exportBase(surveys){
 const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
   'reach_id','reach_name','reach_length_m','redd_no','observed_at',
   'record_type','has_redd','has_fish','has_carcass',
-  'latitude','longitude','gps_accuracy','position_source',
+  'latitude','longitude','gps_accuracy','position_source','river_form',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
   'depth_cm','velocity_ms','substrate_main','substrate_sub','embeddedness','cover',
   'water_temp_c','intragravel_temp_c','temp_depth_cm',
@@ -1857,7 +1877,7 @@ function reddRows(surveys){
         has_fish:hasTarget(r,'親魚')?1:0,
         has_carcass:hasTarget(r,'ホッチャレ')?1:0,
         latitude:r.latitude, longitude:r.longitude, gps_accuracy:r.gps_accuracy,
-        position_source:r.position_source||'',
+        position_source:r.position_source||'', river_form:r.river_form||'',
         species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
         length_cm:r.length_cm, width_cm:r.width_cm, area_m2:r.area_m2,
         depth_cm:r.depth_cm, velocity_ms:r.velocity_ms,
