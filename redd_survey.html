@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v3';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v4';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -336,6 +336,8 @@ function speciesList(){
 function speciesSave(list){ localStorage.setItem('rd_species', JSON.stringify(list)); }
 
 const OPT = {
+  // 何を記録したか。組み合わせで選ぶ（産卵床のみ／産卵床＋親魚／親魚のみ／ホッチャレのみ…）
+  target:     ['産卵床','親魚','ホッチャレ'],
   weather:    ['晴','曇','雨','雪','みぞれ'],
   turbidity:  ['清','やや濁','濁'],
   waterLevel: ['平水','増水','減水'],
@@ -395,6 +397,21 @@ function segVal(field){
   const on = document.querySelector(`[data-seg="${field}"] button.on`);
   if(!on) return '';
   return on.textContent==='なし' ? '' : on.textContent;
+}
+
+/* 複数選べる版（記録の対象など）。押すたびに入り切りする */
+function pickSegMulti(btn, onChange){
+  btn.classList.toggle('on');
+  if(onChange) window[onChange] && window[onChange]();
+}
+function segMultiHtml(field, options, current, onChange){
+  const cur = current||[];
+  return `<div class="seg" data-segmulti="${field}">` + options.map(o=>
+    `<button type="button" class="${cur.indexOf(o)>=0?'on':''}"
+       onclick="pickSegMulti(this${onChange?`,'${onChange}'`:''})">${esc(o)}</button>`).join('') + `</div>`;
+}
+function segMultiVal(field){
+  return $$(`[data-segmulti="${field}"] button.on`).map(b=>b.textContent);
 }
 
 /* ============================================================
@@ -699,7 +716,7 @@ SCREENS.survey = (u)=>{
       ${ !started && !finished ? `<button class="btn primary big" onclick="startSurvey('${u}')">調査を開始する</button><div class="sp"></div>` : '' }
 
       ${ started ? `
-        <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 産卵床を記録</button>
+        <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>
         <div class="sp"></div>
         ${ cur
           ? `<div class="card">
@@ -845,15 +862,21 @@ SCREENS.redds = (sv)=>{
   const list = DB.reddsOf(sv);
   const cards = list.map(r=>{
     const rc = r.reach_uuid ? reachName(sv, r.reach_uuid) : '区間なし';
-    const size = (r.length_cm!==''&&r.width_cm!=='') ? `${r.length_cm}×${r.width_cm}cm` : '';
+    const size = hasTarget(r,'産卵床') && r.length_cm!=='' && r.width_cm!=='' ? `${r.length_cm}×${r.width_cm}cm` : '';
+    const fish = hasTarget(r,'親魚') && (num(r.female_n)||num(r.male_n))
+      ? `雌${num(r.female_n)||0}・雄${num(r.male_n)||0}` : '';
+    const car = hasTarget(r,'ホッチャレ') && num(r.carcass_n) ? `ホッチャレ${r.carcass_n}` : '';
     return `<div class="card tap" onclick="nav('reddEdit','${esc(JSON.stringify({sv, u:r.uuid}))}')">
       <div class="row">
         <div class="grow"><b>${esc(rc)} No.${esc(r.redd_no||'—')}</b>
+          <span class="badge">${esc(targetLabel(r))}</span>
           ${r.needs_review?'<span class="badge warn">要確認</span>':''}</div>
         <div class="small muted">${fmtTime(r.observed_at)}</div>
       </div>
       <div class="small muted" style="margin-top:6px">
-        ${esc([r.species||'種不明', r.age_class, r.state, size].filter(Boolean).join(' ／ '))}
+        ${esc([r.species||'種不明',
+               hasTarget(r,'産卵床')?r.age_class:'', hasTarget(r,'産卵床')?r.state:'',
+               size, fish, car].filter(Boolean).join(' ／ '))}
         ${ (r.photos||[]).length ? ` ／ 写真${r.photos.length}枚` : '' }
       </div>
     </div>`;
@@ -1005,6 +1028,18 @@ function voicePanelHtml(){
 /* ============================================================
    産卵床の記録
    ============================================================ */
+/* 何を記録したか。
+   record_targets を持たない古い記録は、中身から推定する（産卵床は必ず含める） */
+function recordTargets(r){
+  if(Array.isArray(r.record_targets) && r.record_targets.length) return r.record_targets.slice();
+  const t = ['産卵床'];
+  if(r.fish_present==='いる' || num(r.female_n) || num(r.male_n) || r.behavior) t.push('親魚');
+  if(num(r.carcass_n)) t.push('ホッチャレ');
+  return t;
+}
+function hasTarget(r, name){ return recordTargets(r).indexOf(name) >= 0; }
+function targetLabel(r){ return recordTargets(r).join('＋'); }
+
 function nextReddNo(sv, reachUuid){
   const list = DB.reddsOf(sv).filter(x=>(x.reach_uuid||'')===(reachUuid||''));
   return list.reduce((m,x)=>Math.max(m, parseInt(x.redd_no,10)||0), 0) + 1;
@@ -1039,7 +1074,7 @@ SCREENS.reddEdit = (argStr)=>{
       substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
       embeddedness:'', cover: carry.cover||'',
       water_temp_c: carry.water_temp_c??'', intragravel_temp_c:'', temp_depth_cm: carry.temp_depth_cm??'',
-      fish_present:'', female_n:'', male_n:'', behavior:'', carcass_n:'',
+      female_n:'', male_n:'', behavior:'', carcass_n:'',
       note:'', needs_review:false };
   }
 
@@ -1047,14 +1082,25 @@ SCREENS.reddEdit = (argStr)=>{
     reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
   ).join('');
 
+  const targets = editing ? recordTargets(r) : (carry.targets || ['産卵床']);
+
   return {
-    title: editing ? '産卵床の編集' : '産卵床の記録',
+    title: editing ? '記録の編集' : '記録の追加',
     sub:[{text:s.name}],
     html:`
+      <div class="sect">この記録は何ですか（いくつでも選べます）</div>
+      ${segMultiHtml('target', OPT.target, targets, 'onTargetChange')}
+      <div class="tiny muted" style="margin-top:6px">
+        例：産卵床だけ見つけた＝「産卵床」／産卵床の上に親魚がいた＝「産卵床」＋「親魚」／
+        産卵床は無いが親魚だけ見えた＝「親魚」／ホッチャレだけ＝「ホッチャレ」。
+        選んだものに合わせて、下の入力欄が切り替わります。
+      </div>
+      <div class="sp"></div>
+
       <div class="two">
         <label class="field"><span class="lab">区間</span>
           <select id="fReach" onchange="onReachChange('${sv}', ${editing})">${reachOpts}</select></label>
-        <label class="field"><span class="lab">産卵床番号</span>
+        <label class="field"><span class="lab">記録番号</span>
           <input id="fNo" type="number" step="1" inputmode="numeric" value="${esc(r.redd_no??'')}"></label>
       </div>
       <label class="field"><span class="lab">記録日時</span>
@@ -1079,9 +1125,12 @@ SCREENS.reddEdit = (argStr)=>{
       <button class="btn" onclick="grabGps()">現在地を取り込む</button>
       <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
 
-      <div class="sect">魚種・状態</div>
+      <div class="sect">魚種</div>
       <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
       <label class="field"><span class="lab">種の判断根拠</span>${segHtml('basis', OPT.basis, r.species_basis, true)}</label>
+
+      <div data-part="産卵床">
+      <div class="sect">産卵床の状態</div>
       <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
       <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
 
@@ -1116,9 +1165,10 @@ SCREENS.reddEdit = (argStr)=>{
       </div>
       <label class="field"><span class="lab">河床内を測った深さ（cm）</span>
         <input id="fTD" type="number" step="1" inputmode="decimal" value="${esc(r.temp_depth_cm??'')}"></label>
+      </div>
 
+      <div data-part="親魚">
       <div class="sect">親魚</div>
-      <label class="field"><span class="lab">親魚の有無</span>${segHtml('fish', ['いる','いない'], r.fish_present, true)}</label>
       <div class="two">
         <label class="field"><span class="lab">雌の数</span>
           <input id="fFem" type="number" step="1" inputmode="numeric" value="${esc(r.female_n??'')}"></label>
@@ -1126,8 +1176,13 @@ SCREENS.reddEdit = (argStr)=>{
           <input id="fMal" type="number" step="1" inputmode="numeric" value="${esc(r.male_n??'')}"></label>
       </div>
       <label class="field"><span class="lab">行動</span>${segHtml('behavior', OPT.behavior, r.behavior, true)}</label>
-      <label class="field"><span class="lab">ホッチャレ（死骸）の数</span>
+      </div>
+
+      <div data-part="ホッチャレ">
+      <div class="sect">ホッチャレ（死骸）</div>
+      <label class="field"><span class="lab">ホッチャレの数</span>
         <input id="fCar" type="number" step="1" inputmode="numeric" value="${esc(r.carcass_n??'')}"></label>
+      </div>
 
       <div class="sect">写真</div>
       ${photoPanelHtml()}
@@ -1151,6 +1206,7 @@ SCREENS.reddEdit = (argStr)=>{
       SCREENS._photos = (r.photos||[]).slice();
       renderPhotoPanel();
       updateArea();
+      onTargetChange();  // 選んでいる対象の欄だけ出す
       initPickMap(sv);   // 位置の地図は常に出しておく
       // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）。
       // ただし地図から追加した時は、せっかく指定した場所をGPSで上書きしない
@@ -1158,6 +1214,15 @@ SCREENS.reddEdit = (argStr)=>{
     }
   };
 };
+
+// 選んだ対象に関係する欄だけ出す。選んでいない欄は隠すが、値は消さない
+// （選び直せば元の入力がそのまま戻る）
+function onTargetChange(){
+  const sel = segMultiVal('target');
+  $$('[data-part]').forEach(el=>{
+    el.style.display = sel.indexOf(el.getAttribute('data-part'))>=0 ? '' : 'none';
+  });
+}
 
 // 区間を変えたら、その区間での次の番号に振り直す（新規記録のときだけ）
 function onReachChange(sv, editing){
@@ -1274,6 +1339,7 @@ function collectReddForm(){
   const when = $('#fWhen').value;
   const d = when ? new Date(when) : new Date();
   return {
+    record_targets: segMultiVal('target'),
     reach_uuid: $('#fReach').value||'',
     redd_no: numVal('#fNo'),
     observed_at: isNaN(d) ? nowISO() : d.toISOString(),
@@ -1288,7 +1354,7 @@ function collectReddForm(){
     substrate_main: segVal('subMain'), substrate_sub: segVal('subSub'),
     embeddedness: segVal('embedded'), cover: segVal('cover'),
     water_temp_c: numVal('#fWT'), intragravel_temp_c: numVal('#fIGT'), temp_depth_cm: numVal('#fTD'),
-    fish_present: segVal('fish'), female_n: numVal('#fFem'), male_n: numVal('#fMal'),
+    female_n: numVal('#fFem'), male_n: numVal('#fMal'),
     behavior: segVal('behavior'), carcass_n: numVal('#fCar'),
     note: $('#fNote').value||'',
     needs_review: !!($('#fReview')&&$('#fReview').checked),
@@ -1296,6 +1362,7 @@ function collectReddForm(){
 }
 function saveRedd(u, sv, editing, cont){
   const f = collectReddForm();
+  if(!f.record_targets.length){ toast('この記録が何かを選んでください（産卵床・親魚・ホッチャレ）'); return; }
   const lat=parseFloat(f.latitude), lon=parseFloat(f.longitude);
   if(f.latitude!=='' && (isNaN(lat)||Math.abs(lat)>90)){ toast('緯度の値を確かめてください'); return; }
   if(f.longitude!=='' && (isNaN(lon)||Math.abs(lon)>180)){ toast('経度の値を確かめてください'); return; }
@@ -1310,7 +1377,7 @@ function saveRedd(u, sv, editing, cont){
   SCREENS._photos = null;
 
   // 次の記録に引き継ぐ値。同じ瀬では条件がほぼ同じなので入力を減らせる
-  SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species,
+  SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species, targets:f.record_targets.slice(),
     substrate_main:f.substrate_main, substrate_sub:f.substrate_sub, cover:f.cover,
     water_temp_c:f.water_temp_c, temp_depth_cm:f.temp_depth_cm };
   SCREENS._acc = null; SCREENS._posSrc = null;
@@ -1425,40 +1492,49 @@ function countBy(list, field, fallback){
 function fmtNum(v, d){ return v==null ? '—' : (+v).toFixed(d==null?1:d); }
 
 // 区間ごとの集計。区間長は手入力があればそちらを使う
+// 産卵床の数は「産卵床」を含む記録だけを数える。
+// 親魚だけ・ホッチャレだけの記録を床数に混ぜると密度が過大になるため
 function reachStats(sv){
-  const redds = DB.reddsOf(sv);
-  const rows = DB.reachesOf(sv).map(r=>{
-    const list = redds.filter(x=>x.reach_uuid===r.uuid);
-    const len = reachLength(r);
-    return { name:r.name, len, n:list.length,
-      density: len>0 ? list.length/len*100 : null,
-      area: sumOf(list,'area_m2'),
-      species: countBy(list,'species','種不明') };
-  });
-  const noReach = redds.filter(x=>!x.reach_uuid);
-  if(noReach.length) rows.push({ name:'区間なし', len:0, n:noReach.length, density:null,
-    area:sumOf(noReach,'area_m2'), species:countBy(noReach,'species','種不明') });
+  const all = DB.reddsOf(sv);
+  const build = (name, list, len)=>{
+    const redds = list.filter(x=>hasTarget(x,'産卵床'));
+    return { name, len, n:redds.length,
+      density: len>0 ? redds.length/len*100 : null,
+      area: sumOf(redds,'area_m2'),
+      fishOnly: list.filter(x=>!hasTarget(x,'産卵床') && hasTarget(x,'親魚')).length,
+      carcass: sumOf(list.filter(x=>hasTarget(x,'ホッチャレ')),'carcass_n'),
+      species: countBy(redds,'species','種不明') };
+  };
+  const rows = DB.reachesOf(sv).map(r=>
+    build(r.name, all.filter(x=>x.reach_uuid===r.uuid), reachLength(r)));
+  const noReach = all.filter(x=>!x.reach_uuid);
+  if(noReach.length) rows.push(build('区間なし', noReach, 0));
   return rows;
 }
 
 SCREENS.summary = (sv)=>{
   const s = DB.survey(sv); if(!s) return SCREENS.home();
-  const redds = DB.reddsOf(sv);
+  const all = DB.reddsOf(sv);
+  const redds = all.filter(r=>hasTarget(r,'産卵床'));       // 産卵床を含む記録
+  const withFish = all.filter(r=>hasTarget(r,'親魚'));
+  const fishOnly = withFish.filter(r=>!hasTarget(r,'産卵床'));
+  const carcass = all.filter(r=>hasTarget(r,'ホッチャレ'));
   const rows = reachStats(sv);
   const totalLen = DB.reachesOf(sv).reduce((a,r)=>a+reachLength(r),0);
 
-  const wt = rangeOf(redds,'water_temp_c'), igt = rangeOf(redds,'intragravel_temp_c');
+  const wt = rangeOf(all,'water_temp_c'), igt = rangeOf(all,'intragravel_temp_c');
   const tempLine = (r,label)=> r ? `${label} ${fmtNum(r.min)}〜${fmtNum(r.max)}℃（${r.n}件）` : `${label} —`;
 
   const reachTable = rows.length ? `
     <div class="tablewrap"><table>
-      <tr><th>区間</th><th class="num">区間長</th><th class="num">床数</th><th class="num">密度<br>(件/100m)</th><th class="num">総面積</th></tr>
+      <tr><th>区間</th><th class="num">区間長</th><th class="num">産卵床</th><th class="num">密度<br>(件/100m)</th><th class="num">親魚のみ</th><th class="num">ホッチャレ</th></tr>
       ${rows.map(r=>`<tr>
         <td>${esc(r.name)}</td>
         <td class="num">${r.len>0?fmtDist(r.len):'—'}</td>
         <td class="num">${r.n}</td>
         <td class="num">${r.density==null?'—':fmtNum(r.density)}</td>
-        <td class="num">${r.area?fmtNum(r.area,2)+' m²':'—'}</td>
+        <td class="num">${r.fishOnly||'—'}</td>
+        <td class="num">${r.carcass||'—'}</td>
       </tr>`).join('')}
     </table></div>
     <div class="tiny muted" style="margin-top:8px">密度は「床数 ÷ 区間長 × 100」。区間長が未入力の区間は密度を出せません。</div>`
@@ -1478,6 +1554,10 @@ SCREENS.summary = (sv)=>{
         <div class="row"><div class="grow small muted">産卵床の合計</div>
           <div style="font-weight:700; font-size:20px">${redds.length} 件</div></div>
         <div class="small muted" style="margin-top:8px">
+          記録の内訳（全 ${all.length} 件）：産卵床 ${redds.length}（うち親魚を伴う ${withFish.length-fishOnly.length}）
+          ／ 親魚のみ ${fishOnly.length} ／ ホッチャレを含む ${carcass.length}
+        </div>
+        <div class="small muted" style="margin-top:8px">
           歩いた区間の合計 ${totalLen>0?fmtDist(totalLen):'—'}
           ${ totalLen>0 ? `／ 全体の密度 ${fmtNum(redds.length/totalLen*100)} 件/100m` : '' }
         </div>
@@ -1492,9 +1572,10 @@ SCREENS.summary = (sv)=>{
       <div class="sect">区間別</div>
       ${reachTable}
 
-      ${listTable('魚種別', countBy(redds,'species','種不明'))}
-      ${listTable('新旧別', countBy(redds,'age_class','未記入'))}
-      ${listTable('状態別', countBy(redds,'state','未記入'))}
+      ${listTable('記録の種類別', countBy(all.map(r=>({t:targetLabel(r)})),'t','—'))}
+      ${listTable('魚種別（産卵床）', countBy(redds,'species','種不明'))}
+      ${listTable('新旧別（産卵床）', countBy(redds,'age_class','未記入'))}
+      ${listTable('状態別（産卵床）', countBy(redds,'state','未記入'))}
 
       <div class="sect">水温</div>
       <div class="card">
@@ -1502,14 +1583,14 @@ SCREENS.summary = (sv)=>{
         <div class="small" style="margin-top:6px">${tempLine(igt,'河床内水温')}</div>
       </div>
 
-      <div class="sect">親魚</div>
+      <div class="sect">親魚・ホッチャレ</div>
       <div class="card">
-        <div class="small">雌 ${sumOf(redds,'female_n')} 尾 ／ 雄 ${sumOf(redds,'male_n')} 尾</div>
-        <div class="small" style="margin-top:6px">ホッチャレ ${sumOf(redds,'carcass_n')} 尾</div>
+        <div class="small">雌 ${sumOf(withFish,'female_n')} 尾 ／ 雄 ${sumOf(withFish,'male_n')} 尾（親魚の記録 ${withFish.length} 件）</div>
+        <div class="small" style="margin-top:6px">ホッチャレ ${sumOf(carcass,'carcass_n')} 尾（${carcass.length} 件）</div>
       </div>
 
       <div class="sect">確認が必要な記録</div>
-      <div class="card"><div class="small">要確認 ${redds.filter(r=>r.needs_review).length} 件 ／ 魚種が未記入 ${redds.filter(r=>!r.species).length} 件</div></div>
+      <div class="card"><div class="small">要確認 ${all.filter(r=>r.needs_review).length} 件 ／ 魚種が未記入 ${all.filter(r=>!r.species).length} 件</div></div>
 
       <div class="tiny muted" style="margin-top:14px">
         同じ産卵床を重ねて数えている可能性があります。合計の床数がそのまま産卵尾数を表すわけではありません。
@@ -1587,10 +1668,10 @@ SCREENS.map = (sv)=>{
     html:`${baseMapButtonsHtml()}
       <div id="map"></div>
       <div class="sp"></div>
-      <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして産卵床を追加</button>
+      <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして記録を追加</button>
       <div class="sp"></div>
       <div class="card" id="legend"><div class="small muted">凡例</div></div>
-      <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、線＝歩いた区間、四角＝メモ。丸をタップすると記録を開けます。</div>`,
+      <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、四角＝親魚のみ、✕＝ホッチャレのみ、線＝歩いた区間、オレンジの四角＝メモ。タップすると記録を開けます。</div>`,
     onMount:()=>{ MAP_ADD_MODE=false; drawMap(sv); }
   };
 };
@@ -1615,13 +1696,28 @@ function drawMap(sv){
 
   redds.forEach(r=>{
     const col = speciesColor(r.species);
-    const size = (r.length_cm!==''&&r.width_cm!=='') ? `${r.length_cm}×${r.width_cm}cm` : '';
-    L.circleMarker([parseFloat(r.latitude), parseFloat(r.longitude)],
-      { radius:8, color:col, weight:2, fillColor:col, fillOpacity:ageOpacity(r.age_class) })
-      .addTo(group)
-      .bindPopup(`<b>${esc(r.reach_uuid?reachName(sv,r.reach_uuid):'区間なし')} No.${esc(r.redd_no||'—')}</b><br>
-        ${esc([r.species||'種不明', r.age_class, r.state, size].filter(Boolean).join(' ／ '))}<br>
-        <a href="#" onclick="closeMapPopupAndEdit('${sv}','${r.uuid}'); return false;">この記録を開く</a>`);
+    const pos = [parseFloat(r.latitude), parseFloat(r.longitude)];
+    const size = hasTarget(r,'産卵床') && r.length_cm!=='' && r.width_cm!=='' ? `${r.length_cm}×${r.width_cm}cm` : '';
+    const popup = `<b>${esc(r.reach_uuid?reachName(sv,r.reach_uuid):'区間なし')} No.${esc(r.redd_no||'—')}</b>
+      <br>${esc(targetLabel(r))}<br>
+      ${esc([r.species||'種不明', hasTarget(r,'産卵床')?r.age_class:'', hasTarget(r,'産卵床')?r.state:'', size]
+            .filter(Boolean).join(' ／ '))}<br>
+      <a href="#" onclick="closeMapPopupAndEdit('${sv}','${r.uuid}'); return false;">この記録を開く</a>`;
+
+    // 産卵床＝丸、親魚のみ＝四角、ホッチャレのみ＝×。種類が形で分かるようにする
+    let layer;
+    if(hasTarget(r,'産卵床')){
+      layer = L.circleMarker(pos, { radius:8, color:col, weight:2, fillColor:col,
+                                    fillOpacity:ageOpacity(r.age_class) });
+    }else if(hasTarget(r,'親魚')){
+      layer = L.marker(pos, { icon: L.divIcon({ className:'', iconSize:[18,18], iconAnchor:[9,9],
+        html:`<div style="width:14px;height:14px;background:${col};border:2px solid #fff"></div>` }) });
+    }else{
+      layer = L.marker(pos, { icon: L.divIcon({ className:'', iconSize:[18,18], iconAnchor:[9,9],
+        html:`<div style="color:#fff;font-weight:700;font-size:15px;line-height:14px;
+          text-shadow:0 0 3px #000">✕</div>` }) });
+    }
+    layer.addTo(group).bindPopup(popup);
   });
 
   notes.forEach(n=>{
@@ -1651,7 +1747,7 @@ function toggleMapAdd(){
   MAP_ADD_MODE = !MAP_ADD_MODE;
   const b=$('#mapAddBtn');
   if(b){
-    b.textContent = MAP_ADD_MODE ? '追加をやめる' : '＋ 地図をタップして産卵床を追加';
+    b.textContent = MAP_ADD_MODE ? '追加をやめる' : '＋ 地図をタップして記録を追加';
     b.classList.toggle('primary', MAP_ADD_MODE);
   }
   if(MAP_ADD_MODE) toast('産卵床のある場所を地図でタップしてください');
@@ -1700,8 +1796,10 @@ function renderLegend(sv){
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${speciesColor(n==='種不明'?'':n)};margin-right:6px"></span>${esc(n)}</span>`).join(' ');
   const age = OPT.age.map(a=>`<span class="badge">
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9aa8b4;opacity:${ageOpacity(a)};margin-right:6px"></span>${esc(a)}</span>`).join(' ');
-  box.innerHTML = `<div class="small muted">魚種</div><div style="margin:6px 0 10px">${sp||'—'}</div>
-    <div class="small muted">新旧（塗りの濃さ）</div><div style="margin-top:6px">${age}</div>`;
+  const kind = `<span class="badge">● 産卵床</span> <span class="badge">■ 親魚のみ</span> <span class="badge">✕ ホッチャレのみ</span>`;
+  box.innerHTML = `<div class="small muted">記録の種類（形）</div><div style="margin:6px 0 10px">${kind}</div>
+    <div class="small muted">魚種（色）</div><div style="margin:6px 0 10px">${sp||'—'}</div>
+    <div class="small muted">新旧（塗りの濃さ・産卵床のみ）</div><div style="margin-top:6px">${age}</div>`;
 }
 
 /* ============================================================
@@ -1735,12 +1833,13 @@ function exportBase(surveys){
 
 /* ---------- 産卵床 ---------- */
 const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
-  'reach_id','reach_name','reach_length_m','redd_no','observed_at','latitude','longitude',
-  'gps_accuracy','position_source',
+  'reach_id','reach_name','reach_length_m','redd_no','observed_at',
+  'record_type','has_redd','has_fish','has_carcass',
+  'latitude','longitude','gps_accuracy','position_source',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
   'depth_cm','velocity_ms','substrate_main','substrate_sub','embeddedness','cover',
   'water_temp_c','intragravel_temp_c','temp_depth_cm',
-  'fish_present','female_n','male_n','behavior','carcass_n',
+  'female_n','male_n','behavior','carcass_n',
   'needs_review','note','photo_files'];
 function reddRows(surveys){
   const rows=[];
@@ -1753,6 +1852,10 @@ function reddRows(surveys){
         river_name:s.river_name, water_system:s.water_system, investigator:s.investigator,
         reach_id:r.reach_uuid||'', reach_name:re?re.name:'', reach_length_m:re?reachLength(re):'',
         redd_no:r.redd_no, observed_at:r.observed_at,
+        record_type:targetLabel(r),
+        has_redd:hasTarget(r,'産卵床')?1:0,
+        has_fish:hasTarget(r,'親魚')?1:0,
+        has_carcass:hasTarget(r,'ホッチャレ')?1:0,
         latitude:r.latitude, longitude:r.longitude, gps_accuracy:r.gps_accuracy,
         position_source:r.position_source||'',
         species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
@@ -1761,7 +1864,7 @@ function reddRows(surveys){
         substrate_main:r.substrate_main, substrate_sub:r.substrate_sub,
         embeddedness:r.embeddedness, cover:r.cover,
         water_temp_c:r.water_temp_c, intragravel_temp_c:r.intragravel_temp_c, temp_depth_cm:r.temp_depth_cm,
-        fish_present:r.fish_present, female_n:r.female_n, male_n:r.male_n,
+        female_n:r.female_n, male_n:r.male_n,
         behavior:r.behavior, carcass_n:r.carcass_n,
         needs_review:r.needs_review?1:0, note:r.note,
         photo_files:(r.photos||[]).map((p,i)=>photoFilename(r,i,p)).join(';'),
