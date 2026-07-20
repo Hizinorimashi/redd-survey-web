@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="90" fill="#0a0e14"/>
+  <!-- 流れ -->
+  <path d="M22 160 Q128 118 256 160 T490 160" stroke="#1d3a52" stroke-width="19" fill="none" stroke-linecap="round"/>
+  <path d="M22 400 Q128 358 256 400 T490 400" stroke="#1d3a52" stroke-width="19" fill="none" stroke-linecap="round"/>
+  <!-- 産卵床（掘られた窪みと盛り上がり） -->
+  <ellipse cx="256" cy="288" rx="165" ry="80" fill="#12202c" stroke="#2f6f9e" stroke-width="11"/>
+  <ellipse cx="208" cy="283" rx="80" ry="45" fill="#0a1620" stroke="#2f6f9e" stroke-width="8"/>
+  <!-- 礫 -->
+  <circle cx="336" cy="266" r="24" fill="#57a9d6"/>
+  <circle cx="381" cy="299" r="17" fill="#3d87b4"/>
+  <circle cx="320" cy="317" r="15" fill="#3d87b4"/>
+  <!-- 親魚 -->
+  <path d="M117 192 q64 -35 128 0 q-64 35 -128 0z" fill="#4ec38a"/>
+  <path d="M117 192 l-35 -24 v48z" fill="#4ec38a"/>
+  <circle cx="213" cy="192" r="8" fill="#0a0e14"/>
+</svg>

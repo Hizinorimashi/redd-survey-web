@@ -1,0 +1,1910 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0e14">
+<title>産卵床調査記録</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon-192.svg">
+<link rel="stylesheet" href="./leaflet.css">
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#121a22; --panel2:#1a242e; --line:#2a3844;
+    --fg:#e6eef5; --muted:#8496a6; --accent:#4aa3dd; --accent2:#2f6f9e;
+    --warn:#e0a030; --danger:#d05555; --chip:#1c2a36;
+    --radius:14px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; padding:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
+    font-size:16px; line-height:1.5; overscroll-behavior:none;}
+  body{padding-bottom:env(safe-area-inset-bottom);}
+  h1,h2,h3{margin:0 0 .4em;}
+  a{color:var(--accent);}
+  button{font-family:inherit; font-size:16px;}
+  .app{max-width:900px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column;}
+
+  /* ヘッダー */
+  header{position:sticky; top:0; z-index:500; background:var(--panel);
+    border-bottom:1px solid var(--line); padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;}
+  .hbar{display:flex; align-items:center; gap:10px;}
+  .htitle{font-weight:700; font-size:18px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .back{background:none; border:none; color:var(--accent); font-size:16px; padding:6px 4px; cursor:pointer;}
+  .hsub{display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; font-size:13px; color:var(--muted);}
+  .hsub .pill{background:var(--chip); border:1px solid var(--line); border-radius:20px; padding:2px 10px;}
+  .pill.ok{color:var(--accent);} .pill.warn{color:var(--warn);} .pill.off{color:var(--muted);}
+
+  main{flex:1; padding:14px; padding-bottom:90px;}
+
+  /* カード・リスト */
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px; margin-bottom:12px;}
+  .card.tap{cursor:pointer;} .card.tap:active{background:var(--panel2);}
+  .row{display:flex; align-items:center; gap:10px;}
+  .grow{flex:1;}
+  .muted{color:var(--muted);} .small{font-size:13px;} .tiny{font-size:12px;}
+  .badge{display:inline-block; border-radius:20px; padding:2px 10px; font-size:12px; background:var(--chip); border:1px solid var(--line);}
+  .badge.status-未開始{color:var(--muted);}
+  .badge.status-調査中{color:var(--accent); border-color:var(--accent2);}
+  .badge.status-終了{color:var(--muted);}
+  .badge.warn{color:var(--warn);}
+  .sp{height:8px;}
+  .empty{text-align:center; color:var(--muted); padding:34px 10px; font-size:15px;}
+
+  /* ボタン */
+  .btn{display:inline-flex; align-items:center; justify-content:center; gap:8px;
+    background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:12px; padding:12px 16px; cursor:pointer; width:100%; text-align:center;}
+  .btn:active{background:var(--panel);}
+  .btn.primary{background:var(--accent2); border-color:var(--accent); color:#fff; font-weight:700;}
+  .btn.ghost{background:none;}
+  .btn.danger{color:var(--danger); border-color:#5a2e2e;}
+  .btn.big{font-size:18px; padding:18px; font-weight:700;}
+  .btn-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .btn-grid.one{grid-template-columns:1fr;}
+
+  /* フォーム */
+  label.field{display:block; margin-bottom:14px;}
+  label.field > .lab{display:block; font-size:13px; color:var(--muted); margin-bottom:5px;}
+  input,select,textarea{width:100%; background:var(--panel2); color:var(--fg);
+    border:1px solid var(--line); border-radius:10px; padding:11px 12px; font-size:16px;}
+  textarea{min-height:70px; resize:vertical;}
+  input:focus,select:focus,textarea:focus{outline:none; border-color:var(--accent);}
+  .req{color:var(--accent);}
+  .seg{display:flex; flex-wrap:wrap; gap:8px;}
+  .seg button{background:var(--panel2); border:1px solid var(--line); color:var(--muted);
+    border-radius:20px; padding:8px 14px; cursor:pointer;}
+  .seg button.on{background:var(--accent2); border-color:var(--accent); color:#fff;}
+  .two{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .sect{font-size:13px; color:var(--muted); font-weight:700; letter-spacing:.04em;
+    margin:20px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line);}
+
+  /* 集計テーブル */
+  table{width:100%; border-collapse:collapse; font-size:14px;}
+  th,td{text-align:left; padding:8px 6px; border-bottom:1px solid var(--line);}
+  th{color:var(--muted); font-weight:600;}
+  td.num,th.num{text-align:right;}
+  .tablewrap{overflow-x:auto; -webkit-overflow-scrolling:touch;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:6px 12px;}
+
+  /* 地図 */
+  #map{height:calc(100vh - 300px); min-height:320px; border-radius:var(--radius); border:1px solid var(--line);}
+  .leaflet-container{background:#0d1218;}
+  .locate-btn{width:42px; height:42px; font-size:20px; line-height:1;
+    background:var(--panel); color:var(--fg); border:1px solid var(--line);
+    border-radius:10px; cursor:pointer; box-shadow:0 1px 5px rgba(0,0,0,.4);}
+  .locate-btn:active{background:var(--panel2);}
+  .leaflet-popup-content{color:#111;}
+
+  /* 写真 */
+  .mediagrid{margin-top:10px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px;}
+  .mediathumb{position:relative; width:100%; aspect-ratio:1/1; background:var(--panel2);
+    border:1px solid var(--line); border-radius:10px; overflow:hidden;}
+  .mediathumb img{width:100%; height:100%; object-fit:cover; display:block;}
+  .mediadel{position:absolute; top:4px; right:4px; width:26px; height:26px; line-height:1;
+    background:rgba(0,0,0,.65); color:#fff; border:none; border-radius:50%; font-size:15px; cursor:pointer;}
+
+  /* トースト */
+  #toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+    background:#000; color:#fff; padding:11px 18px; border-radius:24px; font-size:14px;
+    opacity:0; transition:opacity .25s; pointer-events:none; z-index:2000; max-width:90%;}
+  #toast.show{opacity:.94;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="hbar">
+      <button class="back" id="backBtn" onclick="goBack()" style="display:none">‹ 戻る</button>
+      <div class="htitle" id="title">産卵床調査記録</div>
+    </div>
+    <div class="hsub" id="sub"></div>
+  </header>
+  <main id="main"></main>
+</div>
+<div id="toast"></div>
+
+<script src="./leaflet.js"></script>
+<script>
+/* ============================================================
+   産卵床調査記録アプリ
+   サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
+   保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
+   ============================================================ */
+const APP_VERSION = 'v1';   // sw.js の CACHE 名と揃える
+
+/* ---------- 小道具 ---------- */
+const $  = (s,r)=> (r||document).querySelector(s);
+const $$ = (s,r)=> Array.from((r||document).querySelectorAll(s));
+function uuid(){
+  if(crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{
+    const r=Math.random()*16|0; return (c==='x'?r:(r&0x3|0x8)).toString(16); });
+}
+function nowISO(){ return new Date().toISOString(); }
+function pad2(n){ return String(n).padStart(2,'0'); }
+function localDatetimeValue(d){ d=d||new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+function dateValue(d){ d=d||new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+function fmtDate(s){ if(!s) return '—'; return String(s).slice(0,10); }
+function fmtTime(s){ if(!s) return '—'; const d=new Date(s); if(isNaN(d)) return '—';
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'),2400); }
+// 数値入力の取り出し。空欄は '' のまま返す（0 と未入力を区別するため）
+function numVal(sel){ const el=$(sel); if(!el) return ''; const v=String(el.value).trim();
+  if(v==='') return ''; const n=parseFloat(v); return isNaN(n)?'':n; }
+
+/* ============================================================
+   保存層（localStorage）
+   キーの頭は rd_ 。同じ場所に別アプリ（鳥類調査等）があってもデータが混ざらないようにする。
+   削除は deleted_at を立てる論理削除のみ。完全消去はゴミ箱から明示的に行う。
+   ============================================================ */
+const DB = {
+  key:{ sv:'rd_surveys', re:'rd_reaches', rd:'rd_redds', nt:'rd_notes' },
+  load(k){ try{ const a=JSON.parse(localStorage.getItem(k)||'[]'); return Array.isArray(a)?a:[]; }
+           catch(e){ return []; } },
+  // バックアップ・整合性確認用。壊れていたら例外にして「空」と誤認させない
+  loadRaw(k){ const a=JSON.parse(localStorage.getItem(k)||'[]');
+    if(!Array.isArray(a)) throw new Error('broken: '+k); return a; },
+  save(k,a){
+    try{ localStorage.setItem(k, JSON.stringify(a)); return true; }
+    catch(e){ toast('端末の保存容量がいっぱいです。書き出してから古い調査を消してください'); return false; }
+  },
+  upsert(k,obj){
+    const a=this.load(k); const i=a.findIndex(x=>x.uuid===obj.uuid);
+    obj.updated_at=nowISO();
+    if(i>=0){ a[i]=Object.assign({},a[i],obj); } else { obj.created_at=obj.created_at||nowISO(); a.push(obj); }
+    return this.save(k,a) ? obj : null;
+  },
+  get(k,u){ return this.load(k).find(x=>x.uuid===u) || null; },
+  softDelete(k,u){ const a=this.load(k); const o=a.find(x=>x.uuid===u);
+    if(o){ o.deleted_at=nowISO(); o.updated_at=nowISO(); this.save(k,a); } },
+  restore(k,u){ const a=this.load(k); const o=a.find(x=>x.uuid===u);
+    if(o){ delete o.deleted_at; o.updated_at=nowISO(); this.save(k,a); } },
+  hardDelete(k,u){ this.save(k, this.load(k).filter(x=>x.uuid!==u)); },
+
+  alive(k){ return this.load(k).filter(x=>!x.deleted_at); },
+  deleted(k){ return this.load(k).filter(x=>x.deleted_at); },
+
+  surveys(){ return this.alive(this.key.sv).sort((a,b)=>
+    String(b.survey_date||'').localeCompare(String(a.survey_date||'')) ||
+    String(b.created_at||'').localeCompare(String(a.created_at||''))); },
+  survey(u){ const s=this.get(this.key.sv,u); return (s&&!s.deleted_at)?s:null; },
+  reachesOf(sv){ return this.alive(this.key.re).filter(x=>x.survey_uuid===sv)
+    .sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||''))); },
+  reddsOf(sv){ return this.alive(this.key.rd).filter(x=>x.survey_uuid===sv)
+    .sort((a,b)=>String(b.observed_at||'').localeCompare(String(a.observed_at||''))); },
+  notesOf(sv){ return this.alive(this.key.nt).filter(x=>x.survey_uuid===sv)
+    .sort((a,b)=>String(b.recorded_at||'').localeCompare(String(a.recorded_at||''))); },
+};
+
+/* ============================================================
+   写真の保存（IndexedDB）
+   写真そのものは localStorage に入らないので IndexedDB に置き、
+   記録側には「どの写真か」を示す小さな情報だけを持たせる。
+   ============================================================ */
+const MEDIA_DB_NAME='redd_survey_media', MEDIA_DB_VER=1, MEDIA_STORE='photo';
+let _mediaDB=null;
+function openMediaDB(){
+  if(_mediaDB) return Promise.resolve(_mediaDB);
+  return new Promise((res,rej)=>{
+    const q=indexedDB.open(MEDIA_DB_NAME, MEDIA_DB_VER);
+    q.onupgradeneeded=()=>{ const db=q.result;
+      if(!db.objectStoreNames.contains(MEDIA_STORE)) db.createObjectStore(MEDIA_STORE,{keyPath:'id'}); };
+    q.onsuccess=()=>{ _mediaDB=q.result; res(_mediaDB); };
+    q.onerror=()=>rej(q.error);
+  });
+}
+// 書き込みは tx.oncomplete まで待つ。ここで待たないと「保存したのに無い」が起きる
+function idbDo(mode, fn){
+  return openMediaDB().then(db=>new Promise((res,rej)=>{
+    const tx=db.transaction(MEDIA_STORE, mode);
+    let out;
+    const r=fn(tx.objectStore(MEDIA_STORE));
+    if(r && typeof r.then==='function'){ /* 使わない */ }
+    else if(r){ r.onsuccess=()=>{ out=r.result; }; }
+    tx.oncomplete=()=>res(out);
+    tx.onerror=()=>rej(tx.error);
+    tx.onabort=()=>rej(tx.error);
+  }));
+}
+const PhotoDB = {
+  put(rec){ return idbDo('readwrite', st=>st.put(rec)); },
+  get(id){ return idbDo('readonly', st=>st.get(id)); },
+  del(id){ return idbDo('readwrite', st=>st.delete(id)); },
+  allIds(){ return idbDo('readonly', st=>st.getAllKeys()); },
+  // どこからも参照されていない写真を消す。
+  // 参照元が1つでも読めなければ何もしない（消しすぎ防止）
+  async gc(){
+    let refs;
+    try{
+      refs = new Set();
+      [DB.key.rd, DB.key.nt].forEach(k=>{
+        DB.loadRaw(k).forEach(x=>(x.photos||[]).forEach(p=>p&&p.id&&refs.add(p.id)));
+      });
+    }catch(e){ return; }
+    const ids = await this.allIds();
+    for(const id of ids){ if(!refs.has(id)) await this.del(id); }
+  }
+};
+
+// 現場写真はそのままだと1枚数MBあり端末を圧迫するので、長辺1600pxのJPEGに縮める
+async function shrinkImage(file){
+  if(!/^image\//.test(file.type||'')) return file;
+  try{
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1600/Math.max(bmp.width, bmp.height));
+    if(scale>=1 && file.size < 1.5*1024*1024){ if(bmp.close) bmp.close(); return file; }
+    const w=Math.max(1,Math.round(bmp.width*scale)), h=Math.max(1,Math.round(bmp.height*scale));
+    const c=document.createElement('canvas'); c.width=w; c.height=h;
+    c.getContext('2d').drawImage(bmp,0,0,w,h);
+    if(bmp.close) bmp.close();
+    const blob = await new Promise(r=>c.toBlob(r,'image/jpeg',0.85));
+    return (blob && blob.size < file.size) ? blob : file;
+  }catch(e){ return file; }   // 変換できない端末では元のまま保存する
+}
+
+/* 写真パネル（産卵床・メモで共用。SCREENS._photos が今開いている記録の写真一覧） */
+async function pickPhotos(input){
+  const files = Array.from(input.files||[]);
+  input.value='';
+  if(!files.length) return;
+  toast('写真を取り込んでいます…');
+  for(const f of files){
+    try{
+      const blob = await shrinkImage(f);
+      const id = uuid();
+      await PhotoDB.put({ id, blob, ext:'jpg', size:blob.size, added_at:nowISO() });
+      SCREENS._photos = (SCREENS._photos||[]).concat([{ id, ext:'jpg', size:blob.size }]);
+    }catch(e){ console.error(e); toast('写真を保存できませんでした'); }
+  }
+  renderPhotoPanel();
+  toast(files.length+'枚を追加しました');
+}
+// 写真そのものはここでは消さない。保存せずに戻った場合に、記録が
+// 「無い写真」を指してしまうため。実体は使われなくなった時点で gc() が片付ける
+function delPhoto(id){
+  if(!confirm('この写真を外しますか？（保存すると反映されます）')) return;
+  SCREENS._photos = (SCREENS._photos||[]).filter(p=>p.id!==id);
+  renderPhotoPanel();
+}
+function revokePhotoUrls(){
+  (SCREENS._photoUrls||[]).forEach(u=>{ try{ URL.revokeObjectURL(u); }catch(e){} });
+  SCREENS._photoUrls=[];
+}
+async function renderPhotoPanel(){
+  const box=$('#photoGrid'); if(!box) return;
+  revokePhotoUrls();
+  const list = SCREENS._photos||[];
+  if(!list.length){ box.innerHTML=''; return; }
+  const parts=[];
+  for(const p of list){
+    let rec=null; try{ rec=await PhotoDB.get(p.id); }catch(e){}
+    if(!rec||!rec.blob){ continue; }
+    const url=URL.createObjectURL(rec.blob);
+    SCREENS._photoUrls=(SCREENS._photoUrls||[]).concat([url]);
+    parts.push(`<div class="mediathumb"><img src="${url}" alt="写真">
+      <button class="mediadel" onclick="delPhoto('${p.id}')" title="削除">×</button></div>`);
+  }
+  box.innerHTML = parts.join('');
+}
+function photoPanelHtml(){
+  return `<input type="file" id="fPhotoIn" accept="image/*" capture="environment" multiple
+            style="display:none" onchange="pickPhotos(this)">
+    <button class="btn" onclick="document.getElementById('fPhotoIn').click()">写真を追加（カメラ／端末から）</button>
+    <div class="mediagrid" id="photoGrid"></div>`;
+}
+
+/* ============================================================
+   選択肢マスタ
+   ============================================================ */
+// 対象魚種。現場で追加できるよう、ここは初期値として扱う
+const SPECIES_DEFAULT = ['サケ','カラフトマス','サクラマス','ヤマメ','オショロコマ','イワナ','ニジマス','不明'];
+function speciesList(){
+  try{ const a=JSON.parse(localStorage.getItem('rd_species')||'null');
+       if(Array.isArray(a) && a.length) return a; }catch(e){}
+  return SPECIES_DEFAULT.slice();
+}
+function speciesSave(list){ localStorage.setItem('rd_species', JSON.stringify(list)); }
+
+const OPT = {
+  weather:    ['晴','曇','雨','雪','みぞれ'],
+  turbidity:  ['清','やや濁','濁'],
+  waterLevel: ['平水','増水','減水'],
+  // 産卵床
+  basis:      ['親魚確認','形状から推定','不明'],   // 種の判断根拠
+  age:        ['新しい','やや古い','古い','不明'],  // 新旧
+  state:      ['掘削中','完成','産卵後','不明'],
+  substrate:  ['砂','細礫','中礫','大礫','巨礫','岩盤'],
+  embedded:   ['少','中','多'],                     // 埋没度
+  cover:      ['無','植生','倒木','淵','岸際'],
+  behavior:   ['ペア形成','掘削','産卵','ホバリング','闘争','静止','その他'],
+  noteCat:    ['調査条件','河川状況','特記事項','次回課題','その他'],
+};
+
+/* ============================================================
+   画面遷移
+   SCREENS[name](arg) は {title, sub[], html, onMount} を返す。
+   ============================================================ */
+let STACK = [{name:'home', arg:null}];
+const SCREENS = {};
+
+function nav(name, arg){ STACK.push({name,arg}); render(); }
+function goBack(){ if(STACK.length>1){ STACK.pop(); render(); } }
+function reset(name,arg){ STACK=[{name:name||'home',arg:arg||null}]; render(); }
+
+function render(){
+  destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
+  revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
+  const cur = STACK[STACK.length-1];
+  const scr = SCREENS[cur.name] || SCREENS.home;
+  let v;
+  try{ v = scr(cur.arg); }
+  catch(e){ console.error(e); toast('画面を開けませんでした'); v = SCREENS.home(); }
+  if(!v){ STACK=[{name:'home',arg:null}]; v = SCREENS.home(); }
+  $('#title').textContent = v.title || '産卵床調査記録';
+  $('#backBtn').style.display = STACK.length>1 ? '' : 'none';
+  $('#sub').innerHTML = (v.sub||[]).map(s=>
+    `<span class="pill ${s.cls||''}"${s.id?` id="${s.id}"`:''}>${esc(s.text)}</span>`).join('');
+  $('#main').innerHTML = v.html || '';
+  window.scrollTo(0,0);
+  if(v.onMount) try{ v.onMount(); }catch(e){ console.error(e); }
+}
+
+/* 選択ボタン（seg）の共通処理 */
+function pickSeg(btn){
+  btn.parentElement.querySelectorAll('button').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+}
+function segHtml(field, options, current, allowEmpty){
+  const opts = allowEmpty ? ['なし'].concat(options) : options;
+  const cur = current || (allowEmpty?'なし':'');
+  return `<div class="seg" data-seg="${field}">` + opts.map(o=>
+    `<button type="button" class="${o===cur?'on':''}" onclick="pickSeg(this)">${esc(o)}</button>`).join('') + `</div>`;
+}
+function segVal(field){
+  const on = document.querySelector(`[data-seg="${field}"] button.on`);
+  if(!on) return '';
+  return on.textContent==='なし' ? '' : on.textContent;
+}
+
+/* ============================================================
+   ホーム
+   ============================================================ */
+SCREENS.home = ()=>{
+  const list = DB.surveys();
+  const trashCount = ['sv','re','rd','nt'].reduce((a,k)=>a+DB.deleted(DB.key[k]).length, 0);
+  const cards = list.map(s=>{
+    const nRedd = DB.reddsOf(s.uuid).length;
+    const nReach = DB.reachesOf(s.uuid).length;
+    return `<div class="card tap" onclick="nav('survey','${s.uuid}')">
+      <div class="row">
+        <div class="grow">
+          <div style="font-weight:700">${esc(s.name||'(名称未設定)')}</div>
+          <div class="small muted">${esc(s.river_name||'河川名なし')} ／ ${fmtDate(s.survey_date)}</div>
+        </div>
+        <span class="badge status-${esc(s.status||'未開始')}">${esc(s.status||'未開始')}</span>
+      </div>
+      <div class="small muted" style="margin-top:8px">産卵床 ${nRedd} 件 ／ 区間 ${nReach} 本</div>
+    </div>`;
+  }).join('');
+
+  return {
+    title:'産卵床調査記録',
+    sub:[{text:'アプリ '+APP_VERSION, cls:'off'}],
+    html:`
+      <button class="btn primary big" onclick="nav('surveyEdit','')">＋ 新しい調査を作る</button>
+      <div class="sp"></div>
+      ${list.length ? `<div class="sect">調査一覧（${list.length}件）</div>${cards}`
+                    : `<div class="empty">まだ調査がありません。<br>上のボタンから作ってください。</div>`}
+
+      <div class="sect">データの管理</div>
+      <div class="btn-grid">
+        <button class="btn" onclick="nav('exportHub','')">書き出し・取り込み</button>
+        <button class="btn" onclick="nav('trash')">ゴミ箱（${trashCount}）</button>
+      </div>
+      <div class="sp"></div>
+      <button class="btn ghost small" onclick="forceUpdate()">最新に更新</button>
+      <div class="tiny muted" style="margin-top:10px; text-align:center">
+        記録はこの端末の中だけに保存されます。外部へ自動送信しません。
+      </div>`
+  };
+};
+
+/* ============================================================
+   調査の作成・編集
+   ============================================================ */
+const DRAFT_KEY = 'rd_draft_survey';
+SCREENS.surveyEdit = (svUuid)=>{
+  const editing = !!svUuid;
+  let s;
+  if(editing){
+    s = DB.survey(svUuid);
+    if(!s) return SCREENS.home();
+  }else{
+    // 新規は下書きを復元（入力途中でアプリが落ちても消えないように）
+    let d=null; try{ d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null'); }catch(e){}
+    s = d || { uuid:uuid(), survey_date:dateValue(), status:'未開始' };
+    if(!s.uuid) s.uuid = uuid();
+  }
+
+  return {
+    title: editing ? '調査の編集' : '新しい調査',
+    html:`
+      <label class="field"><span class="lab">河川名 <span class="req">*</span></span>
+        <input id="fRiver" value="${esc(s.river_name||'')}" placeholder="例：忠別川" oninput="draftSave()"></label>
+      <div class="two">
+        <label class="field"><span class="lab">水系</span>
+          <input id="fSystem" value="${esc(s.water_system||'')}" placeholder="例：石狩川水系" oninput="draftSave()"></label>
+        <label class="field"><span class="lab">調査日</span>
+          <input id="fDate" type="date" value="${esc(s.survey_date||dateValue())}" oninput="draftSave()"></label>
+      </div>
+      <label class="field"><span class="lab">調査名（空欄なら「河川名＋調査日」を使います）</span>
+        <input id="fName" value="${esc(s.name||'')}" placeholder="自動で付けます" oninput="draftSave()"></label>
+      <label class="field"><span class="lab">調査者</span>
+        <input id="fInv" value="${esc(s.investigator||'')}" placeholder="例：山田・佐藤" oninput="draftSave()"></label>
+
+      <div class="sect">調査時の条件</div>
+      <label class="field"><span class="lab">天候</span>${segHtml('weather', OPT.weather, s.weather, true)}</label>
+      <div class="two">
+        <label class="field"><span class="lab">気温（℃）</span>
+          <input id="fAirT" type="number" step="0.1" inputmode="decimal" value="${esc(s.air_temp_c??'')}" oninput="draftSave()"></label>
+        <label class="field"><span class="lab">水温（℃・基準地点）</span>
+          <input id="fWaterT" type="number" step="0.1" inputmode="decimal" value="${esc(s.water_temp_c??'')}" oninput="draftSave()"></label>
+      </div>
+      <label class="field"><span class="lab">濁り</span>${segHtml('turbidity', OPT.turbidity, s.turbidity, true)}</label>
+      <label class="field"><span class="lab">水位の状況</span>${segHtml('waterLevel', OPT.waterLevel, s.water_level, true)}</label>
+
+      <div class="sect">その他</div>
+      <label class="field"><span class="lab">調査の目的</span>
+        <textarea id="fPurpose" oninput="draftSave()">${esc(s.purpose||'')}</textarea></label>
+      <label class="field"><span class="lab">メモ</span>
+        <textarea id="fMemo" oninput="draftSave()">${esc(s.memo||'')}</textarea></label>
+
+      <button class="btn primary big" onclick="saveSurvey('${s.uuid}', ${editing})">保存する</button>
+      <div class="sp"></div>
+      <button class="btn ghost" onclick="goBack()">やめる</button>
+    `,
+    onMount:()=>{ SCREENS._editUuid=s.uuid; SCREENS._editing=editing;
+      $$('[data-seg] button').forEach(b=>b.addEventListener('click', draftSave)); }
+  };
+};
+
+function collectSurveyForm(){
+  const river=($('#fRiver').value||'').trim();
+  const date =$('#fDate').value || dateValue();
+  const name =($('#fName').value||'').trim();
+  return {
+    river_name: river,
+    water_system: ($('#fSystem').value||'').trim(),
+    survey_date: date,
+    name: name || (river ? `${river} ${date}` : `調査 ${date}`),
+    investigator: ($('#fInv').value||'').trim(),
+    weather: segVal('weather'),
+    air_temp_c: numVal('#fAirT'),
+    water_temp_c: numVal('#fWaterT'),
+    turbidity: segVal('turbidity'),
+    water_level: segVal('waterLevel'),
+    purpose: $('#fPurpose').value||'',
+    memo: $('#fMemo').value||'',
+  };
+}
+// 新規作成中だけ下書きを保存する（編集中の既存データを下書きで上書きしないため）
+function draftSave(){
+  if(SCREENS._editing) return;
+  try{
+    const d = Object.assign({ uuid:SCREENS._editUuid, status:'未開始' }, collectSurveyForm());
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+  }catch(e){}
+}
+function saveSurvey(u, editing){
+  const f = collectSurveyForm();
+  if(!f.river_name){ toast('河川名を入れてください'); $('#fRiver').focus(); return; }
+  const base = editing ? {} : { status:'未開始' };
+  const ok = DB.upsert(DB.key.sv, Object.assign({uuid:u}, base, f));
+  if(!ok) return;
+  localStorage.removeItem(DRAFT_KEY);
+  toast('保存しました');
+  if(editing) goBack(); else reset('survey', u);
+}
+function deleteSurvey(u){
+  const s = DB.survey(u); if(!s) return;
+  const n = DB.reddsOf(u).length;
+  if(!confirm(`「${s.name}」を削除しますか？\n産卵床 ${n} 件も一緒にゴミ箱へ入ります。`)) return;
+  // 調査を消したら、ぶら下がる記録もまとめてゴミ箱へ（片方だけ残らないように）
+  [[DB.key.re,'reachesOf'],[DB.key.rd,'reddsOf'],[DB.key.nt,'notesOf']].forEach(([k,fn])=>{
+    DB[fn](u).forEach(x=>DB.softDelete(k, x.uuid));
+  });
+  DB.softDelete(DB.key.sv, u);
+  toast('ゴミ箱へ入れました');
+  reset('home');
+}
+
+/* ============================================================
+   位置（GPS）と区間の軌跡
+   調査中は位置を取り続け、区間を記録中ならその軌跡に足していく。
+   ============================================================ */
+let gpsWatchId = null;
+let lastFix = null;    // {lat, lon, acc, t}
+let TRACK = null;      // {reach_uuid, pts:[[lat,lon],...], lastSave}
+
+const GPS_MAX_ACC   = 50;      // これより粗い位置は軌跡に使わない（m）
+const TRACK_MIN_MOVE= 3;       // これ未満しか動いていなければ軌跡に足さない（m）
+const TRACK_SAVE_MS = 15000;   // 軌跡を保存する間隔（書き込みすぎを防ぐ）
+
+function validPt(p){ return Array.isArray(p) && p.length===2 && isFinite(p[0]) && isFinite(p[1])
+  && Math.abs(p[0])<=90 && Math.abs(p[1])<=180; }
+// 短い距離なので、緯度による経度の縮みだけ補正した平面近似で足りる
+function distMeters(a,b){
+  const R=6378137, rad=Math.PI/180;
+  const y=(b[0]-a[0])*rad;
+  const x=(b[1]-a[1])*rad*Math.cos((a[0]+b[0])/2*rad);
+  return Math.sqrt(x*x+y*y)*R;
+}
+function pathLength(path){
+  const p=(path||[]).filter(validPt); let d=0;
+  for(let i=1;i<p.length;i++) d+=distMeters(p[i-1],p[i]);
+  return d;
+}
+function fmtDist(d){ d=+d||0; return d>=1000 ? (d/1000).toFixed(2)+'km' : Math.round(d)+'m'; }
+function fmtDur(ms){ const s=Math.max(0,Math.round(ms/1000));
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60);
+  return h ? `${h}時間${m}分` : `${m}分`; }
+
+function startGps(){
+  if(gpsWatchId!=null || !navigator.geolocation) return;
+  gpsWatchId = navigator.geolocation.watchPosition(
+    p=>{ lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+         trackAppend(); updateGpsPill(); },
+    ()=>{ updateGpsPill(); },
+    {enableHighAccuracy:true, maximumAge:2000, timeout:20000});
+}
+function stopGps(){
+  if(gpsWatchId!=null && navigator.geolocation) navigator.geolocation.clearWatch(gpsWatchId);
+  gpsWatchId=null;
+}
+function gpsText(){
+  if(!lastFix) return 'GPS 取得中';
+  const age=(Date.now()-lastFix.t)/1000;
+  if(age>60) return 'GPS 途切れ';
+  return 'GPS 約'+Math.round(lastFix.acc)+'m';
+}
+function updateGpsPill(){ const el=$('#gpsPill'); if(el) el.textContent=gpsText(); }
+
+function trackAppend(){
+  if(!TRACK || !lastFix) return;
+  if(lastFix.acc > GPS_MAX_ACC) return;            // 精度が悪い点は距離を狂わせるので使わない
+  const pt=[lastFix.lat, lastFix.lon];
+  const last=TRACK.pts[TRACK.pts.length-1];
+  if(last && distMeters(last, pt) < TRACK_MIN_MOVE) return;   // 立ち止まり中の揺れで距離が伸びるのを防ぐ
+  TRACK.pts.push(pt);
+  if(Date.now()-TRACK.lastSave > TRACK_SAVE_MS) trackSave();
+  const el=$('#reachLen'); if(el) el.textContent=fmtDist(pathLength(TRACK.pts));
+}
+function trackSave(){
+  if(!TRACK) return;
+  TRACK.lastSave=Date.now();
+  DB.upsert(DB.key.re, { uuid:TRACK.reach_uuid, track:TRACK.pts.slice(),
+    length_m_auto: Math.round(pathLength(TRACK.pts)) });
+}
+
+/* ---------- 区間 ---------- */
+function activeReach(sv){ return DB.reachesOf(sv).find(r=>!r.ended_at) || null; }
+function reachLength(r){
+  // 手入力があればそちらを優先する（GPSが乱れた区間を後から直せるように）
+  if(r.length_m_manual!=='' && r.length_m_manual!=null) return +r.length_m_manual;
+  return +r.length_m_auto || 0;
+}
+function reachName(sv, u){ const r=DB.get(DB.key.re,u); return r?r.name:''; }
+function startReach(sv){
+  if(activeReach(sv)){ toast('すでに区間を記録中です'); return; }
+  const r = { uuid:uuid(), survey_uuid:sv, name:'St.'+(DB.reachesOf(sv).length+1),
+    started_at:nowISO(), ended_at:'',
+    start_lat: lastFix?+lastFix.lat.toFixed(6):'', start_lon: lastFix?+lastFix.lon.toFixed(6):'',
+    end_lat:'', end_lon:'',
+    track: (lastFix && lastFix.acc<=GPS_MAX_ACC) ? [[lastFix.lat,lastFix.lon]] : [],
+    length_m_auto:0, length_m_manual:'', river_width_m:'', memo:'' };
+  if(!DB.upsert(DB.key.re, r)) return;
+  TRACK = { reach_uuid:r.uuid, pts:(r.track||[]).slice(), lastSave:Date.now() };
+  startGps();
+  toast(r.name+' の記録を始めました');
+  render();
+}
+function endReach(sv){
+  const r = activeReach(sv); if(!r) return;
+  const pts = TRACK ? TRACK.pts : (r.track||[]);
+  const end = pts[pts.length-1] || [];
+  DB.upsert(DB.key.re, { uuid:r.uuid, ended_at:nowISO(), track:pts.slice(),
+    length_m_auto: Math.round(pathLength(pts)),
+    end_lat: end[0]!=null?+end[0].toFixed(6):'', end_lon: end[1]!=null?+end[1].toFixed(6):'' });
+  TRACK=null;
+  toast(r.name+' を終了しました（'+fmtDist(pathLength(pts))+'）');
+  render();
+}
+// 画面を閉じて開き直しても、記録中の区間があれば軌跡の記録を続ける
+function resumeTracking(){
+  const sv = DB.surveys().find(s=>s.status==='調査中');
+  if(!sv) return;
+  startGps();
+  const r = activeReach(sv.uuid);
+  if(r && !TRACK) TRACK = { reach_uuid:r.uuid, pts:(r.track||[]).slice(), lastSave:Date.now() };
+}
+
+/* ============================================================
+   調査の画面（調査中の拠点）
+   ============================================================ */
+SCREENS.survey = (u)=>{
+  const s = DB.survey(u); if(!s) return SCREENS.home();
+  const redds = DB.reddsOf(u), reaches = DB.reachesOf(u), notes = DB.notesOf(u);
+  const started = s.status==='調査中', finished = s.status==='終了';
+  const cur = activeReach(u);
+
+  const cond = [
+    s.weather, s.turbidity, s.water_level,
+    (s.air_temp_c!==''&&s.air_temp_c!=null)?`気温${s.air_temp_c}℃`:'',
+    (s.water_temp_c!==''&&s.water_temp_c!=null)?`水温${s.water_temp_c}℃`:''
+  ].filter(Boolean).join(' ／ ') || '—';
+
+  const sub = [{text:s.status||'未開始', cls: started?'ok':'off'}];
+  if(started){
+    sub.push({text:'経過 '+fmtDur(Date.now()-new Date(s.start_datetime||nowISO()).getTime())});
+    sub.push({text:gpsText(), cls:'ok', id:'gpsPill'});
+    sub.push({text: cur ? '記録中 '+cur.name : '区間 未開始', cls: cur?'ok':'warn'});
+  }
+  sub.push({text:`産卵床 ${redds.length}`});
+  sub.push({text:`区間 ${reaches.length}`});
+
+  return {
+    title: s.name || '調査',
+    sub,
+    html:`
+      <div class="card">
+        <div class="small muted">河川</div>
+        <div style="font-weight:700">${esc(s.river_name||'—')}${s.water_system?`<span class="small muted">（${esc(s.water_system)}）</span>`:''}</div>
+        <div class="small muted" style="margin-top:8px">調査日 ${fmtDate(s.survey_date)}${s.investigator?` ／ ${esc(s.investigator)}`:''}</div>
+        <div class="small muted" style="margin-top:4px">${esc(cond)}</div>
+        ${s.start_datetime?`<div class="small muted" style="margin-top:4px">開始 ${fmtTime(s.start_datetime)}${s.end_datetime?` ／ 終了 ${fmtTime(s.end_datetime)}`:''}</div>`:''}
+        ${s.purpose?`<div class="small" style="margin-top:8px">${esc(s.purpose)}</div>`:''}
+      </div>
+
+      ${ !started && !finished ? `<button class="btn primary big" onclick="startSurvey('${u}')">調査を開始する</button><div class="sp"></div>` : '' }
+
+      ${ started ? `
+        <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 産卵床を記録</button>
+        <div class="sp"></div>
+        ${ cur
+          ? `<div class="card">
+               <div class="row"><div class="grow"><b>${esc(cur.name)}</b> を記録中</div>
+                 <div class="small muted">歩いた距離 <span id="reachLen">${fmtDist(pathLength(cur.track))}</span></div></div>
+               <div class="sp"></div>
+               <button class="btn" onclick="endReach('${u}')">この区間を終了</button>
+             </div>`
+          : `<button class="btn big" onclick="startReach('${u}')">区間をスタート</button><div class="sp"></div>` }
+        <button class="btn" onclick="nav('noteEdit','${esc(JSON.stringify({sv:u}))}')">メモを追加</button>
+      ` : '' }
+
+      <div class="sect">記録を見る</div>
+      <div class="btn-grid">
+        <button class="btn" onclick="nav('redds','${u}')">産卵床の一覧（${redds.length}）</button>
+        <button class="btn" onclick="nav('reaches','${u}')">区間の一覧（${reaches.length}）</button>
+        <button class="btn" onclick="nav('notes','${u}')">調査メモ（${notes.length}）</button>
+        <button class="btn" onclick="nav('map','${u}')">地図で見る</button>
+        <button class="btn" onclick="nav('summary','${u}')">集計を見る</button>
+      </div>
+
+      <div class="sect">調査の管理</div>
+      <div class="btn-grid">
+        <button class="btn" onclick="nav('exportHub','${u}')">この調査を書き出す</button>
+        <button class="btn" onclick="nav('surveyEdit','${u}')">内容を編集</button>
+        ${ started ? `<button class="btn" onclick="finishSurvey('${u}')">調査を終了</button>`
+                   : finished ? `<button class="btn" onclick="reopenSurvey('${u}')">調査を再開</button>`
+                              : `<button class="btn" onclick="reset('home')">一覧へ戻る</button>` }
+      </div>
+      <div class="sp"></div>
+      <button class="btn danger" onclick="deleteSurvey('${u}')">この調査を削除</button>
+    `,
+    onMount:()=>{ if(started) startGps(); }
+  };
+};
+
+function startSurvey(u){
+  const s = DB.survey(u); if(!s) return;
+  DB.upsert(DB.key.sv, { uuid:u, status:'調査中', start_datetime: s.start_datetime || nowISO() });
+  startGps();
+  toast('調査を開始しました');
+  render();
+}
+function finishSurvey(u){
+  const cur = activeReach(u);
+  const msg = cur ? `調査を終了しますか？\n記録中の ${cur.name} も終了します。（あとで再開できます）`
+                  : '調査を終了しますか？（あとで再開できます）';
+  if(!confirm(msg)) return;
+  if(cur) endReach(u);
+  DB.upsert(DB.key.sv, { uuid:u, status:'終了', end_datetime: nowISO() });
+  stopGps();
+  toast('調査を終了しました');
+  render();
+}
+function reopenSurvey(u){
+  DB.upsert(DB.key.sv, { uuid:u, status:'調査中', end_datetime:'' });
+  startGps();
+  toast('調査を再開しました');
+  render();
+}
+
+/* ============================================================
+   区間の一覧・編集
+   ============================================================ */
+SCREENS.reaches = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const list = DB.reachesOf(sv);
+  const cards = list.map(r=>{
+    const n = DB.reddsOf(sv).filter(x=>x.reach_uuid===r.uuid).length;
+    const len = reachLength(r);
+    const manual = (r.length_m_manual!=='' && r.length_m_manual!=null);
+    const dens = len>0 ? (n/len*100).toFixed(1) : '—';
+    return `<div class="card tap" onclick="nav('reachEdit','${esc(JSON.stringify({sv, u:r.uuid}))}')">
+      <div class="row">
+        <div class="grow"><b>${esc(r.name)}</b>${r.ended_at?'':' <span class="badge status-調査中">記録中</span>'}</div>
+        <div class="small muted">${fmtTime(r.started_at)}${r.ended_at?'〜'+fmtTime(r.ended_at):'〜'}</div>
+      </div>
+      <div class="small muted" style="margin-top:6px">
+        区間長 ${fmtDist(len)}${manual?'（手入力）':''} ／ 産卵床 ${n} 件 ／ 密度 ${dens} 件/100m
+      </div>
+    </div>`;
+  }).join('');
+  return {
+    title:'区間の一覧',
+    sub:[{text:s.name}],
+    html: list.length ? cards : `<div class="empty">まだ区間がありません。</div>`
+  };
+};
+
+SCREENS.reachEdit = (argStr)=>{
+  const a = JSON.parse(argStr||'{}');
+  const r = DB.get(DB.key.re, a.u);
+  if(!r || r.deleted_at) return SCREENS.home();
+  const redds = DB.reddsOf(a.sv).filter(x=>x.reach_uuid===r.uuid);
+  return {
+    title:'区間の編集',
+    html:`
+      <div class="card">
+        <div class="small muted">GPSで測った距離</div>
+        <div style="font-weight:700; font-size:18px">${fmtDist(r.length_m_auto||0)}</div>
+        <div class="small muted" style="margin-top:6px">記録した点 ${(r.track||[]).length} 個 ／ 産卵床 ${redds.length} 件</div>
+      </div>
+      <label class="field"><span class="lab">区間名</span>
+        <input id="fRName" value="${esc(r.name||'')}"></label>
+      <label class="field"><span class="lab">区間長の手入力（m）※入れるとGPSの値より優先されます</span>
+        <input id="fRLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_m_manual??'')}" placeholder="空欄ならGPSの値を使う"></label>
+      <label class="field"><span class="lab">平均の川幅（m）</span>
+        <input id="fRWid" type="number" step="0.1" inputmode="decimal" value="${esc(r.river_width_m??'')}"></label>
+      <label class="field"><span class="lab">備考</span>
+        <textarea id="fRMemo">${esc(r.memo||'')}</textarea></label>
+      <button class="btn primary big" onclick="saveReach('${r.uuid}')">保存する</button>
+      <div class="sp"></div>
+      <button class="btn danger" onclick="deleteReach('${r.uuid}')">この区間を削除</button>
+    `
+  };
+};
+function saveReach(u){
+  const name = ($('#fRName').value||'').trim();
+  if(!name){ toast('区間名を入れてください'); return; }
+  DB.upsert(DB.key.re, { uuid:u, name,
+    length_m_manual: numVal('#fRLen'), river_width_m: numVal('#fRWid'), memo: $('#fRMemo').value||'' });
+  toast('保存しました');
+  goBack();
+}
+function deleteReach(u){
+  const r = DB.get(DB.key.re,u); if(!r) return;
+  const n = DB.reddsOf(r.survey_uuid).filter(x=>x.reach_uuid===u).length;
+  // 産卵床は消さず「区間なし」に戻す。記録そのものが巻き添えで消えないように
+  if(!confirm(`「${r.name}」を削除しますか？${n?`\nこの区間の産卵床 ${n} 件は「区間なし」になります（消えません）。`:''}`)) return;
+  DB.reddsOf(r.survey_uuid).filter(x=>x.reach_uuid===u)
+    .forEach(x=>DB.upsert(DB.key.rd, {uuid:x.uuid, reach_uuid:''}));
+  if(TRACK && TRACK.reach_uuid===u) TRACK=null;
+  DB.softDelete(DB.key.re, u);
+  toast('ゴミ箱へ入れました');
+  goBack();
+}
+
+/* ============================================================
+   産卵床の一覧
+   ============================================================ */
+SCREENS.redds = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const list = DB.reddsOf(sv);
+  const cards = list.map(r=>{
+    const rc = r.reach_uuid ? reachName(sv, r.reach_uuid) : '区間なし';
+    const size = (r.length_cm!==''&&r.width_cm!=='') ? `${r.length_cm}×${r.width_cm}cm` : '';
+    return `<div class="card tap" onclick="nav('reddEdit','${esc(JSON.stringify({sv, u:r.uuid}))}')">
+      <div class="row">
+        <div class="grow"><b>${esc(rc)} No.${esc(r.redd_no||'—')}</b>
+          ${r.needs_review?'<span class="badge warn">要確認</span>':''}</div>
+        <div class="small muted">${fmtTime(r.observed_at)}</div>
+      </div>
+      <div class="small muted" style="margin-top:6px">
+        ${esc([r.species||'種不明', r.age_class, r.state, size].filter(Boolean).join(' ／ '))}
+        ${ (r.photos||[]).length ? ` ／ 写真${r.photos.length}枚` : '' }
+      </div>
+    </div>`;
+  }).join('');
+  return {
+    title:'産卵床の一覧',
+    sub:[{text:s.name},{text:`${list.length} 件`}],
+    html: list.length ? cards : `<div class="empty">まだ産卵床の記録がありません。</div>`
+  };
+};
+
+/* ============================================================
+   声で入力
+   「水深25 流速0.4 中礫 サケ 新しい」のように話すと、対応する欄へ入れる。
+   手が濡れる・寒い現場でキーボードを叩かずに済ませるための補助で、
+   聞き取れなかった分は最後にメモへ回す（取りこぼしを黙って捨てない）。
+   ============================================================ */
+const VOICE_NUM_FIELDS = [
+  { sel:'#fLen', label:'長さ',       words:['長さ','ながさ','たて','縦'] },
+  { sel:'#fWid', label:'幅',         words:['幅','はば','よこ','横'] },
+  { sel:'#fDep', label:'水深',       words:['水深','すいしん','深さ','ふかさ'] },
+  { sel:'#fVel', label:'流速',       words:['流速','りゅうそく','速さ','はやさ'] },
+  { sel:'#fIGT', label:'河床内水温', words:['河床内水温','河床内','かしょうない','床内','間隙水温'] },
+  { sel:'#fWT',  label:'河川水温',   words:['河川水温','水温','すいおん'] },
+  { sel:'#fTD',  label:'測った深さ', words:['測定深さ','埋設深さ','深度'] },
+  { sel:'#fFem', label:'雌',         words:['雌','メス','めす'] },
+  { sel:'#fMal', label:'雄',         words:['雄','オス','おす'] },
+  { sel:'#fCar', label:'ホッチャレ', words:['ホッチャレ','ほっちゃれ','死骸','しがい'] },
+  { sel:'#fNo',  label:'番号',       words:['番号','ナンバー'] },
+];
+const VOICE_SEG_FIELDS = [
+  { field:'species', options:()=>speciesList(),
+    aliases:{'鮭':'サケ','しろざけ':'サケ','シロザケ':'サケ','白鮭':'サケ',
+             'からふとます':'カラフトマス','ピンクサーモン':'カラフトマス',
+             'さくらます':'サクラマス','やまめ':'ヤマメ',
+             'おしょろこま':'オショロコマ','いわな':'イワナ','にじます':'ニジマス'} },
+  { field:'age', options:()=>OPT.age,
+    aliases:{'あたらしい':'新しい','新規':'新しい','ややふるい':'やや古い','ふるい':'古い'} },
+  { field:'state', options:()=>OPT.state,
+    aliases:{'くっさくちゅう':'掘削中','掘ってる':'掘削中','かんせい':'完成','産卵済み':'産卵後'} },
+  { field:'subMain', options:()=>OPT.substrate,
+    aliases:{'すな':'砂','さいれき':'細礫','ちゅうれき':'中礫','たいれき':'大礫',
+             'きょれき':'巨礫','がんばん':'岩盤'} },
+  { field:'cover', options:()=>OPT.cover,
+    aliases:{'しょくせい':'植生','とうぼく':'倒木','ふち':'淵','きしぎわ':'岸際'} },
+  { field:'fish', options:()=>['いる','いない'],
+    aliases:{'親魚あり':'いる','親魚なし':'いない'} },
+];
+
+function setSegValue(field, value){
+  const btns = $$(`[data-seg="${field}"] button`);
+  const b = btns.find(x=>x.textContent===value);
+  if(b){ pickSeg(b); return true; }
+  return false;
+}
+
+function parseVoice(text){
+  let t = String(text||'')
+    .replace(/[０-９]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
+    .replace(/[．。]/g,'.').replace(/[、，]/g,' ').replace(/　/g,' ');
+  const hits=[];
+
+  // 数値つきの項目。「河床内水温」を「水温」より先に見るため、長い言葉から順に照合する
+  const entries=[];
+  VOICE_NUM_FIELDS.forEach(f=>f.words.forEach(w=>entries.push({f,w})));
+  entries.sort((a,b)=>b.w.length-a.w.length);
+  const filled=new Set();
+  entries.forEach(({f,w})=>{
+    if(filled.has(f.sel)) return;
+    const m = new RegExp(w+'\\s*[はがのをが]?\\s*(-?\\d+(?:\\.\\d+)?)').exec(t);
+    if(!m) return;
+    const el=$(f.sel); if(!el) return;
+    el.value = m[1];
+    filled.add(f.sel);
+    hits.push(`${f.label} ${m[1]}`);
+    t = t.replace(m[0], ' ');
+  });
+
+  // 選択肢の項目
+  VOICE_SEG_FIELDS.forEach(f=>{
+    const pairs = f.options().map(o=>[o,o]).concat(Object.entries(f.aliases||{}));
+    pairs.sort((a,b)=>b[0].length-a[0].length);
+    for(const [key,val] of pairs){
+      if(!t.includes(key)) continue;
+      if(setSegValue(f.field, val)){ hits.push(val); t = t.replace(key,' '); }
+      break;
+    }
+  });
+
+  updateArea();
+  // 拾えなかった言葉はメモへ回す（聞き取った内容を黙って捨てない）
+  const rest = t.replace(/\s+/g,' ').trim();
+  if(rest){
+    const n=$('#fNote');
+    if(n){ n.value = (n.value ? n.value+' ' : '') + rest; hits.push('メモ「'+rest+'」'); }
+  }
+  return hits;
+}
+
+let RECOG=null, LISTENING=false;
+function voiceSupported(){ return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+function voiceStatus(msg){ const el=$('#voiceStatus'); if(el) el.textContent=msg; }
+function toggleMic(){
+  if(!voiceSupported()){ toast('この端末では声で入力できません'); return; }
+  if(LISTENING){ try{ RECOG.stop(); }catch(e){} return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  RECOG = new SR();
+  RECOG.lang='ja-JP'; RECOG.interimResults=true; RECOG.continuous=false;
+  RECOG.onresult = e=>{
+    let fin='', mid='';
+    for(let i=e.resultIndex; i<e.results.length; i++){
+      const tr=e.results[i][0].transcript;
+      if(e.results[i].isFinal) fin+=tr; else mid+=tr;
+    }
+    const pv=$('#voicePreview');
+    if(pv) pv.innerHTML = esc(fin) + (mid?`<span class="muted"> ${esc(mid)}</span>`:'');
+    if(fin){
+      const hits = parseVoice(fin);
+      voiceStatus(hits.length ? '入れました：'+hits.join(' ／ ') : '当てはまる項目がありませんでした');
+    }
+  };
+  RECOG.onerror = e=>{
+    voiceStatus(e.error==='no-speech' ? '声が聞き取れませんでした。もう一度どうぞ'
+      : e.error==='network' ? 'ネットにつながっていないと使えません（端末による）'
+      : '聞き取れませんでした（'+e.error+'）');
+    stopMic();
+  };
+  RECOG.onend = stopMic;
+  LISTENING=true;
+  const b=$('#micBtn'); if(b) b.textContent='■ 停止';
+  voiceStatus('聞いています…');
+  try{ RECOG.start(); }catch(e){ stopMic(); }
+}
+function stopMic(){
+  LISTENING=false;
+  const b=$('#micBtn'); if(b) b.textContent='🎤 声で入力';
+  if($('#voiceStatus') && $('#voiceStatus').textContent==='聞いています…') voiceStatus('');
+}
+function voicePanelHtml(){
+  return `<div class="card">
+    <div class="row">
+      <button class="btn" id="micBtn" style="width:auto" onclick="toggleMic()">🎤 声で入力</button>
+      <div class="grow tiny muted" id="voiceStatus">例：「水深25 流速0.4 中礫 サケ 新しい 長さ150 幅80」</div>
+    </div>
+    <div class="small" id="voicePreview" style="margin-top:8px"></div>
+  </div>`;
+}
+
+/* ============================================================
+   産卵床の記録
+   ============================================================ */
+function nextReddNo(sv, reachUuid){
+  const list = DB.reddsOf(sv).filter(x=>(x.reach_uuid||'')===(reachUuid||''));
+  return list.reduce((m,x)=>Math.max(m, parseInt(x.redd_no,10)||0), 0) + 1;
+}
+function reddArea(lenCm, widCm){
+  if(lenCm===''||lenCm==null||widCm===''||widCm==null) return '';
+  return +((lenCm*widCm)/10000).toFixed(3);
+}
+
+SCREENS.reddEdit = (argStr)=>{
+  const a = JSON.parse(argStr||'{}');
+  const sv = a.sv, editing = !!a.u;
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const carry = SCREENS._carry || {};
+  const cur = activeReach(sv);
+  const reaches = DB.reachesOf(sv);
+
+  let r;
+  if(editing){
+    r = DB.get(DB.key.rd, a.u);
+    if(!r || r.deleted_at) return SCREENS.home();
+  }else{
+    const reach_uuid = carry.reach_uuid || (cur?cur.uuid:'');
+    r = { uuid:uuid(), survey_uuid:sv, reach_uuid,
+      redd_no: nextReddNo(sv, reach_uuid), observed_at: nowISO(),
+      latitude:'', longitude:'', gps_accuracy:'',
+      species: carry.species||'', species_basis:'', age_class:'', state:'',
+      length_cm:'', width_cm:'', depth_cm:'', velocity_ms:'',
+      substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
+      embeddedness:'', cover: carry.cover||'',
+      water_temp_c: carry.water_temp_c??'', intragravel_temp_c:'', temp_depth_cm: carry.temp_depth_cm??'',
+      fish_present:'', female_n:'', male_n:'', behavior:'', carcass_n:'',
+      note:'', needs_review:false };
+  }
+
+  const reachOpts = [`<option value="">区間なし</option>`].concat(
+    reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
+  ).join('');
+
+  return {
+    title: editing ? '産卵床の編集' : '産卵床の記録',
+    sub:[{text:s.name}],
+    html:`
+      <div class="two">
+        <label class="field"><span class="lab">区間</span>
+          <select id="fReach" onchange="onReachChange('${sv}', ${editing})">${reachOpts}</select></label>
+        <label class="field"><span class="lab">産卵床番号</span>
+          <input id="fNo" type="number" step="1" inputmode="numeric" value="${esc(r.redd_no??'')}"></label>
+      </div>
+      <label class="field"><span class="lab">記録日時</span>
+        <input id="fWhen" type="datetime-local" value="${localDatetimeValue(new Date(r.observed_at||nowISO()))}"></label>
+
+      ${voicePanelHtml()}
+
+      <div class="sect">位置</div>
+      <div class="two">
+        <label class="field"><span class="lab">緯度</span>
+          <input id="fLat" inputmode="decimal" value="${esc(r.latitude??'')}"></label>
+        <label class="field"><span class="lab">経度</span>
+          <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}"></label>
+      </div>
+      <button class="btn" onclick="grabGps()">現在地を取り込む</button>
+      <div class="small muted" style="margin-top:6px" id="accOut">${r.gps_accuracy!==''&&r.gps_accuracy!=null?'誤差 約'+r.gps_accuracy+'m':'位置が取れなくても保存できます'}</div>
+
+      <div class="sect">魚種・状態</div>
+      <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
+      <label class="field"><span class="lab">種の判断根拠</span>${segHtml('basis', OPT.basis, r.species_basis, true)}</label>
+      <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
+      <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
+
+      <div class="sect">規模</div>
+      <div class="two">
+        <label class="field"><span class="lab">長さ（cm・流れの向き）</span>
+          <input id="fLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_cm??'')}" oninput="updateArea()"></label>
+        <label class="field"><span class="lab">幅（cm）</span>
+          <input id="fWid" type="number" step="1" inputmode="decimal" value="${esc(r.width_cm??'')}" oninput="updateArea()"></label>
+      </div>
+      <div class="card"><div class="row"><div class="grow small muted">面積（自動計算）</div>
+        <div style="font-weight:700" id="areaOut">—</div></div></div>
+
+      <div class="sect">まわりの環境</div>
+      <div class="two">
+        <label class="field"><span class="lab">水深（cm）</span>
+          <input id="fDep" type="number" step="1" inputmode="decimal" value="${esc(r.depth_cm??'')}"></label>
+        <label class="field"><span class="lab">流速（m/s）</span>
+          <input id="fVel" type="number" step="0.01" inputmode="decimal" value="${esc(r.velocity_ms??'')}"></label>
+      </div>
+      <label class="field"><span class="lab">底質（主）</span>${segHtml('subMain', OPT.substrate, r.substrate_main, true)}</label>
+      <label class="field"><span class="lab">底質（副）</span>${segHtml('subSub', OPT.substrate, r.substrate_sub, true)}</label>
+      <label class="field"><span class="lab">埋没度</span>${segHtml('embedded', OPT.embedded, r.embeddedness, true)}</label>
+      <label class="field"><span class="lab">被覆</span>${segHtml('cover', OPT.cover, r.cover, true)}</label>
+
+      <div class="sect">水温</div>
+      <div class="two">
+        <label class="field"><span class="lab">河川水温（℃）</span>
+          <input id="fWT" type="number" step="0.1" inputmode="decimal" value="${esc(r.water_temp_c??'')}"></label>
+        <label class="field"><span class="lab">河床内水温（℃）</span>
+          <input id="fIGT" type="number" step="0.1" inputmode="decimal" value="${esc(r.intragravel_temp_c??'')}"></label>
+      </div>
+      <label class="field"><span class="lab">河床内を測った深さ（cm）</span>
+        <input id="fTD" type="number" step="1" inputmode="decimal" value="${esc(r.temp_depth_cm??'')}"></label>
+
+      <div class="sect">親魚</div>
+      <label class="field"><span class="lab">親魚の有無</span>${segHtml('fish', ['いる','いない'], r.fish_present, true)}</label>
+      <div class="two">
+        <label class="field"><span class="lab">雌の数</span>
+          <input id="fFem" type="number" step="1" inputmode="numeric" value="${esc(r.female_n??'')}"></label>
+        <label class="field"><span class="lab">雄の数</span>
+          <input id="fMal" type="number" step="1" inputmode="numeric" value="${esc(r.male_n??'')}"></label>
+      </div>
+      <label class="field"><span class="lab">行動</span>${segHtml('behavior', OPT.behavior, r.behavior, true)}</label>
+      <label class="field"><span class="lab">ホッチャレ（死骸）の数</span>
+        <input id="fCar" type="number" step="1" inputmode="numeric" value="${esc(r.carcass_n??'')}"></label>
+
+      <div class="sect">写真</div>
+      ${photoPanelHtml()}
+
+      <div class="sect">その他</div>
+      <label class="field"><span class="lab">メモ</span>
+        <textarea id="fNote">${esc(r.note||'')}</textarea></label>
+      <label class="field"><span class="lab">あとで確認したい</span>
+        <div class="row"><input type="checkbox" id="fReview" style="width:22px; height:22px" ${r.needs_review?'checked':''}>
+          <span class="small muted">チェックすると一覧で「要確認」と表示されます</span></div></label>
+
+      <button class="btn primary big" onclick="saveRedd('${r.uuid}','${sv}',${editing},false)">保存する</button>
+      <div class="sp"></div>
+      ${ editing ? `<button class="btn danger" onclick="deleteRedd('${r.uuid}')">この記録を削除</button>`
+                 : `<button class="btn big" onclick="saveRedd('${r.uuid}','${sv}',false,true)">保存して次を記録</button>` }
+    `,
+    onMount:()=>{
+      SCREENS._reddUuid = r.uuid;
+      SCREENS._acc = (r.gps_accuracy!==''&&r.gps_accuracy!=null) ? r.gps_accuracy : null;
+      SCREENS._photos = (r.photos||[]).slice();
+      renderPhotoPanel();
+      updateArea();
+      // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）
+      if(!editing) grabGps();
+    }
+  };
+};
+
+// 区間を変えたら、その区間での次の番号に振り直す（新規記録のときだけ）
+function onReachChange(sv, editing){
+  if(editing) return;
+  const el=$('#fNo'); if(!el) return;
+  el.value = nextReddNo(sv, $('#fReach').value||'');
+}
+function updateArea(){
+  const L=numVal('#fLen'), W=numVal('#fWid'), el=$('#areaOut');
+  if(!el) return;
+  const a = reddArea(L,W);
+  el.textContent = a==='' ? '—' : a.toFixed(3)+' m²';
+}
+function grabGps(){
+  if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
+  const out=$('#accOut'); if(out) out.textContent='位置を取得中…';
+  navigator.geolocation.getCurrentPosition(p=>{
+    lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+    fillGps();
+  }, ()=>{ if(out) out.textContent='位置を取れませんでした。手で入れるか、空欄のままでも保存できます'; },
+  {enableHighAccuracy:true, timeout:15000, maximumAge:0});
+}
+function fillGps(){
+  if(!lastFix) return;
+  const la=$('#fLat'), lo=$('#fLon'), out=$('#accOut');
+  if(la) la.value = lastFix.lat.toFixed(6);
+  if(lo) lo.value = lastFix.lon.toFixed(6);
+  SCREENS._acc = Math.round(lastFix.acc);
+  if(out) out.textContent = '誤差 約'+SCREENS._acc+'m';
+}
+
+function collectReddForm(){
+  const when = $('#fWhen').value;
+  const d = when ? new Date(when) : new Date();
+  return {
+    reach_uuid: $('#fReach').value||'',
+    redd_no: numVal('#fNo'),
+    observed_at: isNaN(d) ? nowISO() : d.toISOString(),
+    latitude: ($('#fLat').value||'').trim(),
+    longitude: ($('#fLon').value||'').trim(),
+    species: segVal('species'),
+    species_basis: segVal('basis'),
+    age_class: segVal('age'),
+    state: segVal('state'),
+    length_cm: numVal('#fLen'), width_cm: numVal('#fWid'),
+    depth_cm: numVal('#fDep'), velocity_ms: numVal('#fVel'),
+    substrate_main: segVal('subMain'), substrate_sub: segVal('subSub'),
+    embeddedness: segVal('embedded'), cover: segVal('cover'),
+    water_temp_c: numVal('#fWT'), intragravel_temp_c: numVal('#fIGT'), temp_depth_cm: numVal('#fTD'),
+    fish_present: segVal('fish'), female_n: numVal('#fFem'), male_n: numVal('#fMal'),
+    behavior: segVal('behavior'), carcass_n: numVal('#fCar'),
+    note: $('#fNote').value||'',
+    needs_review: !!($('#fReview')&&$('#fReview').checked),
+  };
+}
+function saveRedd(u, sv, editing, cont){
+  const f = collectReddForm();
+  const lat=parseFloat(f.latitude), lon=parseFloat(f.longitude);
+  if(f.latitude!=='' && (isNaN(lat)||Math.abs(lat)>90)){ toast('緯度の値を確かめてください'); return; }
+  if(f.longitude!=='' && (isNaN(lon)||Math.abs(lon)>180)){ toast('経度の値を確かめてください'); return; }
+  f.area_m2 = reddArea(f.length_cm, f.width_cm);
+  const prev = DB.get(DB.key.rd, u) || {};
+  const rec = Object.assign({ uuid:u, survey_uuid:sv }, f,
+    { gps_accuracy: SCREENS._acc!=null ? SCREENS._acc : (prev.gps_accuracy??''),
+      photos: (SCREENS._photos||[]).slice() });
+  if(!DB.upsert(DB.key.rd, rec)) return;
+  revokePhotoUrls();
+  SCREENS._photos = null;
+
+  // 次の記録に引き継ぐ値。同じ瀬では条件がほぼ同じなので入力を減らせる
+  SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species,
+    substrate_main:f.substrate_main, substrate_sub:f.substrate_sub, cover:f.cover,
+    water_temp_c:f.water_temp_c, temp_depth_cm:f.temp_depth_cm };
+  SCREENS._acc = null;
+  toast('保存しました');
+  if(cont){ STACK.pop(); nav('reddEdit', JSON.stringify({sv})); }
+  else goBack();
+}
+function deleteRedd(u){
+  if(!confirm('この産卵床の記録を削除しますか？')) return;
+  DB.softDelete(DB.key.rd, u);
+  toast('ゴミ箱へ入れました');
+  goBack();
+}
+
+/* ============================================================
+   調査メモ（産卵床とは別に、調査全体に紐づくメモ）
+   ============================================================ */
+SCREENS.notes = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const list = DB.notesOf(sv);
+  const cards = list.map(n=>`
+    <div class="card tap" onclick="nav('noteEdit','${esc(JSON.stringify({sv, u:n.uuid}))}')">
+      <div class="row">
+        <div class="grow"><span class="badge">${esc(n.category||'その他')}</span></div>
+        <div class="small muted">${fmtTime(n.recorded_at)}</div>
+      </div>
+      <div class="small" style="margin-top:8px; white-space:pre-wrap">${esc((n.content||'').slice(0,120))}${(n.content||'').length>120?'…':''}</div>
+      ${ (n.photos||[]).length ? `<div class="tiny muted" style="margin-top:6px">写真 ${n.photos.length}枚</div>` : '' }
+    </div>`).join('');
+  return {
+    title:'調査メモ',
+    sub:[{text:s.name},{text:`${list.length} 件`}],
+    html:`
+      <button class="btn primary big" onclick="nav('noteEdit','${esc(JSON.stringify({sv}))}')">＋ メモを追加</button>
+      <div class="sp"></div>
+      ${ list.length ? cards : `<div class="empty">まだメモがありません。</div>` }`
+  };
+};
+
+SCREENS.noteEdit = (argStr)=>{
+  const a = JSON.parse(argStr||'{}');
+  const sv = a.sv, editing = !!a.u;
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  let n;
+  if(editing){ n = DB.get(DB.key.nt, a.u); if(!n || n.deleted_at) return SCREENS.home(); }
+  else n = { uuid:uuid(), survey_uuid:sv, recorded_at:nowISO(), category:'', content:'',
+             latitude: lastFix?+lastFix.lat.toFixed(6):'', longitude: lastFix?+lastFix.lon.toFixed(6):'',
+             photos:[] };
+  return {
+    title: editing ? 'メモの編集' : 'メモの追加',
+    sub:[{text:s.name}],
+    html:`
+      <label class="field"><span class="lab">記録日時</span>
+        <input id="fNWhen" type="datetime-local" value="${localDatetimeValue(new Date(n.recorded_at||nowISO()))}"></label>
+      <label class="field"><span class="lab">分類</span>${segHtml('noteCat', OPT.noteCat, n.category, true)}</label>
+      <label class="field"><span class="lab">本文</span>
+        <textarea id="fNText" style="min-height:150px">${esc(n.content||'')}</textarea></label>
+      <div class="small muted">位置：${ (n.latitude!==''&&n.latitude!=null) ? `${n.latitude}, ${n.longitude}` : 'なし' }</div>
+
+      <div class="sect">写真</div>
+      ${photoPanelHtml()}
+
+      <div class="sp"></div>
+      <button class="btn primary big" onclick="saveNote('${n.uuid}','${sv}',${editing})">保存する</button>
+      ${ editing ? `<div class="sp"></div><button class="btn danger" onclick="deleteNote('${n.uuid}')">このメモを削除</button>` : '' }
+    `,
+    onMount:()=>{ SCREENS._noteUuid=n.uuid; SCREENS._noteLat=n.latitude; SCREENS._noteLon=n.longitude;
+      SCREENS._photos=(n.photos||[]).slice(); renderPhotoPanel(); }
+  };
+};
+function saveNote(u, sv, editing){
+  const text = ($('#fNText').value||'').trim();
+  const photos = (SCREENS._photos||[]).slice();
+  if(!text && !photos.length){ toast('本文か写真を入れてください'); return; }
+  const when = $('#fNWhen').value; const d = when ? new Date(when) : new Date();
+  const ok = DB.upsert(DB.key.nt, { uuid:u, survey_uuid:sv,
+    recorded_at: isNaN(d)?nowISO():d.toISOString(),
+    category: segVal('noteCat'), content: text,
+    latitude: SCREENS._noteLat??'', longitude: SCREENS._noteLon??'', photos });
+  if(!ok) return;
+  revokePhotoUrls(); SCREENS._photos=null;
+  toast('保存しました');
+  goBack();
+}
+function deleteNote(u){
+  if(!confirm('このメモを削除しますか？')) return;
+  DB.softDelete(DB.key.nt, u);
+  toast('ゴミ箱へ入れました');
+  goBack();
+}
+
+/* ============================================================
+   集計
+   ============================================================ */
+function num(v){ return (v===''||v==null||isNaN(+v)) ? null : +v; }
+function sumOf(list, field){
+  return list.reduce((a,x)=>{ const v=num(x[field]); return v==null?a:a+v; }, 0);
+}
+function avgOf(list, field){
+  const vs=list.map(x=>num(x[field])).filter(v=>v!=null);
+  return vs.length ? vs.reduce((a,b)=>a+b,0)/vs.length : null;
+}
+function rangeOf(list, field){
+  const vs=list.map(x=>num(x[field])).filter(v=>v!=null);
+  return vs.length ? {min:Math.min(...vs), max:Math.max(...vs), n:vs.length} : null;
+}
+function countBy(list, field, fallback){
+  const m=new Map();
+  list.forEach(x=>{ const k=x[field]||fallback; m.set(k,(m.get(k)||0)+1); });
+  return [...m.entries()].sort((a,b)=>b[1]-a[1]);
+}
+function fmtNum(v, d){ return v==null ? '—' : (+v).toFixed(d==null?1:d); }
+
+// 区間ごとの集計。区間長は手入力があればそちらを使う
+function reachStats(sv){
+  const redds = DB.reddsOf(sv);
+  const rows = DB.reachesOf(sv).map(r=>{
+    const list = redds.filter(x=>x.reach_uuid===r.uuid);
+    const len = reachLength(r);
+    return { name:r.name, len, n:list.length,
+      density: len>0 ? list.length/len*100 : null,
+      area: sumOf(list,'area_m2'),
+      species: countBy(list,'species','種不明') };
+  });
+  const noReach = redds.filter(x=>!x.reach_uuid);
+  if(noReach.length) rows.push({ name:'区間なし', len:0, n:noReach.length, density:null,
+    area:sumOf(noReach,'area_m2'), species:countBy(noReach,'species','種不明') });
+  return rows;
+}
+
+SCREENS.summary = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const redds = DB.reddsOf(sv);
+  const rows = reachStats(sv);
+  const totalLen = DB.reachesOf(sv).reduce((a,r)=>a+reachLength(r),0);
+
+  const wt = rangeOf(redds,'water_temp_c'), igt = rangeOf(redds,'intragravel_temp_c');
+  const tempLine = (r,label)=> r ? `${label} ${fmtNum(r.min)}〜${fmtNum(r.max)}℃（${r.n}件）` : `${label} —`;
+
+  const reachTable = rows.length ? `
+    <div class="tablewrap"><table>
+      <tr><th>区間</th><th class="num">区間長</th><th class="num">床数</th><th class="num">密度<br>(件/100m)</th><th class="num">総面積</th></tr>
+      ${rows.map(r=>`<tr>
+        <td>${esc(r.name)}</td>
+        <td class="num">${r.len>0?fmtDist(r.len):'—'}</td>
+        <td class="num">${r.n}</td>
+        <td class="num">${r.density==null?'—':fmtNum(r.density)}</td>
+        <td class="num">${r.area?fmtNum(r.area,2)+' m²':'—'}</td>
+      </tr>`).join('')}
+    </table></div>
+    <div class="tiny muted" style="margin-top:8px">密度は「床数 ÷ 区間長 × 100」。区間長が未入力の区間は密度を出せません。</div>`
+    : `<div class="empty">区間がありません。</div>`;
+
+  const listTable = (title, pairs)=>`
+    <div class="sect">${title}</div>
+    ${ pairs.length ? `<div class="tablewrap"><table>
+      ${pairs.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${v} 件</td></tr>`).join('')}
+    </table></div>` : `<div class="small muted">—</div>` }`;
+
+  return {
+    title:'集計',
+    sub:[{text:s.name},{text:`産卵床 ${redds.length}`}],
+    html:`
+      <div class="card">
+        <div class="row"><div class="grow small muted">産卵床の合計</div>
+          <div style="font-weight:700; font-size:20px">${redds.length} 件</div></div>
+        <div class="small muted" style="margin-top:8px">
+          歩いた区間の合計 ${totalLen>0?fmtDist(totalLen):'—'}
+          ${ totalLen>0 ? `／ 全体の密度 ${fmtNum(redds.length/totalLen*100)} 件/100m` : '' }
+        </div>
+        <div class="small muted" style="margin-top:4px">
+          総面積 ${fmtNum(sumOf(redds,'area_m2'),2)} m² ／ 平均 ${redds.length?fmtNum(sumOf(redds,'area_m2')/redds.length,2):'—'} m²
+        </div>
+        <div class="small muted" style="margin-top:4px">
+          平均の大きさ 長さ ${fmtNum(avgOf(redds,'length_cm'),0)} cm ／ 幅 ${fmtNum(avgOf(redds,'width_cm'),0)} cm
+        </div>
+      </div>
+
+      <div class="sect">区間別</div>
+      ${reachTable}
+
+      ${listTable('魚種別', countBy(redds,'species','種不明'))}
+      ${listTable('新旧別', countBy(redds,'age_class','未記入'))}
+      ${listTable('状態別', countBy(redds,'state','未記入'))}
+
+      <div class="sect">水温</div>
+      <div class="card">
+        <div class="small">${tempLine(wt,'河川水温')}</div>
+        <div class="small" style="margin-top:6px">${tempLine(igt,'河床内水温')}</div>
+      </div>
+
+      <div class="sect">親魚</div>
+      <div class="card">
+        <div class="small">雌 ${sumOf(redds,'female_n')} 尾 ／ 雄 ${sumOf(redds,'male_n')} 尾</div>
+        <div class="small" style="margin-top:6px">ホッチャレ ${sumOf(redds,'carcass_n')} 尾</div>
+      </div>
+
+      <div class="sect">確認が必要な記録</div>
+      <div class="card"><div class="small">要確認 ${redds.filter(r=>r.needs_review).length} 件 ／ 魚種が未記入 ${redds.filter(r=>!r.species).length} 件</div></div>
+
+      <div class="tiny muted" style="margin-top:14px">
+        同じ産卵床を重ねて数えている可能性があります。合計の床数がそのまま産卵尾数を表すわけではありません。
+      </div>`
+  };
+};
+
+/* ============================================================
+   地図
+   背景は国土地理院のタイル。既定は航空写真（瀬・淵や州の位置が見えるため）。
+   一度表示した範囲はキャッシュされ、圏外でも同じ場所なら表示できる。
+   ============================================================ */
+const BASEMAPS = {
+  '航空写真': { url:'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', max:18 },
+  '地形図'  : { url:'https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', max:18 },
+  '淡色地図': { url:'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', max:18 },
+};
+const GSI_ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html">国土地理院</a>';
+function baseMapName(){ const v=localStorage.getItem('rd_basemap'); return BASEMAPS[v]?v:'航空写真'; }
+
+// 魚種は色、新旧は塗りの濃さで見分ける
+const SPECIES_COLORS = ['#e05555','#4aa3dd','#4ec38a','#e0a030','#b070d0','#3fc0c0','#d06090','#9aa8b4'];
+function speciesColor(name){
+  const list = speciesList();
+  const i = list.indexOf(name);
+  return SPECIES_COLORS[(i<0 ? list.length : i) % SPECIES_COLORS.length];
+}
+function ageOpacity(age){
+  return age==='新しい' ? 0.95 : age==='やや古い' ? 0.6 : age==='古い' ? 0.2 : 0.45;
+}
+
+let MAP = null, MAP_LOCATE = null;
+function destroyMap(){
+  if(MAP){ try{ MAP.remove(); }catch(e){} }
+  MAP = null; MAP_LOCATE = null;
+}
+
+SCREENS.map = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  return {
+    title:'地図',
+    sub:[{text:s.name}],
+    html:`<div id="map"></div>
+      <div class="sp"></div>
+      <div class="card" id="legend"><div class="small muted">凡例</div></div>
+      <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、線＝歩いた区間、四角＝メモ。丸をタップすると記録を開けます。</div>`,
+    onMount:()=>drawMap(sv)
+  };
+};
+
+function drawMap(sv){
+  destroyMap();
+  if(typeof L === 'undefined'){ toast('地図を読み込めませんでした'); return; }
+  const redds = DB.reddsOf(sv).filter(r=>validPt([parseFloat(r.latitude), parseFloat(r.longitude)]));
+  const reaches = DB.reachesOf(sv).filter(r=>(r.track||[]).filter(validPt).length>=2);
+  const notes = DB.notesOf(sv).filter(n=>validPt([parseFloat(n.latitude), parseFloat(n.longitude)]));
+
+  MAP = L.map('map', { zoomControl:true }).setView([43.5,142.5], 9);
+  const layers = {};
+  Object.keys(BASEMAPS).forEach(name=>{
+    const b = BASEMAPS[name];
+    layers[name] = L.tileLayer(b.url, { maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR });
+  });
+  layers[baseMapName()].addTo(MAP);
+  L.control.layers(layers, null, {collapsed:true}).addTo(MAP);
+  MAP.on('baselayerchange', e=>{ if(BASEMAPS[e.name]) localStorage.setItem('rd_basemap', e.name); });
+
+  const group = L.featureGroup().addTo(MAP);
+
+  reaches.forEach(r=>{
+    const pts = (r.track||[]).filter(validPt);
+    L.polyline(pts, { color:'#4aa3dd', weight:4, opacity:.8 }).addTo(group)
+      .bindPopup(`<b>${esc(r.name)}</b><br>区間長 ${fmtDist(reachLength(r))}`);
+  });
+
+  redds.forEach(r=>{
+    const col = speciesColor(r.species);
+    const size = (r.length_cm!==''&&r.width_cm!=='') ? `${r.length_cm}×${r.width_cm}cm` : '';
+    L.circleMarker([parseFloat(r.latitude), parseFloat(r.longitude)],
+      { radius:8, color:col, weight:2, fillColor:col, fillOpacity:ageOpacity(r.age_class) })
+      .addTo(group)
+      .bindPopup(`<b>${esc(r.reach_uuid?reachName(sv,r.reach_uuid):'区間なし')} No.${esc(r.redd_no||'—')}</b><br>
+        ${esc([r.species||'種不明', r.age_class, r.state, size].filter(Boolean).join(' ／ '))}<br>
+        <a href="#" onclick="closeMapPopupAndEdit('${sv}','${r.uuid}'); return false;">この記録を開く</a>`);
+  });
+
+  notes.forEach(n=>{
+    L.marker([parseFloat(n.latitude), parseFloat(n.longitude)], {
+      icon: L.divIcon({ className:'', iconSize:[16,16], iconAnchor:[8,8],
+        html:`<div style="width:14px;height:14px;background:#e0a030;border:2px solid #fff;border-radius:3px"></div>` })
+    }).addTo(group).bindPopup(`<b>${esc(n.category||'メモ')}</b><br>${esc((n.content||'').slice(0,80))}`);
+  });
+
+  if(group.getLayers().length){
+    try{ MAP.fitBounds(group.getBounds().pad(0.2), {maxZoom:17}); }catch(e){}
+  }
+  addLocateControl();
+  if(lastFix) showCurrentPos();
+  renderLegend(sv);
+}
+
+function closeMapPopupAndEdit(sv, u){
+  nav('reddEdit', JSON.stringify({sv, u}));
+}
+
+function showCurrentPos(){
+  if(!MAP || !lastFix) return;
+  if(MAP_LOCATE){ try{ MAP.removeLayer(MAP_LOCATE); }catch(e){} }
+  MAP_LOCATE = L.layerGroup([
+    L.circle([lastFix.lat,lastFix.lon], { radius:Math.max(5,lastFix.acc), color:'#4aa3dd', weight:1, fillOpacity:.12 }),
+    L.circleMarker([lastFix.lat,lastFix.lon], { radius:6, color:'#fff', weight:2, fillColor:'#4aa3dd', fillOpacity:1 })
+  ]).addTo(MAP);
+}
+function addLocateControl(){
+  const target = MAP;   // 画面を切り替えた後に古い地図を触らないよう、この時点の地図を覚えておく
+  const C = L.Control.extend({
+    options:{ position:'topleft' },
+    onAdd(){
+      const b = L.DomUtil.create('button','locate-btn');
+      b.innerHTML='📍'; b.title='現在地へ';
+      L.DomEvent.on(b,'click', L.DomEvent.stop).on(b,'click',()=>{
+        if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
+        toast('現在地を探しています…');
+        navigator.geolocation.getCurrentPosition(p=>{
+          lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+          if(MAP!==target) return;
+          showCurrentPos();
+          target.setView([lastFix.lat,lastFix.lon], Math.max(target.getZoom(),16));
+        }, ()=>toast('現在地を取れませんでした'), {enableHighAccuracy:true, timeout:15000});
+      });
+      return b;
+    }
+  });
+  MAP.addControl(new C());
+}
+
+function renderLegend(sv){
+  const box=$('#legend'); if(!box) return;
+  const used = [...new Set(DB.reddsOf(sv).map(r=>r.species||'種不明'))];
+  const sp = used.map(n=>`<span class="badge" style="border-color:${speciesColor(n==='種不明'?'':n)}">
+      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${speciesColor(n==='種不明'?'':n)};margin-right:6px"></span>${esc(n)}</span>`).join(' ');
+  const age = OPT.age.map(a=>`<span class="badge">
+      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9aa8b4;opacity:${ageOpacity(a)};margin-right:6px"></span>${esc(a)}</span>`).join(' ');
+  box.innerHTML = `<div class="small muted">魚種</div><div style="margin:6px 0 10px">${sp||'—'}</div>
+    <div class="small muted">新旧（塗りの濃さ）</div><div style="margin-top:6px">${age}</div>`;
+}
+
+/* ============================================================
+   書き出し（CSV / GeoJSON / 写真ZIP / バックアップ）
+   列の定義は1か所にまとめ、CSVもGeoJSONも同じものを見る（食い違いを防ぐため）。
+   ============================================================ */
+function download(filename, text, mime){
+  downloadBlob(filename, new Blob([text], {type: mime||'text/plain;charset=utf-8'}));
+}
+function downloadBlob(filename, blob){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 3000);
+}
+function csvCell(v){
+  v = v==null ? '' : String(v);
+  // Excelの数式として解釈されるのを防ぐ。ただし数値（マイナスの緯度経度など）はそのまま通す
+  if(/^[=+\-@\t\r]/.test(v) && !/^[+-]?\d+(\.\d+)?$/.test(v)) v = "'"+v;
+  return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
+}
+function toCsv(cols, rows){
+  return [cols.join(',')].concat(rows.map(r=>cols.map(c=>csvCell(r[c])).join(','))).join('\r\n');
+}
+function photoFilename(rec, i, p){ return `${rec.uuid}_${i+1}.${(p&&p.ext)||'jpg'}`; }
+function exportBase(surveys){
+  return surveys.length===1
+    ? `ReddSurvey_${(surveys[0].survey_date||'').replace(/-/g,'')}_${(surveys[0].river_name||'').replace(/[\\/:*?"<>|\s]/g,'')}`
+    : `ReddSurvey_${dateValue().replace(/-/g,'')}`;
+}
+
+/* ---------- 産卵床 ---------- */
+const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
+  'reach_id','reach_name','reach_length_m','redd_no','observed_at','latitude','longitude','gps_accuracy',
+  'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
+  'depth_cm','velocity_ms','substrate_main','substrate_sub','embeddedness','cover',
+  'water_temp_c','intragravel_temp_c','temp_depth_cm',
+  'fish_present','female_n','male_n','behavior','carcass_n',
+  'needs_review','note','photo_files'];
+function reddRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    const reaches = DB.reachesOf(s.uuid);
+    DB.reddsOf(s.uuid).forEach(r=>{
+      const re = reaches.find(x=>x.uuid===r.reach_uuid);
+      rows.push({
+        survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+        river_name:s.river_name, water_system:s.water_system, investigator:s.investigator,
+        reach_id:r.reach_uuid||'', reach_name:re?re.name:'', reach_length_m:re?reachLength(re):'',
+        redd_no:r.redd_no, observed_at:r.observed_at,
+        latitude:r.latitude, longitude:r.longitude, gps_accuracy:r.gps_accuracy,
+        species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
+        length_cm:r.length_cm, width_cm:r.width_cm, area_m2:r.area_m2,
+        depth_cm:r.depth_cm, velocity_ms:r.velocity_ms,
+        substrate_main:r.substrate_main, substrate_sub:r.substrate_sub,
+        embeddedness:r.embeddedness, cover:r.cover,
+        water_temp_c:r.water_temp_c, intragravel_temp_c:r.intragravel_temp_c, temp_depth_cm:r.temp_depth_cm,
+        fish_present:r.fish_present, female_n:r.female_n, male_n:r.male_n,
+        behavior:r.behavior, carcass_n:r.carcass_n,
+        needs_review:r.needs_review?1:0, note:r.note,
+        photo_files:(r.photos||[]).map((p,i)=>photoFilename(r,i,p)).join(';'),
+      });
+    });
+  });
+  return rows;
+}
+
+/* ---------- 区間 ---------- */
+const REACH_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
+  'started_at','ended_at','length_m_gps','length_m_manual','length_m_used','river_width_m',
+  'start_lat','start_lon','end_lat','end_lon','redd_count','density_per_100m','memo'];
+function reachRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    const redds = DB.reddsOf(s.uuid);
+    DB.reachesOf(s.uuid).forEach(r=>{
+      const n = redds.filter(x=>x.reach_uuid===r.uuid).length;
+      const len = reachLength(r);
+      rows.push({
+        survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date), river_name:s.river_name,
+        reach_id:r.uuid, reach_name:r.name, started_at:r.started_at, ended_at:r.ended_at||'',
+        length_m_gps:r.length_m_auto??'', length_m_manual:r.length_m_manual??'', length_m_used:len,
+        river_width_m:r.river_width_m??'',
+        start_lat:r.start_lat??'', start_lon:r.start_lon??'', end_lat:r.end_lat??'', end_lon:r.end_lon??'',
+        redd_count:n, density_per_100m: len>0 ? +(n/len*100).toFixed(2) : '',
+        memo:r.memo||'',
+      });
+    });
+  });
+  return rows;
+}
+
+function exportCSV(surveys){
+  const base = exportBase(surveys);
+  const rr = reddRows(surveys), er = reachRows(surveys);
+  if(!rr.length && !er.length){ toast('書き出すものがありません'); return; }
+  // Excelで文字化けしないよう先頭にBOMを付ける
+  if(rr.length) download(`${base}_redds.csv`, '﻿'+toCsv(REDD_COLS, rr), 'text/csv;charset=utf-8');
+  if(er.length) download(`${base}_reaches.csv`, '﻿'+toCsv(REACH_COLS, er), 'text/csv;charset=utf-8');
+  toast('CSVを書き出しました');
+}
+
+function exportGeoJSON(surveys){
+  const base = exportBase(surveys);
+  const pts = reddRows(surveys)
+    .filter(r=>validPt([parseFloat(r.latitude), parseFloat(r.longitude)]))
+    .map(r=>({ type:'Feature',
+      geometry:{ type:'Point', coordinates:[parseFloat(r.longitude), parseFloat(r.latitude)] },
+      properties: REDD_COLS.reduce((p,c)=>{ p[c]=r[c]; return p; }, {}) }));
+
+  const lines=[];
+  surveys.forEach(s=>{
+    const redds = DB.reddsOf(s.uuid);
+    DB.reachesOf(s.uuid).forEach(r=>{
+      const pathPts=(r.track||[]).filter(validPt);
+      if(pathPts.length<2) return;
+      const n = redds.filter(x=>x.reach_uuid===r.uuid).length;
+      const len = reachLength(r);
+      lines.push({ type:'Feature',
+        geometry:{ type:'LineString', coordinates: pathPts.map(p=>[p[1],p[0]]) },   // GeoJSONは経度,緯度の順
+        properties:{ survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+          river_name:s.river_name, reach_id:r.uuid, reach_name:r.name,
+          started_at:r.started_at, ended_at:r.ended_at||'',
+          length_m_gps:r.length_m_auto??'', length_m_used:len, river_width_m:r.river_width_m??'',
+          redd_count:n, density_per_100m: len>0 ? +(n/len*100).toFixed(2) : null, memo:r.memo||'' } });
+    });
+  });
+
+  if(!pts.length && !lines.length){ toast('位置のついた記録がありません'); return; }
+  if(pts.length) download(`${base}_redds.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:pts}, null, 1), 'application/geo+json');
+  if(lines.length) download(`${base}_reaches.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:lines}, null, 1), 'application/geo+json');
+  toast('GeoJSONを書き出しました（座標系 EPSG:4326）');
+}
+
+/* ---------- 写真ZIP（無圧縮・追加ライブラリ不要） ---------- */
+function crc32(u8){ let c=~0>>>0;
+  for(let i=0;i<u8.length;i++){ c^=u8[i]; for(let k=0;k<8;k++) c=(c>>>1)^(0xEDB88320 & -(c&1)); }
+  return (~c)>>>0; }
+function buildZip(files){
+  const enc=new TextEncoder(); const parts=[]; const central=[]; let offset=0;
+  const u16=n=>[n&255,(n>>8)&255], u32=n=>[n&255,(n>>8)&255,(n>>16)&255,(n>>24)&255];
+  files.forEach(f=>{
+    const name=enc.encode(f.name), data=f.u8, crc=crc32(data);
+    const lh=[].concat([0x50,0x4b,0x03,0x04], u16(20), u16(0x0800), u16(0), u16(0), u16(0),
+      u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0));
+    parts.push(new Uint8Array(lh), name, data);
+    const ch=[].concat([0x50,0x4b,0x01,0x02], u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0),
+      u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), u16(0), u16(0), u16(0),
+      u32(0), u32(offset));
+    central.push({head:new Uint8Array(ch), name});
+    offset += lh.length + name.length + data.length;
+  });
+  const cdStart=offset; let cdSize=0;
+  central.forEach(c=>{ parts.push(c.head, c.name); cdSize += c.head.length + c.name.length; });
+  parts.push(new Uint8Array([].concat([0x50,0x4b,0x05,0x06], u16(0), u16(0),
+    u16(central.length), u16(central.length), u32(cdSize), u32(cdStart), u16(0))));
+  return new Blob(parts, {type:'application/zip'});
+}
+async function exportPhotoZip(surveys){
+  const items=[];
+  surveys.forEach(s=>{
+    DB.reddsOf(s.uuid).forEach(r=>(r.photos||[]).forEach((p,i)=>items.push({s, rec:r, p, i, kind:'産卵床'})));
+    DB.notesOf(s.uuid).forEach(n=>(n.photos||[]).forEach((p,i)=>items.push({s, rec:n, p, i, kind:'メモ'})));
+  });
+  if(!items.length){ toast('書き出す写真がありません'); return; }
+  const total = items.reduce((a,it)=>a+((it.p&&it.p.size)||0), 0);
+  const GB=1024*1024*1024;
+  if(total >= 1.5*GB){ toast('写真が多すぎてZIPを作れません（約'+(total/GB).toFixed(1)+'GB）。調査ごとに分けて書き出してください'); return; }
+  if(total >= 0.5*GB && !confirm('約'+(total/GB).toFixed(1)+'GBあります。時間がかかり、端末によっては失敗します。続けますか？')) return;
+
+  toast('写真をまとめています…');
+  const files=[], idx=[];
+  for(const it of items){
+    let rec=null; try{ rec=await PhotoDB.get(it.p.id); }catch(e){}
+    if(!rec||!rec.blob) continue;
+    const name = photoFilename(it.rec, it.i, it.p);
+    files.push({ name, u8:new Uint8Array(await rec.blob.arrayBuffer()) });
+    idx.push({ file:name, type:it.kind, survey_name:it.s.name,
+      redd_no:it.rec.redd_no??'', observed_at:it.rec.observed_at||it.rec.recorded_at||'',
+      latitude:it.rec.latitude??'', longitude:it.rec.longitude??'' });
+  }
+  if(!files.length){ toast('写真の中身が見つかりませんでした'); return; }
+  const cols=['file','type','survey_name','redd_no','observed_at','latitude','longitude'];
+  files.push({ name:'index.csv', u8:new TextEncoder().encode('﻿'+toCsv(cols, idx)) });
+  downloadBlob(`${exportBase(surveys)}_photos.zip`, buildZip(files));
+  toast('写真ZIPを書き出しました');
+}
+
+/* ---------- バックアップと復元 ---------- */
+const CORE_KEYS = ['sv','re','rd','nt'];
+function buildBackup(){
+  const data={};
+  CORE_KEYS.forEach(k=>{ data[DB.key[k]] = DB.loadRaw(DB.key[k]); });   // 消したものも含めて丸ごと
+  return { app:'redd_survey', version:APP_VERSION, exported_at:nowISO(),
+           species: speciesList(), data };
+}
+function exportBackup(){
+  let b; try{ b=buildBackup(); }
+  catch(e){ toast('保存データを読めませんでした。復元は行わないでください'); return; }
+  download(`reddsurvey_backup_${dateValue().replace(/-/g,'')}.json`, JSON.stringify(b), 'application/json');
+  toast('バックアップを書き出しました（写真は含みません）');
+}
+function importBackup(input){
+  const f=(input.files||[])[0]; input.value='';
+  if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    let b; try{ b=JSON.parse(rd.result); }catch(e){ toast('ファイルを読めませんでした'); return; }
+    if(!b || b.app!=='redd_survey' || !b.data){ toast('このアプリのバックアップではありません'); return; }
+    const counts = CORE_KEYS.map(k=>(b.data[DB.key[k]]||[]).length);
+    if(!confirm(`取り込みますか？\n調査 ${counts[0]} / 区間 ${counts[1]} / 産卵床 ${counts[2]} / メモ ${counts[3]}\n\n同じ記録は新しい方（更新日時が後）を残します。`)) return;
+    let added=0, updated=0;
+    CORE_KEYS.forEach(k=>{
+      const key=DB.key[k];
+      const cur=DB.load(key);
+      const map=new Map(cur.map(x=>[x.uuid,x]));
+      (b.data[key]||[]).forEach(x=>{
+        if(!x || !x.uuid) return;
+        const old=map.get(x.uuid);
+        if(!old){ map.set(x.uuid,x); added++; }
+        else if(String(x.updated_at||'') > String(old.updated_at||'')){ map.set(x.uuid,x); updated++; }
+      });
+      DB.save(key, [...map.values()]);
+    });
+    if(Array.isArray(b.species) && b.species.length) speciesSave(b.species);
+    toast(`取り込みました（新規 ${added} / 更新 ${updated}）`);
+    reset('home');
+  };
+  rd.readAsText(f);
+}
+
+/* ---------- 書き出し画面 ---------- */
+SCREENS.exportHub = (svUuid)=>{
+  const one = svUuid ? DB.survey(svUuid) : null;
+  const surveys = one ? [one] : DB.surveys();
+  const arg = svUuid ? `'${svUuid}'` : `''`;
+  const nRedd = surveys.reduce((a,s)=>a+DB.reddsOf(s.uuid).length, 0);
+  const nPhoto = surveys.reduce((a,s)=>
+    a + DB.reddsOf(s.uuid).reduce((b,r)=>b+(r.photos||[]).length,0)
+      + DB.notesOf(s.uuid).reduce((b,n)=>b+(n.photos||[]).length,0), 0);
+  return {
+    title: one ? 'この調査を書き出す' : 'データの書き出し',
+    sub:[{text: one ? one.name : `調査 ${surveys.length}件`}],
+    html:`
+      <div class="card"><div class="small muted">対象</div>
+        <div>${esc(one? one.name : `すべての調査（${surveys.length}件）`)}</div>
+        <div class="small muted" style="margin-top:6px">産卵床 ${nRedd} 件 ／ 写真 ${nPhoto} 枚</div></div>
+
+      <div class="sect">表計算・GIS用</div>
+      <button class="btn" onclick="exportCSV(exportTargets(${arg}))">CSV（産卵床・区間）</button>
+      <div class="sp"></div>
+      <button class="btn" onclick="exportGeoJSON(exportTargets(${arg}))">GeoJSON（点・線）</button>
+      <div class="tiny muted" style="margin-top:8px">
+        CSVはExcelでそのまま開けます（UTF-8 BOM）。GeoJSONは座標系 EPSG:4326 で、QGISにそのまま読み込めます。</div>
+
+      <div class="sect">写真</div>
+      <button class="btn" onclick="exportPhotoZip(exportTargets(${arg}))">写真をZIPでまとめる</button>
+      <div class="tiny muted" style="margin-top:8px">どの産卵床の写真かが分かる対応表（index.csv）が一緒に入ります。</div>
+
+      <div class="sect">まるごと保存（機種変更・PCへの受け渡し）</div>
+      <button class="btn" onclick="exportBackup()">バックアップを書き出す</button>
+      <div class="tiny muted" style="margin-top:8px">記録だけを保存します。写真は別に「写真ZIP」で書き出してください。</div>
+      <div class="sp"></div>
+      <input type="file" id="fBackupIn" accept="application/json,.json" style="display:none" onchange="importBackup(this)">
+      <button class="btn" onclick="document.getElementById('fBackupIn').click()">バックアップを取り込む</button>
+
+      <div class="tiny muted" style="margin-top:16px">
+        iPhoneでは書き出したファイルが共有シートに出るので「ファイルに保存」を選んでください。</div>`
+  };
+};
+function exportTargets(svUuid){
+  if(svUuid){ const s=DB.survey(svUuid); return s?[s]:[]; }
+  return DB.surveys();
+}
+
+/* ============================================================
+   ゴミ箱
+   ============================================================ */
+const TRASH_GROUPS = [
+  { key:'sv', label:'調査',   name:x=>x.name||'(名称未設定)' },
+  { key:'re', label:'区間',   name:x=>x.name||'(区間)' },
+  { key:'rd', label:'産卵床', name:x=>`No.${x.redd_no||'—'} ${x.species||'種不明'}` },
+  { key:'nt', label:'メモ',   name:x=>(x.content||'').slice(0,30)||'(メモ)' },
+];
+SCREENS.trash = ()=>{
+  const blocks = TRASH_GROUPS.map(g=>{
+    const list = DB.deleted(DB.key[g.key]);
+    if(!list.length) return '';
+    return `<div class="sect">${g.label}（${list.length}）</div>` + list.map(x=>`
+      <div class="card"><div class="row">
+        <div class="grow"><div>${esc(g.name(x))}</div>
+          <div class="tiny muted">削除 ${fmtDate(x.deleted_at)} ${fmtTime(x.deleted_at)}</div></div>
+        <button class="btn ghost small" style="width:auto" onclick="restoreItem('${g.key}','${x.uuid}')">戻す</button>
+      </div></div>`).join('');
+  }).join('');
+  const total = TRASH_GROUPS.reduce((a,g)=>a+DB.deleted(DB.key[g.key]).length, 0);
+  return {
+    title:'ゴミ箱',
+    sub:[{text:`${total} 件`}],
+    html: total ? `${blocks}<div class="sp"></div>
+        <button class="btn danger big" onclick="purgeAll()">ゴミ箱を空にする（完全に消す）</button>
+        <div class="tiny muted" style="margin-top:8px">空にすると元に戻せません。写真も一緒に消えます。</div>`
+      : `<div class="empty">ゴミ箱は空です。</div>`
+  };
+};
+function restoreItem(k, u){ DB.restore(DB.key[k], u); toast('戻しました'); render(); }
+function purgeAll(){
+  const total = TRASH_GROUPS.reduce((a,g)=>a+DB.deleted(DB.key[g.key]).length, 0);
+  if(!confirm(`ゴミ箱の ${total} 件を完全に消します。元に戻せません。よろしいですか？`)) return;
+  TRASH_GROUPS.forEach(g=>{
+    DB.deleted(DB.key[g.key]).forEach(x=>DB.hardDelete(DB.key[g.key], x.uuid));
+  });
+  try{ PhotoDB.gc(); }catch(e){}   // 参照されなくなった写真も片付ける
+  toast('ゴミ箱を空にしました');
+  render();
+}
+
+/* ============================================================
+   更新・起動
+   ============================================================ */
+// 「最新に更新」：このアプリのキャッシュだけ消して読み直す。他アプリのキャッシュは触らない
+async function forceUpdate(){
+  toast('最新版を確認しています…');
+  try{
+    if('serviceWorker' in navigator){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister()));
+    }
+    if(window.caches){
+      const keys = await caches.keys();
+      await Promise.all(keys.filter(k=>k.startsWith('redd-survey-')||k.startsWith('redd-map-tiles-'))
+        .map(k=>caches.delete(k)));
+    }
+  }catch(e){ console.error(e); }
+  location.reload();
+}
+
+(function boot(){
+  resumeTracking();   // 記録中の区間があれば、開き直しても軌跡の記録を続ける
+  render();   // 先に画面を出す。この後の準備を待つと起動時に一瞬何も映らないため
+  try{ PhotoDB.gc(); }catch(e){}   // どこからも使われなくなった写真を片付ける
+  // 保存領域を消されにくくする（写真やタイルを抱えるため）
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{}); }catch(e){}
+  if('serviceWorker' in navigator && location.protocol!=='file:'){
+    window.addEventListener('load', ()=>{ navigator.serviceWorker.register('./sw.js').catch(e=>console.error(e)); });
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "産卵床調査記録",
+  "short_name": "産卵床調査",
+  "description": "サケ科魚類の産卵床調査記録アプリ（区間・産卵床・環境・集計・地図・CSV/GeoJSON出力）",
+  "start_url": "./redd_survey.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "icons": [
+    { "src": "./icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
