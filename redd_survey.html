@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v5';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v6';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -898,8 +898,8 @@ SCREENS.redds = (sv)=>{
 const VOICE_NUM_FIELDS = [
   { sel:'#fLen', label:'長さ',       words:['長さ','ながさ','たて','縦'] },
   { sel:'#fWid', label:'幅',         words:['幅','はば','よこ','横'] },
-  { sel:'#fDep', label:'水深',       words:['水深','すいしん','深さ','ふかさ'] },
-  { sel:'#fVel', label:'流速',       words:['流速','りゅうそく','速さ','はやさ'] },
+  { env:'depth_cm',    label:'水深', words:['水深','すいしん','深さ','ふかさ'] },
+  { env:'velocity_ms', label:'流速', words:['流速','りゅうそく','速さ','はやさ'] },
   { sel:'#fIGT', label:'河床内水温', words:['河床内水温','河床内','かしょうない','床内','間隙水温'] },
   { sel:'#fWT',  label:'河川水温',   words:['河川水温','水温','すいおん'] },
   { sel:'#fTD',  label:'測った深さ', words:['測定深さ','埋設深さ','深度'] },
@@ -929,6 +929,22 @@ const VOICE_SEG_FIELDS = [
     aliases:{'親魚あり':'いる','親魚なし':'いない'} },
 ];
 
+// 声で言われた水深・流速を測点へ入れる。
+// いまの最後の測点がその項目を空けていればそこへ、埋まっていれば新しい測点を足す
+function envVoiceApply(hit){
+  envSync();
+  const list = SCREENS._env || [];
+  let last = list[list.length-1];
+  const busy = last && Object.keys(hit).some(k=>last[k]!=='' && last[k]!=null);
+  if(!last || busy){
+    last = {depth_cm:'', velocity_ms:'', note:''};
+    list.push(last);
+  }
+  Object.keys(hit).forEach(k=>{ last[k] = parseFloat(hit[k]); });
+  SCREENS._env = list;
+  renderEnvList();
+}
+
 function setSegValue(field, value){
   const btns = $$(`[data-seg="${field}"] button`);
   const b = btns.find(x=>x.textContent===value);
@@ -947,16 +963,19 @@ function parseVoice(text){
   VOICE_NUM_FIELDS.forEach(f=>f.words.forEach(w=>entries.push({f,w})));
   entries.sort((a,b)=>b.w.length-a.w.length);
   const filled=new Set();
+  const envHit={};
   entries.forEach(({f,w})=>{
-    if(filled.has(f.sel)) return;
+    const key = f.env || f.sel;
+    if(filled.has(key)) return;
     const m = new RegExp(w+'\\s*[はがのをが]?\\s*(-?\\d+(?:\\.\\d+)?)').exec(t);
     if(!m) return;
-    const el=$(f.sel); if(!el) return;
-    el.value = m[1];
-    filled.add(f.sel);
+    if(f.env){ envHit[f.env] = m[1]; }
+    else { const el=$(f.sel); if(!el) return; el.value = m[1]; }
+    filled.add(key);
     hits.push(`${f.label} ${m[1]}`);
     t = t.replace(m[0], ' ');
   });
+  if(Object.keys(envHit).length) envVoiceApply(envHit);
 
   // 選択肢の項目
   VOICE_SEG_FIELDS.forEach(f=>{
@@ -1031,6 +1050,35 @@ function voicePanelHtml(){
 /* ============================================================
    産卵床の記録
    ============================================================ */
+/* ---------- まわりの環境の測点（水深・流速を何点でも） ---------- */
+// 古い記録（水深・流速が1つだけ）は、1点の測点として読み替える
+function envPoints(r){
+  if(Array.isArray(r.env_points) && r.env_points.length) return r.env_points.slice();
+  if(num(r.depth_cm)!=null || num(r.velocity_ms)!=null)
+    return [{ depth_cm:r.depth_cm??'', velocity_ms:r.velocity_ms??'', note:'' }];
+  return [];
+}
+function envValues(r, field){
+  return envPoints(r).map(p=>num(p[field])).filter(v=>v!=null);
+}
+function envMean(r, field){
+  const v = envValues(r, field);
+  return v.length ? +(v.reduce((a,b)=>a+b,0)/v.length).toFixed(2) : '';
+}
+// 調査全体・複数記録ぶんの測点をまとめる
+function allEnvValues(list, field){
+  const out=[];
+  list.forEach(r=>envValues(r, field).forEach(v=>out.push(v)));
+  return out;
+}
+function statLine(vals, unit, digits){
+  if(!vals.length) return '—';
+  const mn=Math.min(...vals), mx=Math.max(...vals);
+  const av=vals.reduce((a,b)=>a+b,0)/vals.length;
+  const d = digits==null?1:digits;
+  return `平均 ${av.toFixed(d)}${unit}（${mn.toFixed(d)}〜${mx.toFixed(d)}${unit}・${vals.length}点）`;
+}
+
 /* 何を記録したか。
    record_targets を持たない古い記録は、中身から推定する（産卵床は必ず含める） */
 function recordTargets(r){
@@ -1074,7 +1122,7 @@ SCREENS.reddEdit = (argStr)=>{
       gps_accuracy:'', position_source: fromMap ? '地図' : '',
       river_form: carry.river_form||'',
       species: carry.species||'', species_basis:'', age_class:'', state:'',
-      length_cm:'', width_cm:'', depth_cm:'', velocity_ms:'',
+      length_cm:'', width_cm:'', env_points:[],
       substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
       embeddedness:'', cover: carry.cover||'',
       water_temp_c: carry.water_temp_c??'', intragravel_temp_c:'', temp_depth_cm: carry.temp_depth_cm??'',
@@ -1157,12 +1205,14 @@ SCREENS.reddEdit = (argStr)=>{
         <div style="font-weight:700" id="areaOut">—</div></div></div>
 
       <div class="sect">まわりの環境</div>
-      <div class="two">
-        <label class="field"><span class="lab">水深（cm）</span>
-          <input id="fDep" type="number" step="1" inputmode="decimal" value="${esc(r.depth_cm??'')}"></label>
-        <label class="field"><span class="lab">流速（m/s）</span>
-          <input id="fVel" type="number" step="0.01" inputmode="decimal" value="${esc(r.velocity_ms??'')}"></label>
-      </div>
+      <label class="field"><span class="lab">水深・流速（何点でも足せます）</span>
+        <span class="tiny muted" style="display:block; margin:-2px 0 6px">
+          1点だけでも、産卵床の上・掘った窪み・盛り上がりなど数点でも記録できます。
+          場所の名前は空欄でも構いません。
+        </span></label>
+      <div id="envList"></div>
+      <button class="btn" onclick="envAdd()">＋ 測点を追加</button>
+      <div class="sp"></div>
       <label class="field"><span class="lab">底質（主）</span>${segHtml('subMain', OPT.substrate, r.substrate_main, true)}</label>
       <label class="field"><span class="lab">底質（副）</span>${segHtml('subSub', OPT.substrate, r.substrate_sub, true)}</label>
       <label class="field"><span class="lab">埋没度</span>
@@ -1222,6 +1272,8 @@ SCREENS.reddEdit = (argStr)=>{
       SCREENS._posSrc = r.position_source||'';
       SCREENS._photos = (r.photos||[]).slice();
       renderPhotoPanel();
+      SCREENS._env = envPoints(r);
+      renderEnvList();
       updateArea();
       onTargetChange();  // 選んでいる対象の欄だけ出す
       initPickMap(sv);   // 位置の地図は常に出しておく
@@ -1247,6 +1299,53 @@ function onReachChange(sv, editing){
   const el=$('#fNo'); if(!el) return;
   el.value = nextReddNo(sv, $('#fReach').value||'');
 }
+/* ---------- 測点の入力欄（水深・流速） ---------- */
+function numOf(el){
+  if(!el) return '';
+  const v=String(el.value).trim();
+  if(v==='') return '';
+  const n=parseFloat(v); return isNaN(n)?'':n;
+}
+// 画面に入力されている内容を SCREENS._env に取り込む（並べ替え・追加の前に必ず呼ぶ）
+function envSync(){
+  SCREENS._env = $$('#envList .envrow').map(row=>({
+    depth_cm: numOf(row.querySelector('.envd')),
+    velocity_ms: numOf(row.querySelector('.envv')),
+    note: ((row.querySelector('.envn')||{}).value||'').trim(),
+  }));
+}
+function envAdd(){
+  envSync();
+  SCREENS._env = (SCREENS._env||[]).concat([{depth_cm:'', velocity_ms:'', note:''}]);
+  renderEnvList();
+}
+function envRemove(i){
+  envSync();
+  (SCREENS._env||[]).splice(i,1);
+  renderEnvList();
+}
+function renderEnvList(){
+  const box=$('#envList'); if(!box) return;
+  const list = SCREENS._env||[];
+  if(!list.length){
+    box.innerHTML = `<div class="tiny muted" style="margin-bottom:8px">まだ測点がありません。必要なら下のボタンで足してください。</div>`;
+    return;
+  }
+  box.innerHTML = list.map((p,i)=>`
+    <div class="card envrow" style="padding:10px">
+      <div class="row"><div class="grow small muted">測点 ${i+1}</div>
+        <button class="btn ghost small" style="width:auto; padding:4px 10px" onclick="envRemove(${i})">削除</button></div>
+      <div class="two" style="margin-top:8px">
+        <label class="field" style="margin-bottom:8px"><span class="lab">水深（cm）</span>
+          <input class="envd" type="number" step="1" inputmode="decimal" value="${esc(p.depth_cm??'')}"></label>
+        <label class="field" style="margin-bottom:8px"><span class="lab">流速（m/s）</span>
+          <input class="envv" type="number" step="0.01" inputmode="decimal" value="${esc(p.velocity_ms??'')}"></label>
+      </div>
+      <label class="field" style="margin-bottom:0"><span class="lab">場所の名前（任意）</span>
+        <input class="envn" value="${esc(p.note||'')}" placeholder="例：産卵床の上／掘った窪み／盛り上がり"></label>
+    </div>`).join('');
+}
+
 function updateArea(){
   const L=numVal('#fLen'), W=numVal('#fWid'), el=$('#areaOut');
   if(!el) return;
@@ -1368,7 +1467,6 @@ function collectReddForm(){
     age_class: segVal('age'),
     state: segVal('state'),
     length_cm: numVal('#fLen'), width_cm: numVal('#fWid'),
-    depth_cm: numVal('#fDep'), velocity_ms: numVal('#fVel'),
     substrate_main: segVal('subMain'), substrate_sub: segVal('subSub'),
     embeddedness: segVal('embedded'), cover: segVal('cover'),
     water_temp_c: numVal('#fWT'), intragravel_temp_c: numVal('#fIGT'), temp_depth_cm: numVal('#fTD'),
@@ -1381,6 +1479,9 @@ function collectReddForm(){
 function saveRedd(u, sv, editing, cont){
   const f = collectReddForm();
   if(!f.record_targets.length){ toast('この記録が何かを選んでください（産卵床・親魚・ホッチャレ）'); return; }
+  envSync();
+  // 何も入っていない測点は保存しない
+  f.env_points = (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note);
   const lat=parseFloat(f.latitude), lon=parseFloat(f.longitude);
   if(f.latitude!=='' && (isNaN(lat)||Math.abs(lat)>90)){ toast('緯度の値を確かめてください'); return; }
   if(f.longitude!=='' && (isNaN(lon)||Math.abs(lon)>180)){ toast('経度の値を確かめてください'); return; }
@@ -1596,6 +1697,13 @@ SCREENS.summary = (sv)=>{
       ${listTable('魚種別（産卵床）', countBy(redds,'species','種不明'))}
       ${listTable('新旧別（産卵床）', countBy(redds,'age_class','未記入'))}
       ${listTable('状態別（産卵床）', countBy(redds,'state','未記入'))}
+
+      <div class="sect">水深・流速</div>
+      <div class="card">
+        <div class="small">水深 ${statLine(allEnvValues(all,'depth_cm'),'cm',0)}</div>
+        <div class="small" style="margin-top:6px">流速 ${statLine(allEnvValues(all,'velocity_ms'),'m/s',2)}</div>
+        <div class="tiny muted" style="margin-top:6px">1つの記録に複数の測点がある場合、すべての測点をまとめた値です。</div>
+      </div>
 
       <div class="sect">水温</div>
       <div class="card">
@@ -1857,7 +1965,8 @@ const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_s
   'record_type','has_redd','has_fish','has_carcass',
   'latitude','longitude','gps_accuracy','position_source','river_form',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
-  'depth_cm','velocity_ms','substrate_main','substrate_sub','embeddedness','cover',
+  'env_point_count','depth_cm_mean','velocity_ms_mean','depth_cm_all','velocity_ms_all',
+  'substrate_main','substrate_sub','embeddedness','cover',
   'water_temp_c','intragravel_temp_c','temp_depth_cm',
   'female_n','male_n','behavior','carcass_n',
   'needs_review','note','photo_files'];
@@ -1880,7 +1989,10 @@ function reddRows(surveys){
         position_source:r.position_source||'', river_form:r.river_form||'',
         species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
         length_cm:r.length_cm, width_cm:r.width_cm, area_m2:r.area_m2,
-        depth_cm:r.depth_cm, velocity_ms:r.velocity_ms,
+        env_point_count: envPoints(r).length,
+        depth_cm_mean: envMean(r,'depth_cm'), velocity_ms_mean: envMean(r,'velocity_ms'),
+        depth_cm_all: envPoints(r).map(p=>p.depth_cm??'').join(';'),
+        velocity_ms_all: envPoints(r).map(p=>p.velocity_ms??'').join(';'),
         substrate_main:r.substrate_main, substrate_sub:r.substrate_sub,
         embeddedness:r.embeddedness, cover:r.cover,
         water_temp_c:r.water_temp_c, intragravel_temp_c:r.intragravel_temp_c, temp_depth_cm:r.temp_depth_cm,
@@ -1919,13 +2031,35 @@ function reachRows(surveys){
   return rows;
 }
 
+/* ---------- 測点（水深・流速）を1点1行で ---------- */
+const ENVPOINT_COLS = ['survey_id','survey_name','survey_date','river_name','reach_name',
+  'redd_id','redd_no','record_type','river_form','point_no','point_note','depth_cm','velocity_ms'];
+function envPointRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    const reaches = DB.reachesOf(s.uuid);
+    DB.reddsOf(s.uuid).forEach(r=>{
+      const re = reaches.find(x=>x.uuid===r.reach_uuid);
+      envPoints(r).forEach((p,i)=>{
+        rows.push({ survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+          river_name:s.river_name, reach_name:re?re.name:'',
+          redd_id:r.uuid, redd_no:r.redd_no, record_type:targetLabel(r), river_form:r.river_form||'',
+          point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'' });
+      });
+    });
+  });
+  return rows;
+}
+
 function exportCSV(surveys){
   const base = exportBase(surveys);
-  const rr = reddRows(surveys), er = reachRows(surveys);
+  const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys);
   if(!rr.length && !er.length){ toast('書き出すものがありません'); return; }
   // Excelで文字化けしないよう先頭にBOMを付ける
   if(rr.length) download(`${base}_redds.csv`, '﻿'+toCsv(REDD_COLS, rr), 'text/csv;charset=utf-8');
   if(er.length) download(`${base}_reaches.csv`, '﻿'+toCsv(REACH_COLS, er), 'text/csv;charset=utf-8');
+  // 水深・流速は1つの記録に何点でも入るので、1点1行の表も別に出す
+  if(ep.length) download(`${base}_env_points.csv`, '﻿'+toCsv(ENVPOINT_COLS, ep), 'text/csv;charset=utf-8');
   toast('CSVを書き出しました');
 }
 
@@ -2078,7 +2212,7 @@ SCREENS.exportHub = (svUuid)=>{
         <div class="small muted" style="margin-top:6px">産卵床 ${nRedd} 件 ／ 写真 ${nPhoto} 枚</div></div>
 
       <div class="sect">表計算・GIS用</div>
-      <button class="btn" onclick="exportCSV(exportTargets(${arg}))">CSV（産卵床・区間）</button>
+      <button class="btn" onclick="exportCSV(exportTargets(${arg}))">CSV（記録・区間・測点）</button>
       <div class="sp"></div>
       <button class="btn" onclick="exportGeoJSON(exportTargets(${arg}))">GeoJSON（点・線）</button>
       <div class="tiny muted" style="margin-top:8px">
