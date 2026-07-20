@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v8';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v9';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -185,11 +185,17 @@ const DB = {
     return this.save(k,a) ? obj : null;
   },
   get(k,u){ return this.load(k).find(x=>x.uuid===u) || null; },
-  softDelete(k,u){ const a=this.load(k); const o=a.find(x=>x.uuid===u);
-    if(o){ o.deleted_at=nowISO(); o.updated_at=nowISO(); this.save(k,a); } },
+  // 保存に失敗したら false を返す。呼び出し側で「できたことにしない」ため
+  softDelete(k,u,by){ const a=this.load(k); const o=a.find(x=>x.uuid===u);
+    if(!o) return true;
+    o.deleted_at=nowISO(); o.updated_at=nowISO();
+    if(by) o.deleted_by=by; else delete o.deleted_by;   // 親と一緒に消したかを覚えておく
+    return this.save(k,a); },
   restore(k,u){ const a=this.load(k); const o=a.find(x=>x.uuid===u);
-    if(o){ delete o.deleted_at; o.updated_at=nowISO(); this.save(k,a); } },
-  hardDelete(k,u){ this.save(k, this.load(k).filter(x=>x.uuid!==u)); },
+    if(!o) return true;
+    delete o.deleted_at; delete o.deleted_by; o.updated_at=nowISO();
+    return this.save(k,a); },
+  hardDelete(k,u){ return this.save(k, this.load(k).filter(x=>x.uuid!==u)); },
 
   alive(k){ return this.load(k).filter(x=>!x.deleted_at); },
   deleted(k){ return this.load(k).filter(x=>x.deleted_at); },
@@ -249,8 +255,10 @@ const PhotoDB = {
     let refs;
     try{
       refs = new Set();
-      [DB.key.rd, DB.key.nt].forEach(k=>{
-        DB.loadRaw(k).forEach(x=>(x.photos||[]).forEach(p=>p&&p.id&&refs.add(p.id)));
+      // 写真を持ちうるコレクションを取りこぼすと、その写真が起動時に消える。
+      // 個別列挙ではなく、保存しているキーを全部見る
+      Object.keys(DB.key).forEach(kk=>{
+        DB.loadRaw(DB.key[kk]).forEach(x=>(x.photos||[]).forEach(p=>p&&p.id&&refs.add(p.id)));
       });
     }catch(e){ return; }
     const ids = await this.allIds();
@@ -279,17 +287,32 @@ async function pickPhotos(input){
   const files = Array.from(input.files||[]);
   input.value='';
   if(!files.length) return;
+  const gen = screenGen();          // 取り込み中に別の記録へ移ったら、そちらには足さない
   toast('写真を取り込んでいます…');
+  let ok=0, ng=0;
   for(const f of files){
     try{
       const blob = await shrinkImage(f);
+      const ext = blobExt(blob);
       const id = uuid();
-      await PhotoDB.put({ id, blob, ext:'jpg', size:blob.size, added_at:nowISO() });
-      SCREENS._photos = (SCREENS._photos||[]).concat([{ id, ext:'jpg', size:blob.size }]);
-    }catch(e){ console.error(e); toast('写真を保存できませんでした'); }
+      await PhotoDB.put({ id, blob, ext, size:blob.size, added_at:nowISO() });
+      if(screenStale(gen)) return;   // 実体は残るが参照は付けない。使われなければ gc が片付ける
+      SCREENS._photos = (SCREENS._photos||[]).concat([{ id, ext, size:blob.size }]);
+      ok++;
+    }catch(e){ console.error(e); ng++; }
   }
+  if(screenStale(gen)) return;
   renderPhotoPanel();
-  toast(files.length+'枚を追加しました');
+  if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（端末の空き容量を確認してください）`);
+  else toast(ok+'枚を追加しました');
+}
+// 実際の中身に合った拡張子を付ける。中身がPNGなのに .jpg だと開けないソフトがある
+function blobExt(blob){
+  const t=(blob&&blob.type)||'';
+  if(t.includes('png')) return 'png';
+  if(t.includes('webp')) return 'webp';
+  if(t.includes('heic')||t.includes('heif')) return 'heic';
+  return 'jpg';
 }
 // 写真そのものはここでは消さない。保存せずに戻った場合に、記録が
 // 「無い写真」を指してしまうため。実体は使われなくなった時点で gc() が片付ける
@@ -363,13 +386,21 @@ const GRAIN_HINT = '泥 0.06mm未満／砂 0.06〜2mm／細礫 2〜16mm／中礫
    SCREENS[name](arg) は {title, sub[], html, onMount} を返す。
    ============================================================ */
 let STACK = [{name:'home', arg:null}];
+// 画面を描くたびに増える通し番号。GPS取得・写真取り込み・音声認識のような
+// 時間のかかる処理は、始めた時の番号を覚えておき、終わった時に変わっていたら
+// 何もしない。そうしないと、待っている間に別の記録を開いたとき、
+// その記録に前の画面の結果が書き込まれてしまう
+let SCREEN_SEQ = 0;
+function screenGen(){ return SCREEN_SEQ; }
+function screenStale(gen){ return gen !== SCREEN_SEQ; }
 const SCREENS = {};
 
-function nav(name, arg){ STACK.push({name,arg}); render(); }
-function goBack(){ if(STACK.length>1){ STACK.pop(); render(); } }
+function nav(name, arg){ stashEditDraft(); STACK.push({name,arg}); render(); }
+function goBack(){ if(STACK.length>1){ stashEditDraft(); STACK.pop(); render(); } }
 function reset(name,arg){ STACK=[{name:name||'home',arg:arg||null}]; render(); }
 
 function render(){
+  SCREEN_SEQ++;
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
   closePickMap();
   closeUnitMap();
@@ -468,6 +499,82 @@ SCREENS.home = ()=>{
    調査の作成・編集
    ============================================================ */
 const DRAFT_KEY = 'rd_draft_survey';
+
+/* 入力途中の下書き。
+   記録・物理環境・メモの入力画面は項目が多く、誤って戻ると全部消えてしまうため、
+   画面を離れるときに書きかけを保存し、次に同じ画面を開いたら戻す。
+   保存した時点で下書きは消す。 */
+const EDIT_DRAFT_KEY = 'rd_draft_edit';
+function editDrafts(){ try{ return JSON.parse(localStorage.getItem(EDIT_DRAFT_KEY)||'{}'); }catch(e){ return {}; } }
+function editDraftSave(uuid, obj){
+  if(!uuid) return;
+  if(obj && obj._new && !draftHasContent(obj._kind, obj)){ editDraftClear(uuid); return; }
+  const d = editDrafts(); d[uuid] = obj;
+  const keys = Object.keys(d);
+  if(keys.length > 20) delete d[keys[0]];   // 溜め込みすぎない
+  try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){}
+}
+function editDraftGet(uuid){ return editDrafts()[uuid] || null; }
+// まだ一度も保存していない書きかけを探す。
+// 新規作成のたびに新しいIDが振られるため、IDでは見つけられない
+function findNewDraft(kind, sv){
+  const d = editDrafts();
+  const dbKey = kind==='redd' ? DB.key.rd : kind==='unit' ? DB.key.un : DB.key.nt;
+  const id = Object.keys(d).find(k=>{
+    const x=d[k];
+    if(!x || x._kind!==kind || !x._new || x._sv!==sv) return false;
+    if(DB.get(dbKey, k)) return false;        // その後に保存されていたら書きかけではない
+    return draftHasContent(kind, x);          // 空の書きかけで新規入力を邪魔しない
+  });
+  return id ? {uuid:id, draft:d[id]} : null;
+}
+// 何か入力されているか。空なら控える意味がない
+function draftHasContent(kind, x){
+  const filled = v => v!=='' && v!=null;
+  const arr = v => Array.isArray(v) && v.length>0;
+  if(kind==='redd') return !!(x.species || filled(x.length_cm) || filled(x.width_cm) ||
+    x.note || filled(x.latitude) || arr(x.env_points) || arr(x.photos) ||
+    filled(x.female_n) || filled(x.male_n) || filled(x.carcass_n) ||
+    filled(x.water_temp_c) || filled(x.intragravel_temp_c));
+  if(kind==='unit') return !!(x.river_form || x.name || filled(x.start_lat) || filled(x.end_lat) ||
+    filled(x.depth_cm_rep) || filled(x.velocity_ms_rep) || x.substrate_rep || x.memo ||
+    arr(x.env_points) || (x.substrate_pct && Object.keys(x.substrate_pct).length));
+  return !!(x.content || arr(x.photos));
+}
+function editDraftClear(uuid){
+  const d = editDrafts();
+  if(uuid in d){ delete d[uuid]; try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){} }
+}
+// 画面を離れる直前に呼ぶ。いま開いている入力画面の書きかけを控える
+function stashEditDraft(){
+  const cur = STACK[STACK.length-1];
+  if(!cur) return;
+  try{
+    if(cur.name==='reddEdit' && SCREENS._reddUuid && $('#fNo')){
+      envSync();
+      editDraftSave(SCREENS._reddUuid, Object.assign(collectReddForm(), {
+        _kind:'redd', _sv:SCREENS._editSv, _new:!DB.get(DB.key.rd, SCREENS._reddUuid),
+        env_points:(SCREENS._env||[]).slice(), photos:(SCREENS._photos||[]).slice(),
+        gps_accuracy:SCREENS._acc, position_source:SCREENS._posSrc }));
+    }else if(cur.name==='unitEdit' && SCREENS._unitUuid && $('#uName')){
+      envSync();
+      editDraftSave(SCREENS._unitUuid, { _kind:'unit',
+        _sv:SCREENS._editSv, _new:!DB.get(DB.key.un, SCREENS._unitUuid),
+        name:($('#uName').value||'').trim(), river_form:segVal('uForm'),
+        start_lat:numVal('#uSLat'), start_lon:numVal('#uSLon'),
+        end_lat:numVal('#uELat'), end_lon:numVal('#uELon'),
+        length_m_manual:numVal('#uLenM'), river_width_m:numVal('#uWidth'),
+        depth_cm_rep:numVal('#uDep'), velocity_ms_rep:numVal('#uVel'),
+        substrate_rep:segVal('uSub'), substrate_pct:collectGrainPct(),
+        env_points:(SCREENS._env||[]).slice(), memo:$('#uMemo').value||'' });
+    }else if(cur.name==='noteEdit' && SCREENS._noteUuid && $('#fNText')){
+      editDraftSave(SCREENS._noteUuid, { _kind:'note',
+        _sv:SCREENS._editSv, _new:!DB.get(DB.key.nt, SCREENS._noteUuid),
+        content:$('#fNText').value||'', category:segVal('noteCat'),
+        photos:(SCREENS._photos||[]).slice() });
+    }
+  }catch(e){ console.error(e); }
+}
 SCREENS.surveyEdit = (svUuid)=>{
   const editing = !!svUuid;
   let s;
@@ -565,10 +672,15 @@ function deleteSurvey(u){
   const n = DB.reddsOf(u).length;
   if(!confirm(`「${s.name}」を削除しますか？\n産卵床 ${n} 件も一緒にゴミ箱へ入ります。`)) return;
   // 調査を消したら、ぶら下がる記録もまとめてゴミ箱へ（片方だけ残らないように）
+  // 記録中の軌跡が消した調査に書き込み続けないよう、先に止める
+  if(TRACK && DB.reachesOf(u).some(r=>r.uuid===TRACK.reach_uuid)) TRACK=null;
+  let ok = true;
   [[DB.key.re,'reachesOf'],[DB.key.rd,'reddsOf'],[DB.key.nt,'notesOf'],[DB.key.un,'unitsOf']].forEach(([k,fn])=>{
-    DB[fn](u).forEach(x=>DB.softDelete(k, x.uuid));
+    DB[fn](u).forEach(x=>{ if(!DB.softDelete(k, x.uuid, u)) ok=false; });
   });
-  DB.softDelete(DB.key.sv, u);
+  if(!DB.softDelete(DB.key.sv, u)) ok=false;
+  if(!DB.surveys().some(x=>x.status==='調査中')) stopGps();
+  if(!ok){ alert('削除の途中で保存できませんでした。端末の空き容量を確認してください。'); render(); return; }
   toast('ゴミ箱へ入れました');
   reset('home');
 }
@@ -636,6 +748,9 @@ function trackAppend(){
 }
 function trackSave(){
   if(!TRACK) return;
+  // 記録中の区間が消えている・別調査のものになっている場合は書き込まない
+  const r = DB.get(DB.key.re, TRACK.reach_uuid);
+  if(!r || r.deleted_at){ TRACK=null; return; }
   TRACK.lastSave=Date.now();
   DB.upsert(DB.key.re, { uuid:TRACK.reach_uuid, track:TRACK.pts.slice(),
     length_m_auto: Math.round(pathLength(TRACK.pts)) });
@@ -665,12 +780,14 @@ function startReach(sv){
 }
 function endReach(sv){
   const r = activeReach(sv); if(!r) return;
-  const pts = TRACK ? TRACK.pts : (r.track||[]);
+  // いま軌跡を取っているのが本当にこの区間かを確認する（複数調査が並行した場合の取り違え防止）
+  const pts = (TRACK && TRACK.reach_uuid===r.uuid) ? TRACK.pts : (r.track||[]);
   const end = pts[pts.length-1] || [];
+  if(TRACK && TRACK.reach_uuid!==r.uuid) toast('別の区間を記録中でした。この区間は保存済みの軌跡で終了します');
   DB.upsert(DB.key.re, { uuid:r.uuid, ended_at:nowISO(), track:pts.slice(),
     length_m_auto: Math.round(pathLength(pts)),
     end_lat: end[0]!=null?+end[0].toFixed(6):'', end_lon: end[1]!=null?+end[1].toFixed(6):'' });
-  TRACK=null;
+  if(!TRACK || TRACK.reach_uuid===r.uuid) TRACK=null;
   toast(r.name+' を終了しました（'+fmtDist(pathLength(pts))+'）');
   render();
 }
@@ -765,6 +882,12 @@ SCREENS.survey = (u)=>{
 
 function startSurvey(u){
   const s = DB.survey(u); if(!s) return;
+  // 調査中が2つあると、軌跡がどちらの区間に入るか分からなくなる
+  const other = DB.surveys().find(x=>x.uuid!==u && x.status==='調査中');
+  if(other && !confirm(`「${other.name}」がまだ調査中です。
+そちらを終了して、この調査を始めますか？`)) return;
+  if(other){ const cur=activeReach(other.uuid); if(cur) endReach(other.uuid);
+    DB.upsert(DB.key.sv, {uuid:other.uuid, status:'終了', end_datetime:nowISO()}); }
   DB.upsert(DB.key.sv, { uuid:u, status:'調査中', start_datetime: s.start_datetime || nowISO() });
   startGps();
   toast('調査を開始しました');
@@ -795,7 +918,8 @@ SCREENS.reaches = (sv)=>{
   const s = DB.survey(sv); if(!s) return SCREENS.home();
   const list = DB.reachesOf(sv);
   const cards = list.map(r=>{
-    const n = DB.reddsOf(sv).filter(x=>x.reach_uuid===r.uuid).length;
+    // 床数は「産卵床」を含む記録だけ。集計画面・CSV・GeoJSONと定義を揃える
+    const n = DB.reddsOf(sv).filter(x=>x.reach_uuid===r.uuid && hasTarget(x,'産卵床')).length;
     const len = reachLength(r);
     const manual = (r.length_m_manual!=='' && r.length_m_manual!=null);
     const dens = len>0 ? (n/len*100).toFixed(1) : '—';
@@ -1016,7 +1140,9 @@ function toggleMic(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   RECOG = new SR();
   RECOG.lang='ja-JP'; RECOG.interimResults=true; RECOG.continuous=false;
+  const gen = screenGen();
   RECOG.onresult = e=>{
+    if(screenStale(gen)){ try{ RECOG.abort(); }catch(err){} return; }
     let fin='', mid='';
     for(let i=e.resultIndex; i<e.results.length; i++){
       const tr=e.results[i][0].transcript;
@@ -1062,7 +1188,9 @@ function voicePanelHtml(){
 /* ---------- まわりの環境の測点（水深・流速を何点でも） ---------- */
 // 古い記録（水深・流速が1つだけ）は、1点の測点として読み替える
 function envPoints(r){
-  if(Array.isArray(r.env_points) && r.env_points.length) return r.env_points.slice();
+  // env_points が配列なら、たとえ空でもそれが正本。
+  // （空を「未設定」と見なすと、測点を全部消して保存しても古い値が復活してしまう）
+  if(Array.isArray(r.env_points)) return r.env_points.slice();
   if(num(r.depth_cm)!=null || num(r.velocity_ms)!=null)
     return [{ depth_cm:r.depth_cm??'', velocity_ms:r.velocity_ms??'', note:'' }];
   return [];
@@ -1113,7 +1241,8 @@ SCREENS.reddEdit = (argStr)=>{
   const a = JSON.parse(argStr||'{}');
   const sv = a.sv, editing = !!a.u;
   const s = DB.survey(sv); if(!s) return SCREENS.home();
-  const carry = SCREENS._carry || {};
+  // 別の調査の引き継ぎは使わない（別河川の座標や区間が入ってしまうため）
+  const carry = (SCREENS._carry && SCREENS._carry.survey_uuid===sv) ? SCREENS._carry : {};
   const cur = activeReach(sv);
   const reaches = DB.reachesOf(sv);
 
@@ -1122,7 +1251,8 @@ SCREENS.reddEdit = (argStr)=>{
     r = DB.get(DB.key.rd, a.u);
     if(!r || r.deleted_at) return SCREENS.home();
   }else{
-    const reach_uuid = carry.reach_uuid || (cur?cur.uuid:'');
+    let reach_uuid = carry.reach_uuid || (cur?cur.uuid:'');
+    if(reach_uuid && !reaches.some(x=>x.uuid===reach_uuid)) reach_uuid = cur?cur.uuid:'';
     // 地図から追加した場合は、その場所を最初から入れておく
     const fromMap = validPt([a.lat, a.lon]);
     r = { uuid:uuid(), survey_uuid:sv, reach_uuid,
@@ -1130,11 +1260,11 @@ SCREENS.reddEdit = (argStr)=>{
       latitude: fromMap ? (+a.lat).toFixed(6) : '', longitude: fromMap ? (+a.lon).toFixed(6) : '',
       gps_accuracy:'', position_source: fromMap ? '地図' : '',
       river_form: carry.river_form||'',
-      species: carry.species||'', species_basis:'', age_class:'', state:'',
+      species: carry.species||'', species_basis: carry.species_basis||'', age_class:'', state:'',
       length_cm:'', width_cm:'', env_points:[],
       substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
-      embeddedness:'', cover: carry.cover||'',
-      water_temp_c: carry.water_temp_c??'', intragravel_temp_c:'', temp_depth_cm: carry.temp_depth_cm??'',
+      embeddedness: carry.embeddedness||'', cover: carry.cover||'',
+      water_temp_c:'', intragravel_temp_c:'', temp_depth_cm:'',
       female_n:'', male_n:'', behavior:'', carcass_n:'',
       note:'', needs_review:false };
   }
@@ -1143,7 +1273,18 @@ SCREENS.reddEdit = (argStr)=>{
     reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
   ).join('');
 
-  const targets = editing ? recordTargets(r) : (carry.targets || ['産卵床']);
+  // 書きかけがあれば重ねる（誤って戻った・アプリが閉じた場合の復帰）
+  if(!editing){
+    const pending = findNewDraft('redd', sv);
+    if(pending) r.uuid = pending.uuid;   // 同じ書きかけの続きとして開く
+  }
+  const draft = editDraftGet(r.uuid);
+  if(draft && draft._kind==='redd'){
+    r = Object.assign({}, r, draft);
+    if(Array.isArray(draft.env_points)) r.env_points = draft.env_points;
+    if(Array.isArray(draft.photos)) r.photos = draft.photos;
+  }
+  const targets = draft ? recordTargets(r) : (editing ? recordTargets(r) : ['産卵床']);
 
   return {
     title: editing ? '記録の編集' : '記録の追加',
@@ -1276,7 +1417,8 @@ SCREENS.reddEdit = (argStr)=>{
                  : `<button class="btn big" onclick="saveRedd('${r.uuid}','${sv}',false,true)">保存して次を記録</button>` }
     `,
     onMount:()=>{
-      SCREENS._reddUuid = r.uuid;
+      SCREENS._reddUuid = r.uuid; SCREENS._editSv = sv;
+      if(draft) toast('書きかけを復元しました');
       SCREENS._acc = (r.gps_accuracy!==''&&r.gps_accuracy!=null) ? r.gps_accuracy : null;
       SCREENS._posSrc = r.position_source||'';
       SCREENS._photos = (r.photos||[]).slice();
@@ -1288,7 +1430,7 @@ SCREENS.reddEdit = (argStr)=>{
       initPickMap(sv);   // 位置の地図は常に出しておく
       // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）。
       // ただし地図から追加した時は、せっかく指定した場所をGPSで上書きしない
-      if(!editing && !validPt([a.lat, a.lon])) grabGps();
+      if(!editing && !draft && !validPt([a.lat, a.lon])) grabGps(true);
     }
   };
 };
@@ -1374,13 +1516,22 @@ function markPosManual(){
   SCREENS._posSrc='手入力'; SCREENS._acc='';
   const out=$('#accOut'); if(out) out.textContent='手で入力した位置';
 }
-function grabGps(){
+function grabGps(auto){
   if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
+  const gen = screenGen();
   const out=$('#accOut'); if(out) out.textContent='位置を取得中…';
   navigator.geolocation.getCurrentPosition(p=>{
     lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+    if(screenStale(gen)) return;   // 待っている間に別の記録へ移っていたら書き込まない
+    // 自動取得（画面を開いた直後）で、すでに地図や手入力で位置が決まっているなら上書きしない
+    if(auto && (SCREENS._posSrc==='地図' || SCREENS._posSrc==='手入力')){
+      if(out) out.textContent = posLabel({position_source:SCREENS._posSrc, gps_accuracy:SCREENS._acc})
+        + '（現在地も取れています。使うなら「現在地を取り込む」）';
+      return;
+    }
     fillGps();
-  }, ()=>{ if(out) out.textContent='位置を取れませんでした。地図で指定するか、空欄のままでも保存できます'; },
+  }, ()=>{ if(screenStale(gen)) return;
+    if(out) out.textContent='位置を取れませんでした。地図で指定するか、空欄のままでも保存できます'; },
   {enableHighAccuracy:true, timeout:15000, maximumAge:0});
 }
 function fillGps(){
@@ -1491,9 +1642,9 @@ function saveRedd(u, sv, editing, cont){
   envSync();
   // 何も入っていない測点は保存しない
   f.env_points = (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note);
-  const lat=parseFloat(f.latitude), lon=parseFloat(f.longitude);
-  if(f.latitude!=='' && (isNaN(lat)||Math.abs(lat)>90)){ toast('緯度の値を確かめてください'); return; }
-  if(f.longitude!=='' && (isNaN(lon)||Math.abs(lon)>180)){ toast('経度の値を確かめてください'); return; }
+  f.depth_cm = ''; f.velocity_ms = '';   // 旧形式の値は残さない（測点が正本）
+  const pos = parsePos(f.latitude, f.longitude);
+  if(!pos.ok){ toast(pos.why); return; }
   f.area_m2 = reddArea(f.length_cm, f.width_cm);
   const prev = DB.get(DB.key.rd, u) || {};
   const rec = Object.assign({ uuid:u, survey_uuid:sv }, f,
@@ -1501,21 +1652,27 @@ function saveRedd(u, sv, editing, cont){
       position_source: SCREENS._posSrc!=null ? SCREENS._posSrc : (prev.position_source??''),
       photos: (SCREENS._photos||[]).slice() });
   if(!DB.upsert(DB.key.rd, rec)) return;
+  editDraftClear(u);
+  SCREENS._reddUuid = null;   // 保存済みなので、この画面の書きかけはもう控えない
   revokePhotoUrls();
   SCREENS._photos = null;
 
   // 次の記録に引き継ぐ値。同じ瀬では条件がほぼ同じなので入力を減らせる
-  SCREENS._carry = { reach_uuid:f.reach_uuid, species:f.species, targets:f.record_targets.slice(),
-    river_form:f.river_form,
-    substrate_main:f.substrate_main, substrate_sub:f.substrate_sub, cover:f.cover,
-    water_temp_c:f.water_temp_c, temp_depth_cm:f.temp_depth_cm };
+  // 次の記録に引き継ぐのは「場の条件」だけ。
+  // 水温のような実測値や、親魚を見たかどうかは引き継がない（測っていない値・
+  // 見ていない親魚がそのまま記録されてしまうため）
+  SCREENS._carry = { survey_uuid:sv, reach_uuid:f.reach_uuid, species:f.species,
+    river_form:f.river_form, species_basis:f.species_basis,
+    substrate_main:f.substrate_main, substrate_sub:f.substrate_sub,
+    embeddedness:f.embeddedness, cover:f.cover };
   SCREENS._acc = null; SCREENS._posSrc = null;
   toast('保存しました');
   if(cont){ STACK.pop(); nav('reddEdit', JSON.stringify({sv})); }
   else goBack();
 }
 function deleteRedd(u){
-  if(!confirm('この産卵床の記録を削除しますか？')) return;
+  if(!confirm('この記録を削除しますか？')) return;
+  editDraftClear(u); SCREENS._reddUuid = null;
   DB.softDelete(DB.key.rd, u);
   toast('ゴミ箱へ入れました');
   goBack();
@@ -1533,6 +1690,15 @@ function unitLength(u){
 }
 // 空欄を 0 と読み替えないための変換。空なら null を返す
 // （`+''` は 0 になるため、そのまま使うと未入力が「緯度0・経度0」として地図に出てしまう）
+// 位置の入力チェック。ok=false なら why に理由が入る
+function parsePos(lat, lon){
+  const sl=String(lat??'').trim(), so=String(lon??'').trim();
+  if(sl==='' && so==='') return {ok:true, empty:true, lat:'', lon:''};
+  const a=parseFloat(sl), b=parseFloat(so);
+  if(sl!=='' && (isNaN(a)||Math.abs(a)>90))  return {ok:false, why:'緯度の値を確かめてください'};
+  if(so!=='' && (isNaN(b)||Math.abs(b)>180)) return {ok:false, why:'経度の値を確かめてください'};
+  return {ok:true, empty:false, lat:sl===''?'':a, lon:so===''?'':b};
+}
 function ptOf(lat, lon){
   if(lat===''||lat==null||lon===''||lon==null) return null;
   const p=[parseFloat(lat), parseFloat(lon)];
@@ -1586,7 +1752,7 @@ SCREENS.unitEdit = (argStr)=>{
   const sv = a.sv, editing = !!a.u;
   const s = DB.survey(sv); if(!s) return SCREENS.home();
   const cur = activeReach(sv);
-  const carry = SCREENS._unitCarry || {};
+  const carry = (SCREENS._unitCarry && SCREENS._unitCarry.survey_uuid===sv) ? SCREENS._unitCarry : {};
   let u;
   if(editing){ u = DB.get(DB.key.un, a.u); if(!u || u.deleted_at) return SCREENS.home(); }
   // 続けて記録するときは、前の区間の終点をそのまま始点にする（歩きながら区切っていくため）
@@ -1600,6 +1766,15 @@ SCREENS.unitEdit = (argStr)=>{
              depth_cm_rep:'', velocity_ms_rep:'', env_points:[],
              substrate_rep:'', substrate_pct:{}, memo:'' };
 
+  if(!editing){
+    const pending = findNewDraft('unit', sv);
+    if(pending) u.uuid = pending.uuid;
+  }
+  const udraft = editDraftGet(u.uuid);
+  if(udraft && udraft._kind==='unit'){
+    u = Object.assign({}, u, udraft);
+    if(Array.isArray(udraft.env_points)) u.env_points = udraft.env_points;
+  }
   const pct = u.substrate_pct||{};
   const grainInputs = OPT.substrate.map(g=>`
     <label class="field" style="margin-bottom:8px"><span class="lab">${esc(g)}（％）</span>
@@ -1695,7 +1870,8 @@ SCREENS.unitEdit = (argStr)=>{
       ${ editing ? `<div class="sp"></div><button class="btn danger" onclick="deleteUnit('${u.uuid}')">この記録を削除</button>` : '' }
     `,
     onMount:()=>{
-      SCREENS._unitUuid = u.uuid;
+      SCREENS._unitUuid = u.uuid; SCREENS._editSv = sv;
+      if(udraft) toast('書きかけを復元しました');
       SCREENS._env = envPoints(u);
       renderEnvList();
       updateUnitLen();
@@ -1798,9 +1974,11 @@ function unitClearStart(){
 
 function unitMark(which){
   if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
+  const gen = screenGen();
   toast('位置を取得中…');
   navigator.geolocation.getCurrentPosition(p=>{
     lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+    if(screenStale(gen)) return;
     if(UNITMAP) unitSetPoint(which, [lastFix.lat, lastFix.lon], false);
     else {
       const la = which==='start' ? $('#uSLat') : $('#uELat');
@@ -1854,6 +2032,10 @@ function updateGrainTotal(){
 function saveUnit(u, sv, editing){
   const form = segVal('uForm');
   if(!form){ toast('河川形態を選んでください'); return; }
+  const ps = parsePos($('#uSLat').value, $('#uSLon').value);
+  const pe = parsePos($('#uELat').value, $('#uELon').value);
+  if(!ps.ok){ toast('始点の'+ps.why); return; }
+  if(!pe.ok){ toast('終点の'+pe.why); return; }
   envSync();
   const prev = DB.get(DB.key.un, u) || {};
   const name = ($('#uName').value||'').trim() || prev.name || unitAutoName(sv, form);
@@ -1874,14 +2056,17 @@ function saveUnit(u, sv, editing){
     memo: $('#uMemo').value||'',
   };
   if(!DB.upsert(DB.key.un, rec)) return;
+  editDraftClear(u);
+  SCREENS._unitUuid = null;
   // 次の区間の始点に使えるよう、終点と名前を覚えておく
-  SCREENS._unitCarry = { river_form:form, name, end_lat:rec.end_lat, end_lon:rec.end_lon };
+  SCREENS._unitCarry = { survey_uuid:sv, river_form:form, name, end_lat:rec.end_lat, end_lon:rec.end_lon };
   SCREENS._env = null;
   toast('保存しました');
   goBack();
 }
 function deleteUnit(u){
   if(!confirm('この物理環境の記録を削除しますか？')) return;
+  editDraftClear(u); SCREENS._unitUuid = null;
   DB.softDelete(DB.key.un, u);
   toast('ゴミ箱へ入れました');
   goBack();
@@ -1921,6 +2106,15 @@ SCREENS.noteEdit = (argStr)=>{
   else n = { uuid:uuid(), survey_uuid:sv, recorded_at:nowISO(), category:'', content:'',
              latitude: lastFix?+lastFix.lat.toFixed(6):'', longitude: lastFix?+lastFix.lon.toFixed(6):'',
              photos:[] };
+  if(!editing){
+    const pending = findNewDraft('note', sv);
+    if(pending) n.uuid = pending.uuid;
+  }
+  const ndraft = editDraftGet(n.uuid);
+  if(ndraft && ndraft._kind==='note'){
+    n = Object.assign({}, n, ndraft);
+    if(Array.isArray(ndraft.photos)) n.photos = ndraft.photos;
+  }
   return {
     title: editing ? 'メモの編集' : 'メモの追加',
     sub:[{text:s.name}],
@@ -1939,7 +2133,7 @@ SCREENS.noteEdit = (argStr)=>{
       <button class="btn primary big" onclick="saveNote('${n.uuid}','${sv}',${editing})">保存する</button>
       ${ editing ? `<div class="sp"></div><button class="btn danger" onclick="deleteNote('${n.uuid}')">このメモを削除</button>` : '' }
     `,
-    onMount:()=>{ SCREENS._noteUuid=n.uuid; SCREENS._noteLat=n.latitude; SCREENS._noteLon=n.longitude;
+    onMount:()=>{ SCREENS._noteUuid=n.uuid; SCREENS._editSv=sv; if(ndraft) toast('書きかけを復元しました'); SCREENS._noteLat=n.latitude; SCREENS._noteLon=n.longitude;
       SCREENS._photos=(n.photos||[]).slice(); renderPhotoPanel(); }
   };
 };
@@ -1953,12 +2147,15 @@ function saveNote(u, sv, editing){
     category: segVal('noteCat'), content: text,
     latitude: SCREENS._noteLat??'', longitude: SCREENS._noteLon??'', photos });
   if(!ok) return;
+  editDraftClear(u);
+  SCREENS._noteUuid = null;
   revokePhotoUrls(); SCREENS._photos=null;
   toast('保存しました');
   goBack();
 }
 function deleteNote(u){
   if(!confirm('このメモを削除しますか？')) return;
+  editDraftClear(u); SCREENS._noteUuid = null;
   DB.softDelete(DB.key.nt, u);
   toast('ゴミ箱へ入れました');
   goBack();
@@ -2146,18 +2343,23 @@ function baseMapButtonsHtml(){
     `<button type="button" class="${n===cur?'on':''}" onclick="switchBaseMap(this,'${n}')">${n}</button>`
   ).join('') + `</div>`;
 }
+// 画面に出ている地図をまとめて返す。ここを経由しないと、地図を増やしたときに切替が効かなくなる
+function allMaps(){ return [MAP, PICKMAP, UNITMAP].filter(Boolean); }
 function applyBaseMap(map, name){
   if(!map) return;
   const b = BASEMAPS[name] || BASEMAPS['航空写真'];
   if(map._baseLayer){ try{ map.removeLayer(map._baseLayer); }catch(e){} }
-  map._baseLayer = L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max, attribution:GSI_ATTR}).addTo(map);
+  // crossOrigin を付けないと画像が「中身を見ない」応答になり、Service Worker が
+  // タイルをキャッシュできず、圏外で背景地図が出なくなる（地理院タイルはCORS対応済み）
+  map._baseLayer = L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max,
+    crossOrigin:'anonymous', attribution:GSI_ATTR}).addTo(map);
   if(map._baseLayer.bringToBack) map._baseLayer.bringToBack();
 }
 function switchBaseMap(btn, name){
   if(!BASEMAPS[name]) return;
   localStorage.setItem('rd_basemap', name);
   // 同じ画面に地図が2つ出ることはないが、両方に効かせておく
-  [MAP, PICKMAP].forEach(m=>applyBaseMap(m, name));
+  allMaps().forEach(m=>applyBaseMap(m, name));
   // 押したボタンだけでなく、画面内のすべての切替ボタンの表示を合わせる
   $$('.seg.basemap button').forEach(b=>b.classList.toggle('on', b.textContent===name));
 }
@@ -2379,7 +2581,7 @@ function exportBase(surveys){
 
 /* ---------- 産卵床 ---------- */
 const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
-  'reach_id','reach_name','reach_length_m','redd_no','observed_at',
+  'record_id','reach_id','reach_name','reach_length_m','redd_no','observed_at',
   'record_type','has_redd','has_fish','has_carcass',
   'latitude','longitude','gps_accuracy','position_source','river_form',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
@@ -2397,6 +2599,7 @@ function reddRows(surveys){
       rows.push({
         survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
         river_name:s.river_name, water_system:s.water_system, investigator:s.investigator,
+        record_id:r.uuid,
         reach_id:r.reach_uuid||'', reach_name:re?re.name:'', reach_length_m:re?reachLength(re):'',
         redd_no:r.redd_no, observed_at:r.observed_at,
         record_type:targetLabel(r),
@@ -2427,13 +2630,14 @@ function reddRows(surveys){
 /* ---------- 区間 ---------- */
 const REACH_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
   'started_at','ended_at','length_m_gps','length_m_manual','length_m_used','river_width_m',
-  'start_lat','start_lon','end_lat','end_lon','redd_count','density_per_100m','memo'];
+  'start_lat','start_lon','end_lat','end_lon','redd_count','record_count','density_per_100m','memo'];
 function reachRows(surveys){
   const rows=[];
   surveys.forEach(s=>{
     const redds = DB.reddsOf(s.uuid);
     DB.reachesOf(s.uuid).forEach(r=>{
-      const n = redds.filter(x=>x.reach_uuid===r.uuid).length;
+      const inReach = redds.filter(x=>x.reach_uuid===r.uuid);
+      const n = inReach.filter(x=>hasTarget(x,'産卵床')).length;   // 床数は産卵床のみ
       const len = reachLength(r);
       rows.push({
         survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date), river_name:s.river_name,
@@ -2441,7 +2645,8 @@ function reachRows(surveys){
         length_m_gps:r.length_m_auto??'', length_m_manual:r.length_m_manual??'', length_m_used:len,
         river_width_m:r.river_width_m??'',
         start_lat:r.start_lat??'', start_lon:r.start_lon??'', end_lat:r.end_lat??'', end_lon:r.end_lon??'',
-        redd_count:n, density_per_100m: len>0 ? +(n/len*100).toFixed(2) : '',
+        redd_count:n, record_count:inReach.length,
+        density_per_100m: len>0 ? +(n/len*100).toFixed(2) : '',
         memo:r.memo||'',
       });
     });
@@ -2452,7 +2657,7 @@ function reachRows(surveys){
 /* ---------- 物理環境（河川構造ごとの区間） ---------- */
 function unitCols(){
   return ['survey_id','survey_name','survey_date','river_name','reach_name',
-    'unit_id','unit_name','river_form','started_at','ended_at',
+    'reach_id','unit_id','unit_name','river_form','started_at','ended_at',
     'start_lat','start_lon','end_lat','end_lon',
     'length_m_straight','length_m_manual','length_m_used','river_width_m',
     'depth_cm_rep','velocity_ms_rep','env_point_count',
@@ -2468,7 +2673,7 @@ function unitRows(surveys){
       const re = reaches.find(x=>x.uuid===u.reach_uuid);
       const pct = u.substrate_pct||{};
       const row = { survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
-        river_name:s.river_name, reach_name:re?re.name:'',
+        river_name:s.river_name, reach_id:u.reach_uuid||'', reach_name:re?re.name:'',
         unit_id:u.uuid, unit_name:u.name, river_form:u.river_form,
         started_at:u.started_at||'', ended_at:u.ended_at||'',
         start_lat:u.start_lat??'', start_lon:u.start_lon??'', end_lat:u.end_lat??'', end_lon:u.end_lon??'',
@@ -2488,7 +2693,7 @@ function unitRows(surveys){
 
 /* ---------- 測点（水深・流速）を1点1行で ---------- */
 // 産卵床の記録にも物理環境にも測点が付くので、どちらのものかを parent_type で示す
-const ENVPOINT_COLS = ['survey_id','survey_name','survey_date','river_name','reach_name',
+const ENVPOINT_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
   'parent_type','parent_id','parent_name','river_form','point_no','point_note','depth_cm','velocity_ms'];
 function envPointRows(surveys){
   const rows=[];
@@ -2497,20 +2702,36 @@ function envPointRows(surveys){
     const push=(parent_type, id, name, form, list)=>{
       list.forEach((p,i)=>rows.push({ survey_id:s.uuid, survey_name:s.name,
         survey_date:fmtDate(s.survey_date), river_name:s.river_name,
-        reach_name:'', parent_type, parent_id:id, parent_name:name, river_form:form||'',
+        reach_id:'', reach_name:'', parent_type, parent_id:id, parent_name:name, river_form:form||'',
         point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'' }));
     };
     DB.reddsOf(s.uuid).forEach(r=>{
       const re = reaches.find(x=>x.uuid===r.reach_uuid);
       const before = rows.length;
       push('産卵床記録', r.uuid, `No.${r.redd_no??''} ${targetLabel(r)}`, r.river_form, envPoints(r));
-      for(let i=before;i<rows.length;i++) rows[i].reach_name = re?re.name:'';
+      for(let i=before;i<rows.length;i++){ rows[i].reach_name = re?re.name:''; rows[i].reach_id = r.reach_uuid||''; }
     });
     DB.unitsOf(s.uuid).forEach(u=>{
       const re = reaches.find(x=>x.uuid===u.reach_uuid);
       const before = rows.length;
       push('物理環境', u.uuid, u.name||'', u.river_form, envPoints(u));
-      for(let i=before;i<rows.length;i++) rows[i].reach_name = re?re.name:'';
+      for(let i=before;i<rows.length;i++){ rows[i].reach_name = re?re.name:''; rows[i].reach_id = u.reach_uuid||''; }
+    });
+  });
+  return rows;
+}
+
+const NOTE_COLS = ['survey_id','survey_name','survey_date','river_name',
+  'note_id','recorded_at','category','latitude','longitude','content','photo_files'];
+function noteRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    DB.notesOf(s.uuid).forEach(n=>{
+      rows.push({ survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+        river_name:s.river_name, note_id:n.uuid, recorded_at:n.recorded_at||'',
+        category:n.category||'', latitude:n.latitude??'', longitude:n.longitude??'',
+        content:n.content||'',
+        photo_files:(n.photos||[]).map((p,i)=>photoFilename(n,i,p)).join(';') });
     });
   });
   return rows;
@@ -2518,12 +2739,14 @@ function envPointRows(surveys){
 
 function exportCSV(surveys){
   const base = exportBase(surveys);
-  const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys), ur = unitRows(surveys);
+  const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys),
+        ur = unitRows(surveys), nr = noteRows(surveys);
   if(!rr.length && !er.length && !ur.length){ toast('書き出すものがありません'); return; }
   // Excelで文字化けしないよう先頭にBOMを付ける
   if(rr.length) download(`${base}_redds.csv`, '﻿'+toCsv(REDD_COLS, rr), 'text/csv;charset=utf-8');
   if(er.length) download(`${base}_reaches.csv`, '﻿'+toCsv(REACH_COLS, er), 'text/csv;charset=utf-8');
   if(ur.length) download(`${base}_habitat_units.csv`, '﻿'+toCsv(unitCols(), ur), 'text/csv;charset=utf-8');
+  if(nr.length) download(`${base}_notes.csv`, '﻿'+toCsv(NOTE_COLS, nr), 'text/csv;charset=utf-8');
   // 水深・流速は1つの記録に何点でも入るので、1点1行の表も別に出す
   if(ep.length) download(`${base}_env_points.csv`, '﻿'+toCsv(ENVPOINT_COLS, ep), 'text/csv;charset=utf-8');
   toast('CSVを書き出しました');
@@ -2543,15 +2766,11 @@ function exportGeoJSON(surveys){
     DB.reachesOf(s.uuid).forEach(r=>{
       const pathPts=(r.track||[]).filter(validPt);
       if(pathPts.length<2) return;
-      const n = redds.filter(x=>x.reach_uuid===r.uuid).length;
-      const len = reachLength(r);
+      // 属性はCSVと同じ列定義を使う（片方だけ直して食い違うのを防ぐ）
+      const row = reachRows([s]).find(x=>x.reach_id===r.uuid) || {};
       lines.push({ type:'Feature',
         geometry:{ type:'LineString', coordinates: pathPts.map(p=>[p[1],p[0]]) },   // GeoJSONは経度,緯度の順
-        properties:{ survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
-          river_name:s.river_name, reach_id:r.uuid, reach_name:r.name,
-          started_at:r.started_at, ended_at:r.ended_at||'',
-          length_m_gps:r.length_m_auto??'', length_m_used:len, river_width_m:r.river_width_m??'',
-          redd_count:n, density_per_100m: len>0 ? +(n/len*100).toFixed(2) : null, memo:r.memo||'' } });
+        properties: REACH_COLS.reduce((p,c)=>{ p[c]=row[c]; return p; }, {}) });
     });
   });
 
@@ -2569,7 +2788,16 @@ function exportGeoJSON(surveys){
   if(units.length) download(`${base}_habitat_units.geojson`,
     JSON.stringify({type:'FeatureCollection', features:units}, null, 1), 'application/geo+json');
 
-  if(!pts.length && !lines.length && !units.length){ toast('位置のついた記録がありません'); return; }
+  // 位置のついたメモも点として出す
+  const noteFeats = noteRows(surveys)
+    .filter(n=>ptOf(n.latitude, n.longitude))
+    .map(n=>{ const p=ptOf(n.latitude, n.longitude);
+      return { type:'Feature', geometry:{ type:'Point', coordinates:[p[1],p[0]] },
+        properties: NOTE_COLS.reduce((o,c)=>{ o[c]=n[c]; return o; }, {}) }; });
+  if(noteFeats.length) download(`${base}_notes.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:noteFeats}, null, 1), 'application/geo+json');
+
+  if(!pts.length && !lines.length && !units.length && !noteFeats.length){ toast('位置のついた記録がありません'); return; }
   if(pts.length) download(`${base}_redds.geojson`,
     JSON.stringify({type:'FeatureCollection', features:pts}, null, 1), 'application/geo+json');
   if(lines.length) download(`${base}_reaches.geojson`,
@@ -2639,39 +2867,134 @@ function buildBackup(){
   return { app:'redd_survey', version:APP_VERSION, exported_at:nowISO(),
            species: speciesList(), data };
 }
+// バックアップの中身をユーザーに見せる文言（キーの並びに依存しないよう名前で作る）
+const CORE_LABEL = { sv:'調査', re:'区間', rd:'記録', nt:'メモ', un:'物理環境' };
+function backupCounts(b){
+  return CORE_KEYS.map(k=>`${CORE_LABEL[k]} ${(b.data[DB.key[k]]||[]).length}`).join(' / ');
+}
 function exportBackup(){
   let b; try{ b=buildBackup(); }
   catch(e){ toast('保存データを読めませんでした。復元は行わないでください'); return; }
   download(`reddsurvey_backup_${dateValue().replace(/-/g,'')}.json`, JSON.stringify(b), 'application/json');
-  toast('バックアップを書き出しました（写真は含みません）');
+  toast('記録のバックアップを書き出しました（写真は含みません）');
+}
+
+/* 写真ごとのまるごとバックアップ。
+   記録(backup.json)と写真の実体を1つのZIPに入れ、同じZIPから丸ごと戻せるようにする。
+   機種変更のときはこれ1つあればよい。 */
+async function exportFullBackup(){
+  let b; try{ b=buildBackup(); }
+  catch(e){ toast('保存データを読めませんでした。復元は行わないでください'); return; }
+
+  // 参照されている写真だけを集める（消した記録のぶんも含めて、戻せるように）
+  const ids=[];
+  CORE_KEYS.forEach(k=>{
+    (b.data[DB.key[k]]||[]).forEach(x=>(x.photos||[]).forEach(p=>{ if(p&&p.id) ids.push(p.id); }));
+  });
+  const uniq=[...new Set(ids)];
+  toast('まとめています…');
+  const files=[{ name:'backup.json', u8:new TextEncoder().encode(JSON.stringify(b)) }];
+  const manifest=[];
+  let total=0, missing=0;
+  for(const id of uniq){
+    let rec=null; try{ rec=await PhotoDB.get(id); }catch(e){}
+    if(!rec||!rec.blob){ missing++; continue; }
+    const name = `photos/${id}.${rec.ext||'jpg'}`;
+    files.push({ name, u8:new Uint8Array(await rec.blob.arrayBuffer()) });
+    manifest.push({ id, file:name, ext:rec.ext||'jpg', type:(rec.blob.type||'') });
+    total += rec.blob.size||0;
+  }
+  const GB=1024*1024*1024;
+  if(total >= 1.5*GB){ toast('写真が多すぎてまとめられません（約'+(total/GB).toFixed(1)+'GB）。調査ごとに書き出してください'); return; }
+  files.push({ name:'photos.json', u8:new TextEncoder().encode(JSON.stringify(manifest)) });
+  downloadBlob(`reddsurvey_full_${dateValue().replace(/-/g,'')}.zip`, buildZip(files));
+  toast(`写真ごと書き出しました（写真 ${manifest.length} 枚${missing?`／見つからない ${missing} 枚`:''}）`);
+}
+
+// 記録の取り込み（JSONでもZIPの中のbackup.jsonでも同じ処理を通す）
+function applyBackup(b){
+  if(!b || b.app!=='redd_survey' || !b.data){ toast('このアプリのバックアップではありません'); return null; }
+  let added=0, updated=0, ok=true;
+  CORE_KEYS.forEach(k=>{
+    const key=DB.key[k];
+    const map=new Map(DB.load(key).map(x=>[x.uuid,x]));
+    (b.data[key]||[]).forEach(x=>{
+      if(!x || !x.uuid) return;
+      const old=map.get(x.uuid);
+      if(!old){ map.set(x.uuid,x); added++; }
+      else if(String(x.updated_at||'') > String(old.updated_at||'')){ map.set(x.uuid,x); updated++; }
+    });
+    if(!DB.save(key, [...map.values()])) ok=false;
+  });
+  if(Array.isArray(b.species) && b.species.length) speciesSave(b.species);
+  return {added, updated, ok};
 }
 function importBackup(input){
   const f=(input.files||[])[0]; input.value='';
   if(!f) return;
+  if(/\.zip$/i.test(f.name||'')){ importFullBackup(f); return; }
   const rd=new FileReader();
   rd.onload=()=>{
     let b; try{ b=JSON.parse(rd.result); }catch(e){ toast('ファイルを読めませんでした'); return; }
     if(!b || b.app!=='redd_survey' || !b.data){ toast('このアプリのバックアップではありません'); return; }
-    const counts = CORE_KEYS.map(k=>(b.data[DB.key[k]]||[]).length);
-    if(!confirm(`取り込みますか？\n調査 ${counts[0]} / 区間 ${counts[1]} / 産卵床 ${counts[2]} / メモ ${counts[3]}\n\n同じ記録は新しい方（更新日時が後）を残します。`)) return;
-    let added=0, updated=0;
-    CORE_KEYS.forEach(k=>{
-      const key=DB.key[k];
-      const cur=DB.load(key);
-      const map=new Map(cur.map(x=>[x.uuid,x]));
-      (b.data[key]||[]).forEach(x=>{
-        if(!x || !x.uuid) return;
-        const old=map.get(x.uuid);
-        if(!old){ map.set(x.uuid,x); added++; }
-        else if(String(x.updated_at||'') > String(old.updated_at||'')){ map.set(x.uuid,x); updated++; }
-      });
-      DB.save(key, [...map.values()]);
-    });
-    if(Array.isArray(b.species) && b.species.length) speciesSave(b.species);
-    toast(`取り込みました（新規 ${added} / 更新 ${updated}）`);
+    if(!confirm(`取り込みますか？\n${backupCounts(b)}\n\n同じ記録は新しい方（更新日時が後）を残します。`)) return;
+    const r = applyBackup(b);
+    if(!r) return;
+    if(!r.ok){ alert('取り込みの途中で保存できませんでした。端末の空き容量を確認してください。'); }
+    toast(`取り込みました（新規 ${r.added} / 更新 ${r.updated}）`);
     reset('home');
   };
   rd.readAsText(f);
+}
+async function importFullBackup(file){
+  let entries;
+  try{ entries = parseStoredZip(await file.arrayBuffer()); }
+  catch(e){ toast('ZIPを読めませんでした'); return; }
+  const dec=new TextDecoder();
+  const jsonEntry = entries.find(x=>x.name==='backup.json');
+  if(!jsonEntry){ toast('このZIPにはバックアップが入っていません'); return; }
+  let b; try{ b=JSON.parse(dec.decode(jsonEntry.data)); }catch(e){ toast('中身を読めませんでした'); return; }
+  if(!b || b.app!=='redd_survey' || !b.data){ toast('このアプリのバックアップではありません'); return; }
+  const photos = entries.filter(x=>x.name.indexOf('photos/')===0);
+  if(!confirm(`取り込みますか？\n${backupCounts(b)}／写真 ${photos.length} 枚\n\n同じ記録は新しい方（更新日時が後）を残します。`)) return;
+
+  toast('取り込んでいます…');
+  let saved=0, failed=0;
+  for(const e of photos){
+    const id = e.name.replace(/^photos\//,'').replace(/\.[^.]+$/,'');
+    const ext = (e.name.match(/\.([^.]+)$/)||[])[1] || 'jpg';
+    try{
+      const cur = await PhotoDB.get(id);
+      if(cur && cur.blob){ saved++; continue; }   // すでにある写真はそのまま
+      await PhotoDB.put({ id, blob:new Blob([e.data], {type: extMime(ext)}), ext,
+                          size:e.data.length, added_at:nowISO() });
+      saved++;
+    }catch(err){ console.error(err); failed++; }
+  }
+  const r = applyBackup(b);
+  if(!r) return;
+  if(!r.ok || failed) alert(`取り込みに一部失敗しました（写真 ${failed} 枚）。端末の空き容量を確認してください。`);
+  toast(`取り込みました（新規 ${r.added} / 更新 ${r.updated} / 写真 ${saved} 枚）`);
+  reset('home');
+}
+function extMime(ext){
+  return ext==='png' ? 'image/png' : ext==='webp' ? 'image/webp'
+       : (ext==='heic'||ext==='heif') ? 'image/heic' : 'image/jpeg';
+}
+// 無圧縮ZIPを読み解く（buildZip で作ったものが対象）
+function parseStoredZip(buf){
+  const dv=new DataView(buf), u8=new Uint8Array(buf), out=[]; let i=0;
+  while(i < u8.length-3){
+    if(dv.getUint32(i, true) !== 0x04034b50) break;
+    const nameLen=dv.getUint16(i+26, true), extraLen=dv.getUint16(i+28, true);
+    const size=dv.getUint32(i+18, true);
+    const nameStart=i+30;
+    const name=new TextDecoder().decode(u8.subarray(nameStart, nameStart+nameLen));
+    const dataStart=nameStart+nameLen+extraLen;
+    out.push({ name, data:u8.subarray(dataStart, dataStart+size) });
+    i = dataStart + size;
+  }
+  return out;
 }
 
 /* ---------- 書き出し画面 ---------- */
@@ -2703,11 +3026,15 @@ SCREENS.exportHub = (svUuid)=>{
       <div class="tiny muted" style="margin-top:8px">どの産卵床の写真かが分かる対応表（index.csv）が一緒に入ります。</div>
 
       <div class="sect">まるごと保存（機種変更・PCへの受け渡し）</div>
-      <button class="btn" onclick="exportBackup()">バックアップを書き出す</button>
-      <div class="tiny muted" style="margin-top:8px">記録だけを保存します。写真は別に「写真ZIP」で書き出してください。</div>
+      <button class="btn primary" onclick="exportFullBackup()">写真ごとバックアップ（ZIP）</button>
+      <div class="tiny muted" style="margin-top:8px">
+        機種変更のときはこれ1つで戻せます。記録と写真の実体が同じファイルに入ります。</div>
       <div class="sp"></div>
-      <input type="file" id="fBackupIn" accept="application/json,.json" style="display:none" onchange="importBackup(this)">
-      <button class="btn" onclick="document.getElementById('fBackupIn').click()">バックアップを取り込む</button>
+      <button class="btn" onclick="exportBackup()">記録だけバックアップ（JSON・軽い）</button>
+      <div class="tiny muted" style="margin-top:8px">写真は含みません。日々の控えとして軽く残したいとき用。</div>
+      <div class="sp"></div>
+      <input type="file" id="fBackupIn" accept=".zip,.json,application/json,application/zip" style="display:none" onchange="importBackup(this)">
+      <button class="btn" onclick="document.getElementById('fBackupIn').click()">バックアップを取り込む（ZIP・JSONどちらでも）</button>
 
       <div class="tiny muted" style="margin-top:16px">
         iPhoneでは書き出したファイルが共有シートに出るので「ファイルに保存」を選んでください。</div>`
@@ -2749,7 +3076,18 @@ SCREENS.trash = ()=>{
       : `<div class="empty">ゴミ箱は空です。</div>`
   };
 };
-function restoreItem(k, u){ DB.restore(DB.key[k], u); toast('戻しました'); render(); }
+function restoreItem(k, u){
+  if(!DB.restore(DB.key[k], u)){ alert('戻せませんでした。端末の空き容量を確認してください。'); return; }
+  // 調査を戻すときは、一緒に消えた記録もまとめて戻す（空の調査が復活しないように）
+  if(k==='sv'){
+    let n=0;
+    ['re','rd','nt','un'].forEach(ck=>{
+      DB.deleted(DB.key[ck]).filter(x=>x.deleted_by===u).forEach(x=>{ if(DB.restore(DB.key[ck], x.uuid)) n++; });
+    });
+    toast(n ? `調査と記録 ${n} 件を戻しました` : '戻しました');
+  }else toast('戻しました');
+  render();
+}
 function purgeAll(){
   const total = TRASH_GROUPS.reduce((a,g)=>a+DB.deleted(DB.key[g.key]).length, 0);
   if(!confirm(`ゴミ箱の ${total} 件を完全に消します。元に戻せません。よろしいですか？`)) return;
@@ -2780,6 +3118,12 @@ async function forceUpdate(){
   }catch(e){ console.error(e); }
   location.reload();
 }
+
+// アプリが裏に回る・閉じられるときにも、書きかけと軌跡を控えておく
+window.addEventListener('pagehide', ()=>{ stashEditDraft(); trackSave(); });
+document.addEventListener && document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden'){ stashEditDraft(); trackSave(); }
+});
 
 (function boot(){
   resumeTracking();   // 記録中の区間があれば、開き直しても軌跡の記録を続ける

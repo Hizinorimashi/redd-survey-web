@@ -1,4 +1,4 @@
-const CACHE = 'redd-survey-v8';
+const CACHE = 'redd-survey-v9';
 // 必須資産（これが揃わないとアプリが成立しない）。install時に全部揃わなければ失敗させ、不完全キャッシュで有効化しない
 const CORE = [
   './redd_survey.html',
@@ -91,7 +91,14 @@ async function networkFirst(request){
   const timeoutP = new Promise(resolve => setTimeout(() => resolve('timeout'), 3500));
   try{
     const r = await Promise.race([netP, timeoutP]);
-    if (r !== 'timeout' && r) return r;               // 正常応答（404/500含む、そのまま返す）
+    // 404/5xx のときは、手元にキャッシュがあればそちらを出す
+    // （配信の一時的な不調で、オフライン対応のアプリが白画面になるのを防ぐ）
+    if (r !== 'timeout' && r && r.ok) return r;
+    if (r !== 'timeout' && r){
+      const cachedErr = await cache.match(request);
+      if (cachedErr) return cachedErr;
+      return r;
+    }
     const cached = await cache.match(request);          // タイムアウト→キャッシュ
     if (cached) return cached;
     return await netP;                                  // キャッシュも無ければネット完了を待つ
@@ -123,5 +130,6 @@ self.addEventListener('fetch', e => {
   if (isTile(url)){ e.respondWith(handleTile(req)); return; }
   if (req.mode === 'navigate' || isHtmlShell(url)){ e.respondWith(networkFirst(req)); return; }
   if (isStaticVendor(url)){ e.respondWith(cacheFirst(req)); return; }
-  e.respondWith(caches.match(req).then(cached => cached || fetch(req)));
+  // 自分のキャッシュだけを見る（同一オリジンの別アプリのキャッシュを覗かない）
+  e.respondWith(caches.open(CACHE).then(c => c.match(req)).then(cached => cached || fetch(req)));
 });
