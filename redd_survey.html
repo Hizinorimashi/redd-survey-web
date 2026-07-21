@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v10';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v11';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -2349,38 +2349,74 @@ const PACK_WARN_TILES = 12000;   // これを超えたら強く警告
 function lon2tx(lon,z){ return Math.floor((lon+180)/360*Math.pow(2,z)); }
 function lat2ty(lat,z){ const r=lat*Math.PI/180;
   return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,z)); }
+// タイル番号 → そのタイルの北西角の緯度経度（タイルの範囲を出すのに使う）
+function tx2lon(x,z){ return x/Math.pow(2,z)*360-180; }
+function ty2lat(y,z){ const n=Math.PI-2*Math.PI*y/Math.pow(2,z);
+  return 180/Math.PI*Math.atan(0.5*(Math.exp(n)-Math.exp(-n))); }
+
+// 多角形の外周（緯度経度の点の配列）から、その形にかかるタイルだけを選ぶ。
+// タイルの四隅か中心が多角形の内側にあれば「かかっている」とみなす。
+function polyBounds(poly){
+  let s=90,n=-90,w=180,e=-180;
+  poly.forEach(p=>{ s=Math.min(s,p[0]); n=Math.max(n,p[0]); w=Math.min(w,p[1]); e=Math.max(e,p[1]); });
+  return {s,n,w,e};
+}
+function pointInPoly(lat, lon, poly){
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const yi=poly[i][0], xi=poly[i][1], yj=poly[j][0], xj=poly[j][1];
+    if(((yi>lat)!==(yj>lat)) && (lon < (xj-xi)*(lat-yi)/(yj-yi)+xi)) inside=!inside;
+  }
+  return inside;
+}
+function tileHitsPoly(x,y,z,poly){
+  const latN=ty2lat(y,z), latS=ty2lat(y+1,z), lonW=tx2lon(x,z), lonE=tx2lon(x+1,z);
+  // タイルの4隅・中心のどれかが多角形内なら採用
+  const pts=[[latN,lonW],[latN,lonE],[latS,lonW],[latS,lonE],[(latN+latS)/2,(lonW+lonE)/2]];
+  if(pts.some(p=>pointInPoly(p[0],p[1],poly))) return true;
+  // 逆に、多角形の頂点がタイルの中に入る場合も採用（細い多角形の取りこぼし防止）
+  return poly.some(p=>p[0]<=latN && p[0]>=latS && p[1]>=lonW && p[1]<=lonE);
+}
 
 function packStore(){ try{ return JSON.parse(localStorage.getItem('rd_map_packs')||'[]'); }catch(e){ return []; } }
 function packSave(list){ try{ localStorage.setItem('rd_map_packs', JSON.stringify(list)); }catch(e){} }
 
 // bbox={s,w,n,e}, zmax, layers=['航空写真',...] から、落とすタイルURLの一覧を作る
-function packTileUrls(bbox, zmax, layers){
-  const urls=[];
+// 保存するタイルの (z,x,y) 一覧。poly があればその形にかかるマスだけ、
+// 無ければ矩形 bbox の全マス（後方互換）。
+function packTiles(area, zmax){
   const zTop = Math.min(zmax, PACK_MAXZOOM);
+  const poly = (area && area.poly && area.poly.length>=3) ? area.poly : null;
+  const bb = poly ? polyBounds(poly) : area;   // area 自体が {s,n,w,e} の場合も受ける
+  const out=[];
+  for(let z=PACK_MINZOOM; z<=zTop; z++){
+    const x0=lon2tx(bb.w,z), x1=lon2tx(bb.e,z);
+    const y0=lat2ty(bb.n,z), y1=lat2ty(bb.s,z);
+    for(let x=Math.min(x0,x1); x<=Math.max(x0,x1); x++)
+      for(let y=Math.min(y0,y1); y<=Math.max(y0,y1); y++)
+        if(!poly || tileHitsPoly(x,y,z,poly)) out.push([z,x,y]);
+  }
+  return out;
+}
+function packTileUrls(area, zmax, layers){
+  const tiles = packTiles(area, zmax);
+  const urls=[];
   layers.forEach(name=>{
     const b=BASEMAPS[name]; if(!b) return;
-    for(let z=PACK_MINZOOM; z<=zTop; z++){
-      const x0=lon2tx(bbox.w,z), x1=lon2tx(bbox.e,z);
-      const y0=lat2ty(bbox.n,z), y1=lat2ty(bbox.s,z);
-      for(let x=Math.min(x0,x1); x<=Math.max(x0,x1); x++)
-        for(let y=Math.min(y0,y1); y<=Math.max(y0,y1); y++)
-          urls.push(b.url.replace('{z}',z).replace('{x}',x).replace('{y}',y));
-    }
+    tiles.forEach(([z,x,y])=>urls.push(b.url.replace('{z}',z).replace('{x}',x).replace('{y}',y)));
   });
   return urls;
 }
 // 見積り（枚数と、種類ごとの重みで概算したMB）
-function packEstimate(bbox, zmax, layers){
-  const urls = packTileUrls(bbox, zmax, layers);
+function packEstimate(area, zmax, layers){
+  const tiles = packTiles(area, zmax);
+  const urls = packTileUrls(area, zmax, layers);
+  // ズームごとの枚数に、種類ごとの重みをかけてMBを概算
+  const perZoom={};
+  tiles.forEach(([z])=>{ perZoom[z]=(perZoom[z]||0)+1; });
   let kb=0;
-  layers.forEach(name=>{
-    const zTop=Math.min(zmax,PACK_MAXZOOM);
-    for(let z=PACK_MINZOOM; z<=zTop; z++){
-      const nx=Math.abs(lon2tx(bbox.e,z)-lon2tx(bbox.w,z))+1;
-      const ny=Math.abs(lat2ty(bbox.s,z)-lat2ty(bbox.n,z))+1;
-      kb += nx*ny*(PACK_TILE_KB[name]||15);
-    }
-  });
+  layers.forEach(name=>{ const w=PACK_TILE_KB[name]||15;
+    Object.keys(perZoom).forEach(z=>{ kb += perZoom[z]*w; }); });
   return { count:urls.length, mb: kb/1024, urls };
 }
 
@@ -2474,8 +2510,9 @@ SCREENS.map = (sv)=>{
 };
 
 /* ---------- オフライン地図の保存画面 ---------- */
-let OMAP=null, OMAP_RECT=null, OMAP_PTS=[];
-function closeOfflineMap(){ if(OMAP){ try{ OMAP.remove(); }catch(e){} } OMAP=null; OMAP_RECT=null; OMAP_PTS=[]; }
+let OMAP=null, OMAP_SHAPE=null, OMAP_PTS=[], OMAP_DOTS=[];
+function closeOfflineMap(){ if(OMAP){ try{ OMAP.remove(); }catch(e){} }
+  OMAP=null; OMAP_SHAPE=null; OMAP_PTS=[]; OMAP_DOTS=[]; }
 
 SCREENS.offlineMap = (sv)=>{
   const s = DB.survey(sv); if(!s) return SCREENS.home();
@@ -2495,16 +2532,20 @@ SCREENS.offlineMap = (sv)=>{
     html:`
       <div class="card"><div class="small">
         電波のあるうちに、調査で使う範囲の地図を保存しておくと、圏外でも表示できます。<br>
-        ① 地図をタップして四角の角を2つ決める（もう一度タップでやり直し）<br>
+        ① 地図をタップして、囲みたい範囲の角を順に打つ（川筋に沿って自由な形でOK）<br>
         ② 保存する地図の種類と細かさを選ぶ<br>
         ③ 「この範囲を保存」を押す
       </div></div>
       ${baseMapButtonsHtml()}
       <div id="omap"></div>
       <div class="btn-grid" style="margin-top:8px">
-        <button class="btn" onclick="offlineUseView()">今の表示範囲を使う</button>
-        <button class="btn" onclick="offlineClearRect()">四角を消す</button>
+        <button class="btn" onclick="offlineUndoCorner()">1つ戻す</button>
+        <button class="btn" onclick="offlineClearRect()">囲みを消す</button>
       </div>
+      <div class="tiny muted" style="margin-top:6px" id="omapHint">
+        3点以上打つと範囲になります。斜めやL字など、川の形に合わせて囲むと無駄が減ります。
+        「今の表示範囲を使う」で画面いっぱいの四角にもできます。</div>
+      <button class="btn ghost small" style="margin-top:6px" onclick="offlineUseView()">今の表示範囲を使う</button>
 
       <div class="sect">保存する地図の種類</div>
       <div class="seg" data-segmulti="omapLayers">
@@ -2540,10 +2581,14 @@ function initOfflineMap(sv){
     if(p) L.circleMarker(p,{radius:4,color:'#9aa8b4',weight:1,fillOpacity:.4}).addTo(group); });
   DB.reachesOf(sv).forEach(r=>{ const pts=(r.track||[]).filter(validPt);
     if(pts.length>=2) L.polyline(pts,{color:'#4aa3dd',weight:3,opacity:.5}).addTo(group); });
-  // 既に保存済みの範囲を四角で見せる
-  packStore().forEach(p=>{ if(p.bbox)
-    L.rectangle([[p.bbox.s,p.bbox.w],[p.bbox.n,p.bbox.e]],
-      {color:'#4ec38a',weight:1,fillOpacity:.05,dashArray:'4,4'}).addTo(OMAP); });
+  // 既に保存済みの範囲を形で見せる（多角形なら多角形、古い四角なら四角）
+  packStore().forEach(p=>{
+    if(p.poly && p.poly.length>=3)
+      L.polygon(p.poly, {color:'#4ec38a',weight:1,fillOpacity:.05,dashArray:'4,4'}).addTo(OMAP);
+    else if(p.bbox)
+      L.rectangle([[p.bbox.s,p.bbox.w],[p.bbox.n,p.bbox.e]],
+        {color:'#4ec38a',weight:1,fillOpacity:.05,dashArray:'4,4'}).addTo(OMAP);
+  });
 
   let center=[43.5,142.5], zoom=9;
   if(group.getLayers().length){ try{ const b=group.getBounds(); center=b.getCenter(); zoom=13; }catch(e){} }
@@ -2553,38 +2598,43 @@ function initOfflineMap(sv){
   setTimeout(()=>{ if(OMAP) OMAP.invalidateSize(); }, 60);
 }
 function offlineAddCorner(lat, lon){
-  if(OMAP_PTS.length>=2) OMAP_PTS=[];   // 3回目のタップでやり直し
   OMAP_PTS.push([lat,lon]);
-  offlineRedrawRect();
-  if(OMAP_PTS.length===2) offlineEstimate();
+  offlineRedrawShape();
+  if(OMAP_PTS.length>=3) offlineEstimate();
 }
-function currentBbox(){
-  if(OMAP_PTS.length!==2) return null;
-  const [a,b]=OMAP_PTS;
-  return { s:Math.min(a[0],b[0]), n:Math.max(a[0],b[0]), w:Math.min(a[1],b[1]), e:Math.max(a[1],b[1]) };
-}
-function offlineRedrawRect(){
-  if(OMAP_RECT){ try{ OMAP.removeLayer(OMAP_RECT); }catch(e){} OMAP_RECT=null; }
-  const bb=currentBbox();
-  if(bb) OMAP_RECT=L.rectangle([[bb.s,bb.w],[bb.n,bb.e]],{color:'#e0a030',weight:2,fillOpacity:.1}).addTo(OMAP);
-  else if(OMAP_PTS.length===1)
-    OMAP_RECT=L.circleMarker(OMAP_PTS[0],{radius:6,color:'#e0a030',weight:2,fillColor:'#e0a030',fillOpacity:1}).addTo(OMAP);
+function offlineUndoCorner(){ OMAP_PTS.pop(); offlineRedrawShape();
+  if(OMAP_PTS.length>=3) offlineEstimate(); else offlineClearEst(); }
+// いま囲っている多角形（3点以上のとき）
+function currentPoly(){ return OMAP_PTS.length>=3 ? OMAP_PTS.slice() : null; }
+function offlineRedrawShape(){
+  if(OMAP_SHAPE){ try{ OMAP.removeLayer(OMAP_SHAPE); }catch(e){} OMAP_SHAPE=null; }
+  OMAP_DOTS.forEach(d=>{ try{ OMAP.removeLayer(d); }catch(e){} }); OMAP_DOTS=[];
+  // 打った点を小さな丸で見せる（消したり戻したりが分かるように）
+  OMAP_PTS.forEach((p,i)=>{ OMAP_DOTS.push(
+    L.circleMarker(p,{radius:5,color:'#e0a030',weight:2,fillColor:'#fff',fillOpacity:1}).addTo(OMAP)); });
+  if(OMAP_PTS.length>=3)
+    OMAP_SHAPE=L.polygon(OMAP_PTS,{color:'#e0a030',weight:2,fillOpacity:.12}).addTo(OMAP);
+  else if(OMAP_PTS.length===2)
+    OMAP_SHAPE=L.polyline(OMAP_PTS,{color:'#e0a030',weight:2,dashArray:'5,5'}).addTo(OMAP);
 }
 function offlineUseView(){
   if(!OMAP) return;
   const b=OMAP.getBounds();
-  OMAP_PTS=[[b.getSouth(),b.getWest()],[b.getNorth(),b.getEast()]];
-  offlineRedrawRect(); offlineEstimate();
+  // 画面いっぱいの四角を、4点の多角形として置く
+  OMAP_PTS=[[b.getNorth(),b.getWest()],[b.getNorth(),b.getEast()],
+            [b.getSouth(),b.getEast()],[b.getSouth(),b.getWest()]];
+  offlineRedrawShape(); offlineEstimate();
 }
-function offlineClearRect(){ OMAP_PTS=[]; offlineRedrawRect();
-  const el=$('#omapEst'); if(el) el.innerHTML='<div class="small muted">四角を決めると、枚数と容量の見積りが出ます。</div>'; }
+function offlineClearEst(){ const el=$('#omapEst');
+  if(el) el.innerHTML='<div class="small muted">3点以上囲むと、枚数と容量の見積りが出ます。</div>'; }
+function offlineClearRect(){ OMAP_PTS=[]; offlineRedrawShape(); offlineClearEst(); }
 function offlineZoomMax(){ const v=segVal('omapZoom')||''; const m=v.match(/z(\d+)/); return m?+m[1]:PACK_MAXZOOM; }
 function offlineLayers(){ const l=segMultiVal('omapLayers'); return l.length?l:[baseMapName()]; }
 function offlineEstimate(){
   const el=$('#omapEst'); if(!el) return;
-  const bb=currentBbox();
-  if(!bb){ el.innerHTML='<div class="small muted">四角を決めると、枚数と容量の見積りが出ます。</div>'; return; }
-  const est = packEstimate(bb, offlineZoomMax(), offlineLayers());
+  const poly=currentPoly();
+  if(!poly){ offlineClearEst(); return; }
+  const est = packEstimate({poly}, offlineZoomMax(), offlineLayers());
   const min = Math.max(1, Math.round(est.count/300));   // 控えめ並行での概算（1枚≈0.2秒相当）
   const warn = est.count>PACK_WARN_TILES;
   el.innerHTML = `<div class="small"><b>約 ${est.count.toLocaleString()} 枚 ／ 約 ${est.mb.toFixed(0)} MB</b>
@@ -2594,12 +2644,13 @@ function offlineEstimate(){
     <div class="tiny muted" style="margin-top:6px">${esc(offlineLayers().join('・'))}／z${PACK_MINZOOM}〜${offlineZoomMax()}</div>`;
 }
 async function offlineSave(sv){
-  const bb=currentBbox();
-  if(!bb){ toast('先に地図で四角を決めてください'); return; }
+  const poly=currentPoly();
+  if(!poly){ toast('先に地図で3点以上囲んでください'); return; }
   if(!(navigator.serviceWorker && navigator.serviceWorker.controller)){
     toast('この環境では保存できません（公開URLをホーム画面に追加して使ってください）'); return; }
   const layers=offlineLayers(), zmax=offlineZoomMax();
-  const est=packEstimate(bb, zmax, layers);
+  const area={poly};
+  const est=packEstimate(area, zmax, layers);
   if(est.count > 40000){ alert('範囲が大きすぎます（約'+est.count.toLocaleString()+'枚）。四角を小さくするか、細かさを下げてください。'); return; }
   if(est.count > PACK_WARN_TILES && !confirm(`約 ${est.count.toLocaleString()} 枚（${est.mb.toFixed(0)}MB）を保存します。時間がかかり、端末の空きも使います。続けますか？`)) return;
 
@@ -2624,7 +2675,8 @@ async function offlineSave(sv){
   else{
     // パックの記録を残す（一覧・削除・地図表示に使う）
     const list=packStore();
-    list.unshift({ id:uuid(), name:(s=>s.river_name||s.name)(DB.survey(sv)||{}), bbox:bb,
+    list.unshift({ id:uuid(), name:(s=>s.river_name||s.name)(DB.survey(sv)||{}),
+      poly, bbox:polyBounds(poly),
       zmin:PACK_MINZOOM, zmax, layers, count:est.count, mb:est.mb, saved_at:nowISO() });
     packSave(list);
     toast(`保存しました（${ok.toLocaleString()}枚${fail?`／取れなかった ${fail}枚`:''}）`);
@@ -2635,7 +2687,8 @@ function offlineAbort(){ if(PACK_DL) PACK_DL.abort=true; }
 async function deleteMapPack(id){
   const list=packStore(); const p=list.find(x=>x.id===id); if(!p) return;
   if(!confirm(`「${p.name||'保存範囲'}」の地図（約${p.mb.toFixed(0)}MB）を消しますか？`)) return;
-  try{ await swAsk({type:'deletePack', urls:packTileUrls(p.bbox, p.zmax, p.layers)}); }catch(e){}
+  const area = (p.poly && p.poly.length>=3) ? {poly:p.poly} : p.bbox;
+  try{ await swAsk({type:'deletePack', urls:packTileUrls(area, p.zmax, p.layers)}); }catch(e){}
   packSave(list.filter(x=>x.id!==id));
   toast('消しました');
   render();
