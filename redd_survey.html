@@ -91,7 +91,7 @@
 
   /* 地図 */
   #map{height:calc(100vh - 300px); min-height:320px; border-radius:var(--radius); border:1px solid var(--line);}
-  #pickMap,#unitMap{height:320px; border-radius:var(--radius); border:1px solid var(--line);}
+  #pickMap,#unitMap,#omap{height:320px; border-radius:var(--radius); border:1px solid var(--line);}
   .seg.basemap{margin-bottom:8px;}
   .seg.basemap button{padding:6px 12px; font-size:14px;}
   .leaflet-container{background:#0d1218;}
@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v9';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v10';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -404,6 +404,7 @@ function render(){
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
   closePickMap();
   closeUnitMap();
+  closeOfflineMap();
   revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
   const cur = STACK[STACK.length-1];
   const scr = SCREENS[cur.name] || SCREENS.home;
@@ -2333,6 +2334,68 @@ const BASEMAPS = {
 const GSI_ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html">国土地理院</a>';
 function baseMapName(){ const v=localStorage.getItem('rd_basemap'); return BASEMAPS[v]?v:'航空写真'; }
 
+/* ============================================================
+   オフライン地図の保存（範囲を囲って先に落としておく）
+   スクロール任せだと「どこまで保存できたか」が分からないので、
+   四角で範囲を決めて、その中のタイルをまとめて保存する。
+   保存分は Service Worker の PACK_CACHE に入り、自動では消えない。
+   ============================================================ */
+const PACK_MAXZOOM = 16;     // これ以上は落とさない（枚数が急増するため）
+const PACK_MINZOOM = 12;     // 全体像が分かる粗さから
+const PACK_TILE_KB = { '航空写真':20, '地形図':12, '淡色地図':10 };   // 見積り用の1枚あたりKB
+const PACK_WARN_TILES = 12000;   // これを超えたら強く警告
+
+// 緯度経度 → タイル番号
+function lon2tx(lon,z){ return Math.floor((lon+180)/360*Math.pow(2,z)); }
+function lat2ty(lat,z){ const r=lat*Math.PI/180;
+  return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,z)); }
+
+function packStore(){ try{ return JSON.parse(localStorage.getItem('rd_map_packs')||'[]'); }catch(e){ return []; } }
+function packSave(list){ try{ localStorage.setItem('rd_map_packs', JSON.stringify(list)); }catch(e){} }
+
+// bbox={s,w,n,e}, zmax, layers=['航空写真',...] から、落とすタイルURLの一覧を作る
+function packTileUrls(bbox, zmax, layers){
+  const urls=[];
+  const zTop = Math.min(zmax, PACK_MAXZOOM);
+  layers.forEach(name=>{
+    const b=BASEMAPS[name]; if(!b) return;
+    for(let z=PACK_MINZOOM; z<=zTop; z++){
+      const x0=lon2tx(bbox.w,z), x1=lon2tx(bbox.e,z);
+      const y0=lat2ty(bbox.n,z), y1=lat2ty(bbox.s,z);
+      for(let x=Math.min(x0,x1); x<=Math.max(x0,x1); x++)
+        for(let y=Math.min(y0,y1); y<=Math.max(y0,y1); y++)
+          urls.push(b.url.replace('{z}',z).replace('{x}',x).replace('{y}',y));
+    }
+  });
+  return urls;
+}
+// 見積り（枚数と、種類ごとの重みで概算したMB）
+function packEstimate(bbox, zmax, layers){
+  const urls = packTileUrls(bbox, zmax, layers);
+  let kb=0;
+  layers.forEach(name=>{
+    const zTop=Math.min(zmax,PACK_MAXZOOM);
+    for(let z=PACK_MINZOOM; z<=zTop; z++){
+      const nx=Math.abs(lon2tx(bbox.e,z)-lon2tx(bbox.w,z))+1;
+      const ny=Math.abs(lat2ty(bbox.s,z)-lat2ty(bbox.n,z))+1;
+      kb += nx*ny*(PACK_TILE_KB[name]||15);
+    }
+  });
+  return { count:urls.length, mb: kb/1024, urls };
+}
+
+// Service Worker への依頼（保存・計測・削除）。返事を待つ
+function swAsk(msg, transferUrls){
+  return new Promise((res,rej)=>{
+    const sw = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if(!sw){ rej(new Error('no-sw')); return; }
+    const ch = new MessageChannel();
+    ch.port1.onmessage = e => res(e.data);
+    sw.postMessage(msg, [ch.port2]);
+  });
+}
+let PACK_DL = null;   // ダウンロード中の状態（中断用）
+
 // 背景地図の切り替え。
 // Leaflet 標準の切替コントロールは画像アイコン（images/layers.png）を使うが、
 // その画像を同梱していないため「？」に化けて何のボタンか分からなかった。
@@ -2344,7 +2407,7 @@ function baseMapButtonsHtml(){
   ).join('') + `</div>`;
 }
 // 画面に出ている地図をまとめて返す。ここを経由しないと、地図を増やしたときに切替が効かなくなる
-function allMaps(){ return [MAP, PICKMAP, UNITMAP].filter(Boolean); }
+function allMaps(){ return [MAP, PICKMAP, UNITMAP, OMAP].filter(Boolean); }
 function applyBaseMap(map, name){
   if(!map) return;
   const b = BASEMAPS[name] || BASEMAPS['航空写真'];
@@ -2399,13 +2462,190 @@ SCREENS.map = (sv)=>{
     html:`${baseMapButtonsHtml()}
       <div id="map"></div>
       <div class="sp"></div>
-      <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして記録を追加</button>
+      <div class="btn-grid">
+        <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして記録を追加</button>
+        <button class="btn" onclick="nav('offlineMap','${sv}')">オフライン地図を保存</button>
+      </div>
       <div class="sp"></div>
       <div class="card" id="legend"><div class="small muted">凡例</div></div>
       <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、四角＝親魚のみ、✕＝ホッチャレのみ、線＝歩いた区間、オレンジの四角＝メモ。タップすると記録を開けます。</div>`,
     onMount:()=>{ MAP_ADD_MODE=false; drawMap(sv); }
   };
 };
+
+/* ---------- オフライン地図の保存画面 ---------- */
+let OMAP=null, OMAP_RECT=null, OMAP_PTS=[];
+function closeOfflineMap(){ if(OMAP){ try{ OMAP.remove(); }catch(e){} } OMAP=null; OMAP_RECT=null; OMAP_PTS=[]; }
+
+SCREENS.offlineMap = (sv)=>{
+  const s = DB.survey(sv); if(!s) return SCREENS.home();
+  const cur = baseMapName();
+  const packs = packStore();
+  const packCards = packs.map(p=>`
+    <div class="card">
+      <div class="row"><div class="grow"><b>${esc(p.name||'保存範囲')}</b>
+        <span class="badge">${esc((p.layers||[]).join('・'))}</span></div>
+        <button class="btn ghost small" style="width:auto" onclick="deleteMapPack('${p.id}')">削除</button></div>
+      <div class="small muted" style="margin-top:6px">
+        z${p.zmin}〜${p.zmax} ／ ${p.count.toLocaleString()}枚 ／ 約${p.mb.toFixed(0)}MB ／ ${fmtDate(p.saved_at)}保存</div>
+    </div>`).join('');
+  return {
+    title:'オフライン地図の保存',
+    sub:[{text:s.name}],
+    html:`
+      <div class="card"><div class="small">
+        電波のあるうちに、調査で使う範囲の地図を保存しておくと、圏外でも表示できます。<br>
+        ① 地図をタップして四角の角を2つ決める（もう一度タップでやり直し）<br>
+        ② 保存する地図の種類と細かさを選ぶ<br>
+        ③ 「この範囲を保存」を押す
+      </div></div>
+      ${baseMapButtonsHtml()}
+      <div id="omap"></div>
+      <div class="btn-grid" style="margin-top:8px">
+        <button class="btn" onclick="offlineUseView()">今の表示範囲を使う</button>
+        <button class="btn" onclick="offlineClearRect()">四角を消す</button>
+      </div>
+
+      <div class="sect">保存する地図の種類</div>
+      <div class="seg" data-segmulti="omapLayers">
+        ${Object.keys(BASEMAPS).map(n=>`<button type="button" class="${n===cur?'on':''}"
+          onclick="pickSegMulti(this,'offlineEstimate')">${esc(n)}</button>`).join('')}
+      </div>
+      <div class="sect">細かさ（拡大の上限）</div>
+      <label class="field"><span class="lab">これ以上は保存しません（枚数を抑えるため）</span>
+        ${segHtml('omapZoom', ['z14（通りが見える）','z15（州・瀬淵）','z16（産卵床を置ける）'],
+          'z16（産卵床を置ける）', false)}</label>
+
+      <div class="card" id="omapEst"><div class="small muted">四角を決めると、枚数と容量の見積りが出ます。</div></div>
+      <button class="btn primary big" id="omapSaveBtn" onclick="offlineSave('${sv}')">この範囲を保存</button>
+      <div class="sp"></div>
+      <div id="omapProg"></div>
+
+      ${ packs.length ? `<div class="sect">保存済み（${packs.length}）</div>${packCards}
+        <button class="btn ghost small" onclick="offlineStats()">実際の保存量を確認</button>
+        <div class="tiny muted" id="omapStats" style="margin-top:6px"></div>` : '' }
+    `,
+    onMount:()=>initOfflineMap(sv)
+  };
+};
+
+function initOfflineMap(sv){
+  closeOfflineMap();
+  if(typeof L==='undefined' || !$('#omap')) return;
+  OMAP = L.map('omap', { zoomControl:true });
+  applyBaseMap(OMAP, baseMapName());
+  // 記録済みの産卵床・区間を薄く出して、どこを保存すればいいか分かるように
+  const group = L.featureGroup().addTo(OMAP);
+  DB.reddsOf(sv).forEach(r=>{ const p=ptOf(r.latitude,r.longitude);
+    if(p) L.circleMarker(p,{radius:4,color:'#9aa8b4',weight:1,fillOpacity:.4}).addTo(group); });
+  DB.reachesOf(sv).forEach(r=>{ const pts=(r.track||[]).filter(validPt);
+    if(pts.length>=2) L.polyline(pts,{color:'#4aa3dd',weight:3,opacity:.5}).addTo(group); });
+  // 既に保存済みの範囲を四角で見せる
+  packStore().forEach(p=>{ if(p.bbox)
+    L.rectangle([[p.bbox.s,p.bbox.w],[p.bbox.n,p.bbox.e]],
+      {color:'#4ec38a',weight:1,fillOpacity:.05,dashArray:'4,4'}).addTo(OMAP); });
+
+  let center=[43.5,142.5], zoom=9;
+  if(group.getLayers().length){ try{ const b=group.getBounds(); center=b.getCenter(); zoom=13; }catch(e){} }
+  else if(lastFix){ center=[lastFix.lat,lastFix.lon]; zoom=13; }
+  OMAP.setView(center, zoom);
+  OMAP.on('click', e=>offlineAddCorner(e.latlng.lat, e.latlng.lng));
+  setTimeout(()=>{ if(OMAP) OMAP.invalidateSize(); }, 60);
+}
+function offlineAddCorner(lat, lon){
+  if(OMAP_PTS.length>=2) OMAP_PTS=[];   // 3回目のタップでやり直し
+  OMAP_PTS.push([lat,lon]);
+  offlineRedrawRect();
+  if(OMAP_PTS.length===2) offlineEstimate();
+}
+function currentBbox(){
+  if(OMAP_PTS.length!==2) return null;
+  const [a,b]=OMAP_PTS;
+  return { s:Math.min(a[0],b[0]), n:Math.max(a[0],b[0]), w:Math.min(a[1],b[1]), e:Math.max(a[1],b[1]) };
+}
+function offlineRedrawRect(){
+  if(OMAP_RECT){ try{ OMAP.removeLayer(OMAP_RECT); }catch(e){} OMAP_RECT=null; }
+  const bb=currentBbox();
+  if(bb) OMAP_RECT=L.rectangle([[bb.s,bb.w],[bb.n,bb.e]],{color:'#e0a030',weight:2,fillOpacity:.1}).addTo(OMAP);
+  else if(OMAP_PTS.length===1)
+    OMAP_RECT=L.circleMarker(OMAP_PTS[0],{radius:6,color:'#e0a030',weight:2,fillColor:'#e0a030',fillOpacity:1}).addTo(OMAP);
+}
+function offlineUseView(){
+  if(!OMAP) return;
+  const b=OMAP.getBounds();
+  OMAP_PTS=[[b.getSouth(),b.getWest()],[b.getNorth(),b.getEast()]];
+  offlineRedrawRect(); offlineEstimate();
+}
+function offlineClearRect(){ OMAP_PTS=[]; offlineRedrawRect();
+  const el=$('#omapEst'); if(el) el.innerHTML='<div class="small muted">四角を決めると、枚数と容量の見積りが出ます。</div>'; }
+function offlineZoomMax(){ const v=segVal('omapZoom')||''; const m=v.match(/z(\d+)/); return m?+m[1]:PACK_MAXZOOM; }
+function offlineLayers(){ const l=segMultiVal('omapLayers'); return l.length?l:[baseMapName()]; }
+function offlineEstimate(){
+  const el=$('#omapEst'); if(!el) return;
+  const bb=currentBbox();
+  if(!bb){ el.innerHTML='<div class="small muted">四角を決めると、枚数と容量の見積りが出ます。</div>'; return; }
+  const est = packEstimate(bb, offlineZoomMax(), offlineLayers());
+  const min = Math.max(1, Math.round(est.count/300));   // 控えめ並行での概算（1枚≈0.2秒相当）
+  const warn = est.count>PACK_WARN_TILES;
+  el.innerHTML = `<div class="small"><b>約 ${est.count.toLocaleString()} 枚 ／ 約 ${est.mb.toFixed(0)} MB</b>
+    <span class="muted">（ダウンロード目安 ${min}分前後）</span></div>
+    ${ warn ? `<div class="small" style="color:var(--warn); margin-top:6px">
+      範囲が広い／細かすぎます。四角を小さくするか、細かさを下げると軽くなります。</div>` : '' }
+    <div class="tiny muted" style="margin-top:6px">${esc(offlineLayers().join('・'))}／z${PACK_MINZOOM}〜${offlineZoomMax()}</div>`;
+}
+async function offlineSave(sv){
+  const bb=currentBbox();
+  if(!bb){ toast('先に地図で四角を決めてください'); return; }
+  if(!(navigator.serviceWorker && navigator.serviceWorker.controller)){
+    toast('この環境では保存できません（公開URLをホーム画面に追加して使ってください）'); return; }
+  const layers=offlineLayers(), zmax=offlineZoomMax();
+  const est=packEstimate(bb, zmax, layers);
+  if(est.count > 40000){ alert('範囲が大きすぎます（約'+est.count.toLocaleString()+'枚）。四角を小さくするか、細かさを下げてください。'); return; }
+  if(est.count > PACK_WARN_TILES && !confirm(`約 ${est.count.toLocaleString()} 枚（${est.mb.toFixed(0)}MB）を保存します。時間がかかり、端末の空きも使います。続けますか？`)) return;
+
+  const btn=$('#omapSaveBtn'); if(btn){ btn.disabled=true; btn.textContent='保存中…'; }
+  const prog=$('#omapProg');
+  PACK_DL={ abort:false };
+  const urls=est.urls, CH=60; let done=0, ok=0, fail=0;
+  if(prog) prog.innerHTML=`<div class="card"><div class="small" id="omapProgTxt">準備中…</div>
+    <button class="btn ghost small" style="margin-top:8px" onclick="offlineAbort()">中断</button></div>`;
+  for(let i=0;i<urls.length && !PACK_DL.abort;i+=CH){
+    const chunk=urls.slice(i,i+CH);
+    try{ const r=await swAsk({type:'savePackTiles', urls:chunk}); ok+=r.ok||0; fail+=r.fail||0; }
+    catch(e){ fail+=chunk.length; }
+    done+=chunk.length;
+    const t=$('#omapProgTxt');
+    if(t) t.textContent=`${Math.min(done,urls.length).toLocaleString()} / ${urls.length.toLocaleString()} 枚`
+      + (fail?`（取れなかった ${fail} 枚）`:'');
+  }
+  const aborted=PACK_DL.abort; PACK_DL=null;
+  if(btn){ btn.disabled=false; btn.textContent='この範囲を保存'; }
+  if(aborted){ toast('中断しました（そこまでの分は保存済みです）'); }
+  else{
+    // パックの記録を残す（一覧・削除・地図表示に使う）
+    const list=packStore();
+    list.unshift({ id:uuid(), name:(s=>s.river_name||s.name)(DB.survey(sv)||{}), bbox:bb,
+      zmin:PACK_MINZOOM, zmax, layers, count:est.count, mb:est.mb, saved_at:nowISO() });
+    packSave(list);
+    toast(`保存しました（${ok.toLocaleString()}枚${fail?`／取れなかった ${fail}枚`:''}）`);
+  }
+  render();
+}
+function offlineAbort(){ if(PACK_DL) PACK_DL.abort=true; }
+async function deleteMapPack(id){
+  const list=packStore(); const p=list.find(x=>x.id===id); if(!p) return;
+  if(!confirm(`「${p.name||'保存範囲'}」の地図（約${p.mb.toFixed(0)}MB）を消しますか？`)) return;
+  try{ await swAsk({type:'deletePack', urls:packTileUrls(p.bbox, p.zmax, p.layers)}); }catch(e){}
+  packSave(list.filter(x=>x.id!==id));
+  toast('消しました');
+  render();
+}
+async function offlineStats(){
+  const el=$('#omapStats'); if(el) el.textContent='確認中…';
+  try{ const r=await swAsk({type:'packStats'});
+    if(el) el.textContent=`実際の保存量：${(r.count||0).toLocaleString()}枚 ／ ${((r.bytes||0)/1024/1024).toFixed(0)}MB`;
+  }catch(e){ if(el) el.textContent='確認できませんでした'; }
+}
 
 function drawMap(sv){
   destroyMap();

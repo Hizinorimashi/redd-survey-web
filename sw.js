@@ -1,4 +1,4 @@
-const CACHE = 'redd-survey-v9';
+const CACHE = 'redd-survey-v10';
 // 必須資産（これが揃わないとアプリが成立しない）。install時に全部揃わなければ失敗させ、不完全キャッシュで有効化しない
 const CORE = [
   './redd_survey.html',
@@ -9,9 +9,11 @@ const CORE = [
   './icon-512.svg'
 ];
 
-// 地図タイル用の別キャッシュ（容量制限付き）。
-// タイルとIndexedDB(写真)は同じオリジンの保存容量を共有するため、上限を控えめにして
-// タイルが写真の保存を圧迫しないようにする。
+// 地図タイルのキャッシュは2種類。
+// - PACK: ユーザーが「範囲を囲って保存」した分。上限なし・自動では消さない（明示削除のみ）
+// - TILE: スクロールで自然に溜まった分。上限つきで、あふれたら古いものから消す
+// 別々にすることで、事前に保存した範囲がスクロールで押し出されて消えるのを防ぐ。
+const PACK_CACHE = 'redd-map-pack-v1';
 const TILE_CACHE = 'redd-map-tiles-v1';
 const MAX_TILES = 3000;
 
@@ -43,11 +45,13 @@ self.addEventListener('install', e => {
 
 // 旧キャッシュ削除は「このアプリのキャッシュ」だけに限定する。
 // 同一オリジンに別アプリ(鳥類調査アプリ等)がある場合、そのキャッシュまで消さないため。
-function isOwnCache(k){ return k === CACHE || k === TILE_CACHE || k.startsWith('redd-survey-') || k.startsWith('redd-map-tiles-'); }
+function isOwnCache(k){ return k === CACHE || k === TILE_CACHE || k === PACK_CACHE
+  || k.startsWith('redd-survey-') || k.startsWith('redd-map-'); }
+function isKeepCache(k){ return k === CACHE || k === TILE_CACHE || k === PACK_CACHE; }
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => isOwnCache(k) && k !== CACHE && k !== TILE_CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => isOwnCache(k) && !isKeepCache(k)).map(k => caches.delete(k)))
     )
   );
   self.clients.claim();
@@ -64,6 +68,10 @@ function isHtmlShell(url){
   return url.endsWith('/redd_survey.html') || url.endsWith('/') || url.endsWith('/manifest.json');
 }
 async function handleTile(request){
+  // 先に「保存した範囲(パック)」を見て、無ければ「自然に溜まった分」を見る
+  const pack = await caches.open(PACK_CACHE);
+  const inPack = await pack.match(request);
+  if (inPack) return inPack;
   const cache = await caches.open(TILE_CACHE);
   const cached = await cache.match(request);
   if (cached) return cached;
@@ -80,6 +88,47 @@ async function handleTile(request){
     return new Response('', { status: 408 });
   }
 }
+
+// ページからの依頼を受ける（範囲の保存・保存済みの計測・パックの削除）。
+// ダウンロードのループはページ側で回し、ここは PACK_CACHE への出し入れだけを担う。
+self.addEventListener('message', e => {
+  const m = e.data || {};
+  const reply = r => { try{ e.ports[0] && e.ports[0].postMessage(r); }catch(err){} };
+  if (m.type === 'savePackTiles'){
+    (async () => {
+      const pack = await caches.open(PACK_CACHE);
+      let ok=0, fail=0;
+      for (const url of (m.urls||[])){
+        try{
+          if (await pack.match(url)){ ok++; continue; }   // すでに保存済み
+          const res = await fetch(url, { mode:'cors' });
+          if (res.ok){ await pack.put(url, res.clone()); ok++; } else fail++;
+        }catch(err){ fail++; }
+      }
+      reply({ ok, fail });
+    })();
+  } else if (m.type === 'packStats'){
+    (async () => {
+      const pack = await caches.open(PACK_CACHE);
+      const keys = await pack.keys();
+      let bytes=0;
+      for (const req of keys){
+        const r = await pack.match(req);
+        try{ bytes += (await r.clone().blob()).size; }catch(err){}
+      }
+      reply({ count: keys.length, bytes });
+    })();
+  } else if (m.type === 'deletePack'){
+    (async () => {
+      const pack = await caches.open(PACK_CACHE);
+      let n=0;
+      for (const url of (m.urls||[])){ if (await pack.delete(url)) n++; }
+      reply({ deleted:n });
+    })();
+  } else if (m.type === 'clearPacks'){
+    caches.delete(PACK_CACHE).then(()=>reply({ ok:true }));
+  }
+});
 
 // ネット優先＋タイムアウト。時間内に取れなければキャッシュへフォールバック。
 async function networkFirst(request){
