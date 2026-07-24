@@ -136,7 +136,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v11';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v12';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -804,6 +804,36 @@ function resumeTracking(){
 /* ============================================================
    調査の画面（調査中の拠点）
    ============================================================ */
+// 調査中の画面で常に見せる、今の集計。
+// num() は集計セクションで定義しているが巻き上げで先に使える
+function liveTally(sv){
+  const all = DB.reddsOf(sv);
+  const redds = all.filter(r=>hasTarget(r,'産卵床'));
+  const withFish = all.filter(r=>hasTarget(r,'親魚'));
+  const female = withFish.reduce((a,r)=>a+(num(r.female_n)||0),0);
+  const male   = withFish.reduce((a,r)=>a+(num(r.male_n)||0),0);
+  const carcass= all.filter(r=>hasTarget(r,'ホッチャレ')).reduce((a,r)=>a+(num(r.carcass_n)||0),0);
+  // 魚種別の産卵床数（多い順・上位のみ文字で）
+  const bySp = countBy(redds,'species','種不明');
+  return { redd:redds.length, female, male, carcass, review:all.filter(r=>r.needs_review).length, bySp };
+}
+function liveTallyHtml(sv){
+  const t = liveTally(sv);
+  const cell = (label, val) => `<div style="text-align:center; flex:1; min-width:70px">
+    <div style="font-size:22px; font-weight:700">${val}</div>
+    <div class="tiny muted">${label}</div></div>`;
+  const sp = t.bySp.length ? `<div class="tiny muted" style="margin-top:8px; text-align:center">
+    ${esc(t.bySp.map(([k,n])=>`${k} ${n}`).join(' ／ '))}</div>` : '';
+  return `<div class="card" style="background:var(--panel2)">
+    <div class="row" style="flex-wrap:wrap; gap:6px">
+      ${cell('産卵床', t.redd)}
+      ${cell('雌', t.female)}
+      ${cell('雄', t.male)}
+      ${cell('ホッチャレ', t.carcass)}
+      ${ t.review ? cell('要確認', t.review) : '' }
+    </div>${sp}</div>`;
+}
+
 SCREENS.survey = (u)=>{
   const s = DB.survey(u); if(!s) return SCREENS.home();
   const redds = DB.reddsOf(u), reaches = DB.reachesOf(u), notes = DB.notesOf(u), units = DB.unitsOf(u);
@@ -841,6 +871,7 @@ SCREENS.survey = (u)=>{
       ${ !started && !finished ? `<button class="btn primary big" onclick="startSurvey('${u}')">調査を開始する</button><div class="sp"></div>` : '' }
 
       ${ started ? `
+        ${liveTallyHtml(u)}
         <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>
         <div class="sp"></div>
         ${ cur
@@ -855,6 +886,8 @@ SCREENS.survey = (u)=>{
         <div class="sp"></div>
         <button class="btn" onclick="nav('noteEdit','${esc(JSON.stringify({sv:u}))}')">メモを追加</button>
       ` : '' }
+
+      ${ finished ? liveTallyHtml(u) : '' }
 
       <div class="sect">記録を見る</div>
       <div class="btn-grid">
