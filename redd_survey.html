@@ -58,6 +58,7 @@
     background:var(--panel2); color:var(--fg); border:1px solid var(--line);
     border-radius:12px; padding:12px 16px; cursor:pointer; width:100%; text-align:center;}
   .btn:active{background:var(--panel);}
+  .btn[disabled]{opacity:.45; cursor:default; pointer-events:none;}
   .btn.primary{background:var(--accent2); border-color:var(--accent); color:#fff; font-weight:700;}
   .btn.ghost{background:none;}
   .btn.danger{color:var(--danger); border-color:#5a2e2e;}
@@ -136,7 +137,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v12';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v13';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -749,9 +750,10 @@ function trackAppend(){
 }
 function trackSave(){
   if(!TRACK) return;
-  // 記録中の区間が消えている・別調査のものになっている場合は書き込まない
+  // 記録中の区間が消えている・終了済みになっている場合は書き込まない
+  // （バックアップ取り込み等で、手元のTRACKより先に区間が終了することがある）
   const r = DB.get(DB.key.re, TRACK.reach_uuid);
-  if(!r || r.deleted_at){ TRACK=null; return; }
+  if(!r || r.deleted_at || r.ended_at){ TRACK=null; return; }
   TRACK.lastSave=Date.now();
   DB.upsert(DB.key.re, { uuid:TRACK.reach_uuid, track:TRACK.pts.slice(),
     length_m_auto: Math.round(pathLength(TRACK.pts)) });
@@ -794,11 +796,24 @@ function endReach(sv){
 }
 // 画面を閉じて開き直しても、記録中の区間があれば軌跡の記録を続ける
 function resumeTracking(){
-  const sv = DB.surveys().find(s=>s.status==='調査中');
-  if(!sv) return;
+  const svs = DB.surveys().filter(s=>s.status==='調査中');
+  if(!svs.length) return;
   startGps();
-  const r = activeReach(sv.uuid);
-  if(r && !TRACK) TRACK = { reach_uuid:r.uuid, pts:(r.track||[]).slice(), lastSave:Date.now() };
+  if(TRACK) return;
+  // 未終了の区間を「調査ごと」ではなく全部数える（復元データ等では同じ調査に複数残ることもある）。
+  // 複数あるときは勝手に選ばない — 間違った区間に軌跡が混ざるのが最悪なので、ユーザーの操作を待つ
+  const open = svs.flatMap(s=>DB.reachesOf(s.uuid).filter(r=>!r.ended_at));
+  if(open.length > 1){ toast('記録中の区間が複数見つかりました。調査を開いて確認してください'); return; }
+  if(open.length===1) TRACK = { reach_uuid:open[0].uuid, pts:(open[0].track||[]).slice(), lastSave:Date.now() };
+}
+// バックアップ取り込みや復元の後に呼ぶ。追記中の区間が終了・削除されていたら追記をやめ、
+// 続けられる区間が1つに定まるなら付け直す
+function resyncTrack(){
+  if(TRACK){
+    const r = DB.get(DB.key.re, TRACK.reach_uuid);
+    if(!r || r.deleted_at || r.ended_at) TRACK = null;
+  }
+  resumeTracking();
 }
 
 /* ============================================================
@@ -872,7 +887,10 @@ SCREENS.survey = (u)=>{
 
       ${ started ? `
         ${liveTallyHtml(u)}
-        <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>
+        ${ (cur || findNewDraft('redd', u))
+          ? `<button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>`
+          : `<button class="btn primary big" disabled>＋ 記録する（産卵床・親魚・ホッチャレ）</button>
+             <div class="tiny muted" style="margin-top:6px; text-align:center">記録するには、まず下の「区間をスタート」を押してください。</div>` }
         <div class="sp"></div>
         ${ cur
           ? `<div class="card">
@@ -914,14 +932,29 @@ SCREENS.survey = (u)=>{
   };
 };
 
+// 自分以外の「調査中」をすべて終了する。
+// 調査中が2つあると軌跡がどちらの区間に入るか分からなくなるため、常に1つに保つ。
+// 過去の不整合データで複数残っていても、ここでまとめて閉じる。
+// 全部閉じ切れた場合だけ true（保存に失敗したら false を返し、呼び出し側は切り替えを中止する）
+function endOtherSurveys(u){
+  let ok = true;
+  DB.surveys().filter(x=>x.uuid!==u && x.status==='調査中').forEach(o=>{
+    // 復元データ等で未終了の区間が複数残っていても、全部閉じる
+    DB.reachesOf(o.uuid).filter(r=>!r.ended_at).forEach(()=>{ if(activeReach(o.uuid)) endReach(o.uuid); });
+    if(activeReach(o.uuid)) ok = false;
+    if(!DB.upsert(DB.key.sv, {uuid:o.uuid, status:'終了', end_datetime:nowISO()})) ok = false;
+  });
+  return ok;
+}
+function otherRunningNames(u){
+  return DB.surveys().filter(x=>x.uuid!==u && x.status==='調査中').map(o=>o.name);
+}
 function startSurvey(u){
   const s = DB.survey(u); if(!s) return;
-  // 調査中が2つあると、軌跡がどちらの区間に入るか分からなくなる
-  const other = DB.surveys().find(x=>x.uuid!==u && x.status==='調査中');
-  if(other && !confirm(`「${other.name}」がまだ調査中です。
+  const others = otherRunningNames(u);
+  if(others.length && !confirm(`「${others.join('」「')}」がまだ調査中です。
 そちらを終了して、この調査を始めますか？`)) return;
-  if(other){ const cur=activeReach(other.uuid); if(cur) endReach(other.uuid);
-    DB.upsert(DB.key.sv, {uuid:other.uuid, status:'終了', end_datetime:nowISO()}); }
+  if(!endOtherSurveys(u)){ toast('前の調査を終了できませんでした。端末の空き容量を確認してください'); return; }
   DB.upsert(DB.key.sv, { uuid:u, status:'調査中', start_datetime: s.start_datetime || nowISO() });
   startGps();
   toast('調査を開始しました');
@@ -939,6 +972,10 @@ function finishSurvey(u){
   render();
 }
 function reopenSurvey(u){
+  const others = otherRunningNames(u);
+  if(others.length && !confirm(`「${others.join('」「')}」がまだ調査中です。
+そちらを終了して、この調査を再開しますか？`)) return;
+  if(!endOtherSurveys(u)){ toast('前の調査を終了できませんでした。端末の空き容量を確認してください'); return; }
   DB.upsert(DB.key.sv, { uuid:u, status:'調査中', end_datetime:'' });
   startGps();
   toast('調査を再開しました');
@@ -1280,15 +1317,29 @@ SCREENS.reddEdit = (argStr)=>{
   const cur = activeReach(sv);
   const reaches = DB.reachesOf(sv);
 
+  // 新しい記録は、区間をスタートしてから。
+  // 例外は「書きかけの続き」だけ（区間が終わった後でも、入力途中の記録は失わせない）
+  if(!a.u && !cur && !findNewDraft('redd', sv)){
+    toast('記録するには、先に「区間をスタート」を押してください');
+    // 表示する調査画面と履歴を一致させる（ずれたままだと、次の再描画や「戻る」がおかしくなる）。
+    // 直前が同じ調査画面なら重ねず戻る（「戻る」を2回押さないと抜けられなくなるため）
+    const prev = STACK[STACK.length-2];
+    if(prev && prev.name==='survey' && prev.arg===sv) STACK.pop();
+    else STACK[STACK.length-1] = { name:'survey', arg:sv };
+    return SCREENS.survey(sv);
+  }
+
+  // 地図をタップして来たか（タップした場所は最後まで優先する）
+  const fromMap = validPt([a.lat, a.lon]);
+
   let r;
   if(editing){
     r = DB.get(DB.key.rd, a.u);
     if(!r || r.deleted_at) return SCREENS.home();
   }else{
-    let reach_uuid = carry.reach_uuid || (cur?cur.uuid:'');
+    // いま記録中の区間を最優先。前の記録からの引き継ぎは、区間が無いときの控えにする
+    let reach_uuid = (cur?cur.uuid:'') || carry.reach_uuid || '';
     if(reach_uuid && !reaches.some(x=>x.uuid===reach_uuid)) reach_uuid = cur?cur.uuid:'';
-    // 地図から追加した場合は、その場所を最初から入れておく
-    const fromMap = validPt([a.lat, a.lon]);
     r = { uuid:uuid(), survey_uuid:sv, reach_uuid,
       redd_no: nextReddNo(sv, reach_uuid), observed_at: nowISO(),
       latitude: fromMap ? (+a.lat).toFixed(6) : '', longitude: fromMap ? (+a.lon).toFixed(6) : '',
@@ -1303,10 +1354,6 @@ SCREENS.reddEdit = (argStr)=>{
       note:'', needs_review:false };
   }
 
-  const reachOpts = [`<option value="">区間なし</option>`].concat(
-    reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
-  ).join('');
-
   // 書きかけがあれば重ねる（誤って戻った・アプリが閉じた場合の復帰）
   if(!editing){
     const pending = findNewDraft('redd', sv);
@@ -1318,6 +1365,17 @@ SCREENS.reddEdit = (argStr)=>{
     if(Array.isArray(draft.env_points)) r.env_points = draft.env_points;
     if(Array.isArray(draft.photos)) r.photos = draft.photos;
   }
+  // 地図をタップして来たときは、タップした場所を最優先（書きかけの座標で上書きしない）
+  if(fromMap){
+    r.latitude = (+a.lat).toFixed(6); r.longitude = (+a.lon).toFixed(6);
+    r.position_source = '地図'; r.gps_accuracy = '';
+  }
+
+  // 区間の選択肢は、書きかけを重ねた「後」の値で作る（書きかけの区間を正しく選んでおくため）
+  const reachOpts = [`<option value="">区間なし</option>`].concat(
+    reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
+  ).join('');
+
   const targets = draft ? recordTargets(r) : (editing ? recordTargets(r) : ['産卵床']);
 
   return {
@@ -1576,7 +1634,8 @@ function fillGps(){
   SCREENS._acc = Math.round(lastFix.acc);
   SCREENS._posSrc = 'GPS';
   if(out) out.textContent = 'GPSの位置（誤差 約'+SCREENS._acc+'m）';
-  if(PICKMAP) movePickMarker([lastFix.lat, lastFix.lon], true);
+  // GPS由来だと明示する（既定の「地図」扱いにすると、位置の由来と誤差が消えてしまう）
+  if(PICKMAP) movePickMarker([lastFix.lat, lastFix.lon], true, 'GPS');
 }
 
 /* ---------- 入力画面に常に出しておく「位置を決める地図」 ---------- */
@@ -2532,7 +2591,7 @@ SCREENS.map = (sv)=>{
       <div id="map"></div>
       <div class="sp"></div>
       <div class="btn-grid">
-        <button class="btn" id="mapAddBtn" onclick="toggleMapAdd()">＋ 地図をタップして記録を追加</button>
+        <button class="btn" id="mapAddBtn" onclick="toggleMapAdd('${sv}')">＋ 地図をタップして記録を追加</button>
         <button class="btn" onclick="nav('offlineMap','${sv}')">オフライン地図を保存</button>
       </div>
       <div class="sp"></div>
@@ -2814,7 +2873,12 @@ function drawMap(sv){
 }
 
 let MAP_ADD_MODE=false;
-function toggleMapAdd(){
+function toggleMapAdd(sv){
+  // 地図からの追加も、区間をスタートしてから。
+  // 書きかけの続きは調査画面の「＋ 記録する」から開く（ここで例外にすると、タップ位置と書きかけが混ざるため）
+  if(!MAP_ADD_MODE && sv && !activeReach(sv)){
+    toast('記録するには、先に「区間をスタート」を押してください'); return;
+  }
   MAP_ADD_MODE = !MAP_ADD_MODE;
   const b=$('#mapAddBtn');
   if(b){
@@ -3253,6 +3317,7 @@ function applyBackup(b){
     if(!DB.save(key, [...map.values()])) ok=false;
   });
   if(Array.isArray(b.species) && b.species.length) speciesSave(b.species);
+  resyncTrack();   // 取り込みで区間の状態が変わっていたら、軌跡の追記先を付け直す
   return {added, updated, ok};
 }
 function importBackup(input){
@@ -3410,7 +3475,14 @@ function restoreItem(k, u){
     ['re','rd','nt','un'].forEach(ck=>{
       DB.deleted(DB.key[ck]).filter(x=>x.deleted_by===u).forEach(x=>{ if(DB.restore(DB.key[ck], x.uuid)) n++; });
     });
-    toast(n ? `調査と記録 ${n} 件を戻しました` : '戻しました');
+    // 「調査中」のまま戻すと調査中が2つになることがある。その場合は「終了」として戻す
+    // （データは全部残る。調査画面の「調査を再開」でいつでも調査中に戻せる）
+    const s = DB.survey(u);
+    if(s && s.status==='調査中' && DB.surveys().some(x=>x.uuid!==u && x.status==='調査中')){
+      DB.upsert(DB.key.sv, { uuid:u, status:'終了', end_datetime: s.end_datetime || nowISO() });
+      toast('別の調査が調査中のため、「終了」の状態で戻しました（再開ボタンで戻せます）');
+    }else toast(n ? `調査と記録 ${n} 件を戻しました` : '戻しました');
+    resyncTrack();   // 戻した区間に軌跡の続きを付けられるなら付け直す
   }else toast('戻しました');
   render();
 }
