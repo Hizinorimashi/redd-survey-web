@@ -137,7 +137,7 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v13';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v14';   // sw.js の CACHE 名と揃える
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -543,6 +543,28 @@ function draftHasContent(kind, x){
     arr(x.env_points) || (x.substrate_pct && Object.keys(x.substrate_pct).length));
   return !!(x.content || arr(x.photos));
 }
+// 「区間なしでも記録の入口を開ける」価値のある書きかけか。
+// 記録画面は開くだけでGPSの位置や前の記録の魚種などが自動で入るため、
+// draftHasContent では「開いてすぐ戻っただけ」の書きかけも拾ってしまう。
+// ここでは、ユーザーが自分で入力した内容（計測値・メモ・写真・意図して置いた位置）だけを数える
+function draftUserContent(x){
+  const filled = v => v!=='' && v!=null;
+  const arr = v => Array.isArray(v) && v.length>0;
+  return !!(x.note || filled(x.length_cm) || filled(x.width_cm) ||
+    arr(x.env_points) || arr(x.photos) ||
+    filled(x.female_n) || filled(x.male_n) || filled(x.carcass_n) ||
+    filled(x.water_temp_c) || filled(x.intragravel_temp_c) ||
+    ((x.position_source==='地図' || x.position_source==='手入力') && filled(x.latitude)));
+}
+// 区間なしでも開ける書きかけを返す。自動入力だけの書きかけはここで片付ける
+// （残しておくと、次の記録に古い位置や区間が混ざるため）
+function reddDraftRescue(sv){
+  const pending = findNewDraft('redd', sv);
+  if(!pending) return null;
+  if(draftUserContent(pending.draft)) return pending;
+  editDraftClear(pending.uuid);
+  return null;
+}
 function editDraftClear(uuid){
   const d = editDrafts();
   if(uuid in d){ delete d[uuid]; try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){} }
@@ -887,7 +909,7 @@ SCREENS.survey = (u)=>{
 
       ${ started ? `
         ${liveTallyHtml(u)}
-        ${ (cur || findNewDraft('redd', u))
+        ${ (reddDraftRescue(u) || cur)
           ? `<button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>`
           : `<button class="btn primary big" disabled>＋ 記録する（産卵床・親魚・ホッチャレ）</button>
              <div class="tiny muted" style="margin-top:6px; text-align:center">記録するには、まず下の「区間をスタート」を押してください。</div>` }
@@ -1318,8 +1340,8 @@ SCREENS.reddEdit = (argStr)=>{
   const reaches = DB.reachesOf(sv);
 
   // 新しい記録は、区間をスタートしてから。
-  // 例外は「書きかけの続き」だけ（区間が終わった後でも、入力途中の記録は失わせない）
-  if(!a.u && !cur && !findNewDraft('redd', sv)){
+  // 例外は「実際に入力した内容のある書きかけの続き」だけ（区間が終わった後でも、入力途中の記録は失わせない）
+  if(!a.u && !cur && !reddDraftRescue(sv)){
     toast('記録するには、先に「区間をスタート」を押してください');
     // 表示する調査画面と履歴を一致させる（ずれたままだと、次の再描画や「戻る」がおかしくなる）。
     // 直前が同じ調査画面なら重ねず戻る（「戻る」を2回押さないと抜けられなくなるため）
