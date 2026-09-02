@@ -8,7 +8,8 @@
 <meta name="theme-color" content="#0a0e14">
 <title>産卵床調査記録</title>
 <link rel="manifest" href="./manifest.json">
-<link rel="apple-touch-icon" href="./icon-192.svg">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="icon" href="./icon-192.png" type="image/png">
 <link rel="stylesheet" href="./leaflet.css">
 <style>
   :root{
@@ -24,6 +25,11 @@
   body{padding-bottom:env(safe-area-inset-bottom);}
   h1,h2,h3{margin:0 0 .4em;}
   a{color:var(--accent);}
+  /* 地図の上に置く記号ボタン（魚類調査アプリと同じ） */
+  .mapicons a{display:flex!important;align-items:center;justify-content:center;
+    width:36px;height:36px;color:#1b2531}
+  .mapicons a.on{background:var(--accent);color:#04121f}
+  .mapicons a.on svg{stroke:#04121f}
   button{font-family:inherit; font-size:16px;}
   .app{max-width:900px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column;}
 
@@ -131,13 +137,28 @@
 <div id="toast"></div>
 
 <script src="./leaflet.js"></script>
+<!-- 地図を指2本でひねって回すための部品（魚類調査アプリと同じもの） -->
+<script src="./vendor/leaflet-rotate.js"></script>
+<!-- ============================================================
+     この中の script は3つに分かれている（読みやすさのため。動きは1つのときと同じ）
+       1. 土台     … 小道具・保存層・写真・選択肢・画面遷移・GPS
+       2. 記録する … ホーム／調査／区間／産卵床／メモ／物理環境／集計
+       3. 見せる   … 地図・書き出し・ゴミ箱・起動
+     外部ファイルには分けない。同梱ファイルが増えるとオフラインで起動しない
+     事故が増え、動作確認の仕組み（tests/harness.js）も作り直しになるため。
+     ============================================================ -->
 <script>
 /* ============================================================
    産卵床調査記録アプリ
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v14';   // sw.js の CACHE 名と揃える
+const APP_VERSION = 'v19';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+// いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
+// 版を上げるときは、この2つも一緒に直す
+const APP_DATE = '2026-09-01';
+const APP_NOTE = '物理環境の記録を、魚類調査アプリと同じ操作に作り直しました'
+  + '（地図の上のボタン・回転・現在地・まとめて消す）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -163,13 +184,60 @@ function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('sh
 function numVal(sel){ const el=$(sel); if(!el) return ''; const v=String(el.value).trim();
   if(v==='') return ''; const n=parseFloat(v); return isNaN(n)?'':n; }
 
+/* 数の取り出し（値から）。空欄は '' のまま返す。0 を未入力と取り違えないため。
+   水深0（干出）・流速0（淀み）・ホッチャレ0尾 は「測った0」で、未入力ではない。
+   parseFloat は '12abc' を 12 として通してしまうので、全体が数のときだけ受ける */
+function numOf(v){
+  if(v===null || v===undefined) return '';
+  const s=String(v).trim(); if(s==='') return '';
+  if(!/^[+-]?(\d+(\.\d*)?|\.\d+)$/.test(s)) return '';
+  const n=parseFloat(s);
+  return isFinite(n) ? n : '';
+}
+/* 個数の受け取り。空欄は ''、0以上の整数だけ数として返す。
+   それ以外（負の数・小数・'12abc'）は null を返して「おかしい」と伝える */
+function countOf(v){
+  if(v===null || v===undefined) return '';
+  const s=String(v).trim(); if(s==='') return '';
+  if(!/^\d+$/.test(s)) return null;
+  const n=parseInt(s,10);
+  return Number.isSafeInteger(n) ? n : null;
+}
+/* 空欄を落とさずに数だけ集める。filter(v=>v) と書くと 0 が消える */
+function nums(arr){ return (arr||[]).map(numOf).filter(v=>v!==''); }
+/* 数の範囲を見る。おかしいものがあれば、その説明を返す。無ければ空文字。
+   負の距離や100を超える割合が入ると、面積や河床材料の割合が静かに壊れる */
+function rangeCheck(list){
+  for(const it of list){
+    const label=it[0], v=it[1], lo=it[2], hi=it[3];
+    if(v==='' || v===null || v===undefined) continue;
+    const n=numOf(v);
+    if(n==='' || !isFinite(n)) return `${label}は数で入れてください`;
+    if(n<lo || n>hi) return `${label}は ${lo}〜${hi} の間で入れてください（いま ${n}）`;
+  }
+  return '';
+}
+/* 画面ごとの覚えごと（色分けの基準・折りたたみの開閉など） */
+function prefs(){ try{ return JSON.parse(localStorage.getItem('rd_prefs')||'{}')||{}; }catch(e){ return {}; } }
+function prefSet(k,v){ const p=prefs(); p[k]=v; try{ localStorage.setItem('rd_prefs', JSON.stringify(p)); }catch(e){} }
+function foldOpen(key, defOpen){ const v=(prefs().folds||{})[key]; return v===undefined ? !!defOpen : !!v; }
+function foldSet(key, open){ const f=Object.assign({}, prefs().folds||{}); f[key]=!!open; prefSet('folds', f); }
+function foldHtml(key, title, head, inner, defOpen){
+  return `<details class="fold card" data-fold="${esc(key)}" ${foldOpen(key,defOpen)?'open':''}
+      ontoggle="foldSet('${esc(key)}', this.open)">
+    <summary><span class="ftitle">${esc(title)}</span>${head||''}</summary>
+    <div class="fbody">${inner}</div>
+  </details>`;
+}
+
 /* ============================================================
    保存層（localStorage）
    キーの頭は rd_ 。同じ場所に別アプリ（鳥類調査等）があってもデータが混ざらないようにする。
    削除は deleted_at を立てる論理削除のみ。完全消去はゴミ箱から明示的に行う。
    ============================================================ */
 const DB = {
-  key:{ sv:'rd_surveys', re:'rd_reaches', rd:'rd_redds', nt:'rd_notes', un:'rd_units' },
+  key:{ sv:'rd_surveys', re:'rd_reaches', rd:'rd_redds', nt:'rd_notes', un:'rd_units',
+        mc:'rd_meshcells' },
   load(k){ try{ const a=JSON.parse(localStorage.getItem(k)||'[]'); return Array.isArray(a)?a:[]; }
            catch(e){ return []; } },
   // バックアップ・整合性確認用。壊れていたら例外にして「空」と誤認させない
@@ -183,6 +251,16 @@ const DB = {
     const a=this.load(k); const i=a.findIndex(x=>x.uuid===obj.uuid);
     obj.updated_at=nowISO();
     if(i>=0){ a[i]=Object.assign({},a[i],obj); } else { obj.created_at=obj.created_at||nowISO(); a.push(obj); }
+    return this.save(k,a) ? obj : null;
+  },
+  // 丸ごと置き換える保存。upsert は「併合」なので、項目を消したいとき
+  // （カバーを3枠から1枠に減らす・つなぎ先を外す）に古い値が残ってしまう。
+  // 物理環境の処理はこちらを使う
+  put(k,obj){
+    const a=this.load(k); const i=a.findIndex(x=>x.uuid===obj.uuid);
+    obj.updated_at=nowISO();
+    if(i>=0){ obj.created_at=obj.created_at||a[i].created_at||nowISO(); a[i]=obj; }
+    else { obj.created_at=obj.created_at||nowISO(); a.push(obj); }
     return this.save(k,a) ? obj : null;
   },
   get(k,u){ return this.load(k).find(x=>x.uuid===u) || null; },
@@ -213,6 +291,16 @@ const DB = {
     .sort((a,b)=>String(b.recorded_at||'').localeCompare(String(a.recorded_at||''))); },
   unitsOf(sv){ return this.alive(this.key.un).filter(x=>x.survey_uuid===sv)
     .sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||''))); },
+  // 物理環境の記録が生きているか（親の調査ごと消えていないか）
+  liveUnit(u){ const x=this.get(this.key.un,u); if(!x||x.deleted_at) return null;
+    return this.survey(x.survey_uuid) ? x : null; },
+  // メッシュのマス。親が消えていれば空を返すので、削除を親子に広げなくてよい
+  meshCellsOf(u){ if(!this.liveUnit(u)) return [];
+    return this.alive(this.key.mc).filter(x=>x.unit_uuid===u)
+      .sort((a,b)=> (a.row-b.row) || (a.col-b.col)); },
+  meshCellsOfSurvey(sv){ const live=new Set(this.unitsOf(sv).map(x=>x.uuid));
+    return this.alive(this.key.mc).filter(x=>live.has(x.unit_uuid))
+      .sort((a,b)=> (a.row-b.row) || (a.col-b.col)); },
 };
 
 /* ============================================================
@@ -289,6 +377,7 @@ async function pickPhotos(input){
   input.value='';
   if(!files.length) return;
   const gen = screenGen();          // 取り込み中に別の記録へ移ったら、そちらには足さない
+  const owner = (typeof ENV_FORM!=='undefined') ? ENV_FORM : '';
   toast('写真を取り込んでいます…');
   let ok=0, ng=0;
   for(const f of files){
@@ -304,6 +393,8 @@ async function pickPhotos(input){
   }
   if(screenStale(gen)) return;
   renderPhotoPanel();
+  // 物理環境では、縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける
+  envPhotoTouch(owner);
   if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（端末の空き容量を確認してください）`);
   else toast(ok+'枚を追加しました');
 }
@@ -321,10 +412,30 @@ function delPhoto(id){
   if(!confirm('この写真を外しますか？（保存すると反映されます）')) return;
   SCREENS._photos = (SCREENS._photos||[]).filter(p=>p.id!==id);
   renderPhotoPanel();
+  envPhotoTouch();   // 物理環境では、外したことも その場で記録に反映する
 }
 function revokePhotoUrls(){
   (SCREENS._photoUrls||[]).forEach(u=>{ try{ URL.revokeObjectURL(u); }catch(e){} });
   SCREENS._photoUrls=[];
+}
+// 写真を記録に付けられなかった相手。付くまで画面を先へ進めない
+// （進めてしまうと、足した写真の在りかも、外したことも失われる）
+let ENV_PHOTO_PENDING = '';
+// 物理環境の入力欄では、写真を足した／外したその場で保存する。
+// 産卵床やメモの画面（ENV_FORM が空）では何もしない
+function envPhotoTouch(owner){
+  const target = owner || (typeof ENV_FORM!=='undefined' ? ENV_FORM : '');
+  if(!target) return true;
+  let ok = false;
+  try{ ok = envSavePhotosNow(target); }catch(e){ ok = false; }
+  if(ok){
+    if(ENV_PHOTO_PENDING === target) ENV_PHOTO_PENDING = '';
+    return true;
+  }
+  ENV_PHOTO_PENDING = target;
+  toast('写真を記録に付けられませんでした。端末の空き容量をご確認ください'
+    + '（いま足した写真を外して元の状態に戻せば、先へ進めます）');
+  return false;
 }
 async function renderPhotoPanel(){
   const box=$('#photoGrid'); if(!box) return;
@@ -378,9 +489,26 @@ const OPT = {
   cover:      ['無','植生','倒木','淵','岸際'],
   behavior:   ['ペア形成','掘削','産卵','ホバリング','闘争','静止','その他'],
   noteCat:    ['調査条件','河川状況','特記事項','次回課題','その他'],
+  // ---- 物理環境（魚類調査アプリと同じ作り） ----
+  // 環境区分（瀬淵）。物理環境では複数選べる（瀬と淵の境のような場所がある）
+  habitat:    ['早瀬','平瀬','淵','瀬頭','トロ','たまり','その他'],
+  gravel:     ['浮き石','はまり石','沈み石'],       // 礫の状況
+  // 岸のカバー（QFieldテンプレートの Cover_list）。
+  // 産卵床の cover（記録1件の覆い）とは別物なので、名前を分けている
+  bankCover:  ['岸際植生（樹木）','岸際植生（草本）','水中植生（沈水）','倒木','岩',
+               'アンダーカット','落差工・堰','なし'],
+  envMethod:  ['点','ライン','メッシュ'],           // 物理環境の取り方
+  lineDir:    ['上流→下流','下流→上流'],           // ラインを歩いた向き
 };
-// 粒径区分の目安（画面に小さく出す）
-const GRAIN_HINT = '泥 0.06mm未満／砂 0.06〜2mm／細礫 2〜16mm／中礫 16〜64mm／大礫 64〜256mm／巨礫 256mm以上／岩盤';
+/* 粒径区分の番号と目安。番号は書き出しの pct_ 列の並びに対応する */
+const SUBSTRATE_NO = {'泥':1,'砂':2,'細礫':3,'中礫':4,'大礫':5,'巨礫':6,'岩盤':7};
+const SUBSTRATE_NOTE = {'泥':'0.06mm未満','砂':'0.06〜2mm','細礫':'2〜16mm','中礫':'16〜64mm',
+                        '大礫':'64〜256mm','巨礫':'256mm以上','岩盤':''};
+// 粒径区分の目安（画面に小さく出す）。同じ文字を2か所に書かないため、上の表から作る
+const GRAIN_HINT = OPT.substrate.map(g=> SUBSTRATE_NOTE[g] ? `${g} ${SUBSTRATE_NOTE[g]}` : g).join('／');
+/* 環境区分の略字。横一列に並べるため（早瀬→早） */
+const HABITAT_SHORT = {'早瀬':'早','平瀬':'平','淵':'淵','瀬頭':'頭','トロ':'ト',
+                       'たまり':'た','その他':'他'};
 
 /* ============================================================
    画面遷移
@@ -396,15 +524,17 @@ function screenGen(){ return SCREEN_SEQ; }
 function screenStale(gen){ return gen !== SCREEN_SEQ; }
 const SCREENS = {};
 
-function nav(name, arg){ stashEditDraft(); STACK.push({name,arg}); render(); }
-function goBack(){ if(STACK.length>1){ stashEditDraft(); STACK.pop(); render(); } }
-function reset(name,arg){ STACK=[{name:name||'home',arg:arg||null}]; render(); }
+// 600ミリ秒待ちの分を持ったまま画面を離れると、打った値が消える。
+// どの入口からでも、先に書いてしまう
+function nav(name, arg){ if(!envFlushOk()) return; stashEditDraft(); STACK.push({name,arg}); render(); }
+function goBack(){ if(STACK.length>1){ if(!envFlushOk()) return; stashEditDraft(); STACK.pop(); render(); } }
+function reset(name,arg){ if(!envFlushOk()) return; STACK=[{name:name||'home',arg:arg||null}]; render(); }
 
 function render(){
   SCREEN_SEQ++;
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
   closePickMap();
-  closeUnitMap();
+  closeEnvMap();
   closeOfflineMap();
   revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
   const cur = STACK[STACK.length-1];
@@ -454,6 +584,12 @@ function segMultiVal(field){
   return $$(`[data-segmulti="${field}"] button.on`).map(b=>b.textContent);
 }
 
+</script>
+
+<!-- ============================================================
+     2. 記録する（ホーム・調査・区間・産卵床・メモ・物理環境・集計）
+     ============================================================ -->
+<script>
 /* ============================================================
    ホーム
    ============================================================ */
@@ -489,8 +625,24 @@ SCREENS.home = ()=>{
         <button class="btn" onclick="nav('exportHub','')">書き出し・取り込み</button>
         <button class="btn" onclick="nav('trash')">ゴミ箱（${trashCount}）</button>
       </div>
-      <div class="sp"></div>
-      <button class="btn ghost small" onclick="forceUpdate()">最新に更新</button>
+      <div class="sect">アプリの版</div>
+      <div class="card">
+        <div class="row">
+          <div class="grow">
+            <div class="tiny muted">この端末に入っている版</div>
+            <div style="font-weight:700;font-size:17px">${esc(APP_VERSION)}
+              <span class="small muted">（${esc(APP_DATE)}）</span></div>
+          </div>
+          <button class="btn ghost small" style="width:auto;margin:0;padding:6px 12px"
+            onclick="checkUpdate()">新しい版があるか見る</button>
+        </div>
+        <div class="small muted" style="margin-top:6px">${esc(APP_NOTE)}</div>
+        <div class="tiny muted" id="updInfo" style="margin-top:8px"></div>
+        <button class="btn ghost small" style="margin-top:8px"
+          onclick="forceUpdate()">最新に更新する</button>
+        <div class="tiny muted">記録した調査と、圏外用に落とした地図は消えません。
+          電波の届くところで行ってください。</div>
+      </div>
       <div class="tiny muted" style="margin-top:10px; text-align:center">
         記録はこの端末の中だけに保存されます。外部へ自動送信しません。
       </div>`
@@ -521,7 +673,7 @@ function editDraftGet(uuid){ return editDrafts()[uuid] || null; }
 // 新規作成のたびに新しいIDが振られるため、IDでは見つけられない
 function findNewDraft(kind, sv){
   const d = editDrafts();
-  const dbKey = kind==='redd' ? DB.key.rd : kind==='unit' ? DB.key.un : DB.key.nt;
+  const dbKey = kind==='redd' ? DB.key.rd : DB.key.nt;
   const id = Object.keys(d).find(k=>{
     const x=d[k];
     if(!x || x._kind!==kind || !x._new || x._sv!==sv) return false;
@@ -538,9 +690,6 @@ function draftHasContent(kind, x){
     x.note || filled(x.latitude) || arr(x.env_points) || arr(x.photos) ||
     filled(x.female_n) || filled(x.male_n) || filled(x.carcass_n) ||
     filled(x.water_temp_c) || filled(x.intragravel_temp_c));
-  if(kind==='unit') return !!(x.river_form || x.name || filled(x.start_lat) || filled(x.end_lat) ||
-    filled(x.depth_cm_rep) || filled(x.velocity_ms_rep) || x.substrate_rep || x.memo ||
-    arr(x.env_points) || (x.substrate_pct && Object.keys(x.substrate_pct).length));
   return !!(x.content || arr(x.photos));
 }
 // 「区間なしでも記録の入口を開ける」価値のある書きかけか。
@@ -580,17 +729,6 @@ function stashEditDraft(){
         _kind:'redd', _sv:SCREENS._editSv, _new:!DB.get(DB.key.rd, SCREENS._reddUuid),
         env_points:(SCREENS._env||[]).slice(), photos:(SCREENS._photos||[]).slice(),
         gps_accuracy:SCREENS._acc, position_source:SCREENS._posSrc }));
-    }else if(cur.name==='unitEdit' && SCREENS._unitUuid && $('#uName')){
-      envSync();
-      editDraftSave(SCREENS._unitUuid, { _kind:'unit',
-        _sv:SCREENS._editSv, _new:!DB.get(DB.key.un, SCREENS._unitUuid),
-        name:($('#uName').value||'').trim(), river_form:segVal('uForm'),
-        start_lat:numVal('#uSLat'), start_lon:numVal('#uSLon'),
-        end_lat:numVal('#uELat'), end_lon:numVal('#uELon'),
-        length_m_manual:numVal('#uLenM'), river_width_m:numVal('#uWidth'),
-        depth_cm_rep:numVal('#uDep'), velocity_ms_rep:numVal('#uVel'),
-        substrate_rep:segVal('uSub'), substrate_pct:collectGrainPct(),
-        env_points:(SCREENS._env||[]).slice(), memo:$('#uMemo').value||'' });
     }else if(cur.name==='noteEdit' && SCREENS._noteUuid && $('#fNText')){
       editDraftSave(SCREENS._noteUuid, { _kind:'note',
         _sv:SCREENS._editSv, _new:!DB.get(DB.key.nt, SCREENS._noteUuid),
@@ -735,7 +873,11 @@ function pathLength(path){
   for(let i=1;i<p.length;i++) d+=distMeters(p[i-1],p[i]);
   return d;
 }
-function fmtDist(d){ d=+d||0; return d>=1000 ? (d/1000).toFixed(2)+'km' : Math.round(d)+'m'; }
+// 空欄は '—'。0m（測って0）とは区別する
+function fmtDist(d){
+  if(d==='' || d===null || d===undefined || !isFinite(+d)) return '—';
+  d=+d; return d>=1000 ? (d/1000).toFixed(2)+'km' : Math.round(d)+'m';
+}
 function fmtDur(ms){ const s=Math.max(0,Math.round(ms/1000));
   const h=Math.floor(s/3600), m=Math.floor(s%3600/60);
   return h ? `${h}時間${m}分` : `${m}分`; }
@@ -922,7 +1064,7 @@ SCREENS.survey = (u)=>{
                <button class="btn" onclick="endReach('${u}')">この区間を終了</button>
              </div>`
           : `<button class="btn big" onclick="startReach('${u}')">区間をスタート</button><div class="sp"></div>` }
-        <button class="btn" onclick="nav('unitEdit','${esc(JSON.stringify({sv:u}))}')">＋ 物理環境を記録</button>
+        <button class="btn" onclick="nav('envMap','${esc(JSON.stringify({sv:u}))}')">物理環境を記録する（地図）</button>
         <div class="sp"></div>
         <button class="btn" onclick="nav('noteEdit','${esc(JSON.stringify({sv:u}))}')">メモを追加</button>
       ` : '' }
@@ -1565,7 +1707,8 @@ function onReachChange(sv, editing){
   el.value = nextReddNo(sv, $('#fReach').value||'');
 }
 /* ---------- 測点の入力欄（水深・流速） ---------- */
-function numOf(el){
+// 入力欄（要素）から数を取り出す。値から取り出す numOf(v) とは別物
+function numOfEl(el){
   if(!el) return '';
   const v=String(el.value).trim();
   if(v==='') return '';
@@ -1574,8 +1717,8 @@ function numOf(el){
 // 画面に入力されている内容を SCREENS._env に取り込む（並べ替え・追加の前に必ず呼ぶ）
 function envSync(){
   SCREENS._env = $$('#envList .envrow').map(row=>({
-    depth_cm: numOf(row.querySelector('.envd')),
-    velocity_ms: numOf(row.querySelector('.envv')),
+    depth_cm: numOfEl(row.querySelector('.envd')),
+    velocity_ms: numOfEl(row.querySelector('.envv')),
     note: ((row.querySelector('.envn')||{}).value||'').trim(),
   }));
 }
@@ -1793,16 +1936,7 @@ function deleteRedd(u){
   goBack();
 }
 
-/* ============================================================
-   物理環境（河川構造ごとの区間）
-   早瀬・平瀬・淵・瀬頭といったまとまりごとに、始点と終点を取り、
-   その間の代表水深・代表流速・河床材料を記録する。
-   産卵床の「点」の記録とは別物なので、別の一覧として持つ。
-   ============================================================ */
-function unitLength(u){
-  if(u.length_m_manual!=='' && u.length_m_manual!=null) return +u.length_m_manual;
-  return +u.length_m_auto || 0;
-}
+/* ---------- 位置の読み取り ---------- */
 // 空欄を 0 と読み替えないための変換。空なら null を返す
 // （`+''` は 0 になるため、そのまま使うと未入力が「緯度0・経度0」として地図に出てしまう）
 // 位置の入力チェック。ok=false なら why に理由が入る
@@ -1819,373 +1953,2436 @@ function ptOf(lat, lon){
   const p=[parseFloat(lat), parseFloat(lon)];
   return validPt(p) ? p : null;
 }
-function unitPointsOk(u){ return !!(ptOf(u.start_lat,u.start_lon) && ptOf(u.end_lat,u.end_lon)); }
-// 割合の合計。100にならなくても保存はできるが、画面で気づけるようにする
-function grainTotal(pct){
-  return OPT.substrate.reduce((a,g)=>a + (num((pct||{})[g])||0), 0);
+
+/* ============================================================
+   物理環境の計算（魚類調査アプリから移植）
+   取り方は 点／ライン／メッシュ の3通り。どれも記録1件（rd_units）で、
+   ちがうのは位置の持ち方だけ（点＝latitude/longitude、
+   線＝始点・曲がり・終点、メッシュ＝四隅＋間隔）。
+
+   単位は産卵床のまま（水深 cm・流速 m/s）。
+   魚類側は流速が cm/s なので、写すときに velocity_cms → velocity_ms と読み替えてある。
+   ここには数え方・測り方だけを置く。画面は Phase 2 以降で入れ替える。
+   ============================================================ */
+const MESH_MAX_CELLS = 2000;      // これを超える格子は作らない
+const MESH_MIN_EDGE_M = 0.5;      // これより短い辺は、押し間違いとみなす
+const MESH_MAX_SPAN_DEG = 1;      // 1つの範囲が緯度経度で1度を超えることはない
+const ENV_AUTO_MS = 600;          // 打ちかけを自動で保存するまでの待ち時間
+
+/* 古い測位を使わない。前の測点の場所が付くのを防ぐ */
+function freshFix(maxAgeMs){
+  if(!lastFix) return null;
+  return (Date.now()-lastFix.t) <= (maxAgeMs||30000) ? lastFix : null;
 }
-function grainMain(pct){
-  let best='', v=-1;
-  OPT.substrate.forEach(g=>{ const x=num((pct||{})[g]); if(x!=null && x>v){ v=x; best=g; } });
-  return v>0 ? best : '';
+
+/* ---------- 取り方（点／ライン／メッシュ） ---------- */
+// 未設定は「点」（いままでの取り方）
+function envMethod(u){
+  const m = u && u.env_method;
+  return (m==='ライン' || m==='メッシュ') ? m : '点';
 }
-function unitAutoName(sv, form){
-  const n = DB.unitsOf(sv).filter(x=>x.river_form===form).length + 1;
-  return (form||'区間') + n;
+function isLine(u){ return envMethod(u)==='ライン'; }
+function isMesh(u){ return envMethod(u)==='メッシュ'; }
+function methodWord(m){ return m==='ライン' ? '区間' : (m==='メッシュ' ? '範囲' : '地点'); }
+// 名前の頭文字。点=P／ライン=L／メッシュ=M
+function envKindOf(u){ const m=envMethod(u); return m==='ライン'?'L':(m==='メッシュ'?'M':'P'); }
+/* P1 / L1 / M1 の採番。取り方ごとに数える。
+   消したものも数える。消した番号を使い回すと、先に書き出したCSVの P2 と、
+   あとから作った P2 が別物になる */
+function envAutoName(svUuid, kind){
+  const used = DB.load(DB.key.un).filter(x=>x.survey_uuid===svUuid)
+    .map(x=>{ const m=String(x.name||'').match(new RegExp('^'+kind+'(\\d+)$')); return m ? +m[1] : 0; });
+  const max = used.length ? Math.max.apply(null, used) : 0;
+  return kind + (max + 1);
+}
+
+/* ---------- 環境区分（複数選べる） ---------- */
+// 「早瀬・淵」のように複数入っていても、1つずつ略す
+function habitatShort(v){
+  return String(v||'').split('・').map(x=>HABITAT_SHORT[x] || x).filter(Boolean).join('・');
+}
+function habitatLong(short){
+  const hit = Object.keys(HABITAT_SHORT).find(k=>HABITAT_SHORT[k]===short);
+  return hit || (short==='なし' ? '' : short);
+}
+// 記録には「早瀬・淵」のように「・」でつないだ1つの文字として入れる
+function habitatList(v){ return String(v||'').split('・').filter(Boolean); }
+
+/* ---------- 測点から出す代表値 ---------- */
+/* 最小・最大・平均を出す。代表値は手入力があればそちら。
+   0 を落とさないよう nums() を通す（淀みの流速0・干出の水深0は測った値） */
+function pointStats(u, field, manualField){
+  const v = nums(envPoints(u||{}).map(p=>p[field]));
+  const manual = numOf((u||{})[manualField]);
+  const avg = v.length ? v.reduce((a,b)=>a+b,0)/v.length : '';
+  return {
+    n: v.length,
+    min: v.length ? Math.min.apply(null,v) : '',
+    max: v.length ? Math.max.apply(null,v) : '',
+    avg, manual,
+    rep: manual!=='' ? manual : avg,
+  };
+}
+function depthStats(u){ return pointStats(u, 'depth_cm', 'depth_rep_cm'); }
+function velocityStats(u){ return pointStats(u, 'velocity_ms', 'velocity_rep_ms'); }
+
+/* ---------- 河床材料の割合（7区分） ---------- */
+function substratePct(u){
+  const o = u && u.substrate_pct;
+  return (o && typeof o === 'object') ? o : {};
+}
+function substratePctSum(u){
+  const p = substratePct(u);
+  return OPT.substrate.reduce((a,k)=>{ const v=numOf(p[k]); return a + (v===''?0:v); }, 0);
+}
+/* 割合の多い順。いちばん多い区分と次に多い区分を出すのに使う */
+function substrateRank(u){
+  const p = substratePct(u);
+  return OPT.substrate
+    .map(k=>({name:k, pct: numOf(p[k])===''?0:numOf(p[k])}))
+    .filter(x=>x.pct>0)
+    .sort((a,b)=>b.pct-a.pct);
+}
+
+/* ---------- 岸のカバー。side は 'left' か 'right' ---------- */
+function coverList(u, side){
+  const a = u && u['cover_'+side];
+  return Array.isArray(a) ? a.filter(x=>x && x.type) : [];
+}
+function coverPctSum(u, side){
+  return coverList(u, side).reduce((a,c)=>{ const v=numOf(c.pct); return a+(v===''?0:v); }, 0);
+}
+/* カバーがあるか。「なし」だけならカバー無し */
+function coverPresent(u, side){
+  const list = coverList(u, side);
+  if(!list.length) return '';
+  return list.some(c=>c.type && c.type!=='なし') ? 'あり' : 'なし';
+}
+
+/* ---------- ライン（始点・曲がり・終点） ---------- */
+function linePt(u, which){
+  const la = numOf(u && u['line_'+which+'_lat']);
+  const lo = numOf(u && u['line_'+which+'_lon']);
+  if(la==='' || lo==='') return null;
+  const pt = [la, lo];
+  return validPt(pt) ? pt : null;
+}
+/* 途中の曲がり。川の形に沿わせるために置く */
+function lineVias(u){
+  return ((u && u.line_vias) || []).map(v=>{
+    const la = numOf(v && v.lat), lo = numOf(v && v.lon);
+    if(la==='' || lo==='') return null;
+    const pt = [la, lo];
+    return validPt(pt) ? pt : null;
+  }).filter(Boolean);
+}
+/* 始点 → 曲がり… → 終点。終点がまだなら、そこまでの形を返す */
+function linePath(u){
+  const a = linePt(u,'start');
+  if(!a) return [];
+  const b = linePt(u,'end');
+  return [a].concat(lineVias(u), b ? [b] : []);
+}
+/* 始点から終点までの直線。曲がりを置いても、この値は変わらない */
+function lineStraight(u){
+  const a = linePt(u,'start'), b = linePt(u,'end');
+  return (a && b) ? distMeters(a, b) : '';
+}
+/* 区間の長さ。曲がりを置いてあれば、その折れ線に沿って測る。
+   歩いた向きは距離に関係しない */
+function lineDist(u){
+  const b = linePt(u,'end');
+  if(!b) return '';
+  const path = linePath(u);
+  return path.length >= 2 ? pathLength(path) : '';
+}
+/* 使う長さの決め方。手入力 ＞ 押さえた始終点 ＞ 軌跡の直線 ＞ 軌跡の総延長。
+   1つも測っていなければ 0 ではなく空欄にする。
+   0 にすると「調べたが0m」が書き出しに出てしまう */
+function unitLengths(u){
+  const track = ((u&&u.track)||[]).filter(validPt);
+  const has = track.length >= 2;
+  const trackLen = has ? pathLength(track) : '';
+  const straight = has ? distMeters(track[0], track[track.length-1]) : '';
+  const manual = numOf(u && u.length_m_manual);
+  const line = lineDist(u);
+  const used = manual!=='' ? manual
+             : (line!=='' ? line
+             : (straight!=='' && straight>0 ? straight
+             : (trackLen!=='' ? trackLen : '')));
+  return {track:trackLen, straight, line, manual, used};
+}
+function unitAreas(u){
+  const L = unitLengths(u).used;
+  const w = numOf(u && u.width_m);
+  const calc = (w==='' || L==='' || !isFinite(L)) ? '' : L * w;
+  const manual = numOf(u && u.area_m2_manual);
+  const used = manual!=='' ? manual : calc;
+  return {calc, manual, used};
+}
+
+/* ---------- メッシュ ----------
+   四隅を押さえて、縦と横の間隔（m）からマスを作る。
+   マスの位置は四隅から計算で出す（1マスずつGPSを取ると、誤差で格子から外れる）。
+   四隅の順番は 上流左岸 → 上流右岸 → 下流右岸 → 下流左岸 */
+/* 四隅の形を確かめる。おかしければ理由を返す（正しければ空文字）。
+   validPt は isFinite で見るので、数字の文字列も通ってしまう。ここでは本物の数だけ受ける */
+function meshCornerError(c){
+  if(!Array.isArray(c) || c.length!==4) return '四隅を4つとも押さえてください';
+  for(const p of c){
+    if(!Array.isArray(p) || p.length!==2) return '四隅の形がおかしいです';
+    if(typeof p[0]!=='number' || typeof p[1]!=='number'
+       || !isFinite(p[0]) || !isFinite(p[1])) return '四隅に数でないものが入っています';
+    if(Math.abs(p[0])>90 || Math.abs(p[1])>180) return '四隅の位置が地球の外にあります';
+  }
+  const lats = c.map(p=>p[0]), lons = c.map(p=>p[1]);
+  const span = Math.max(Math.max.apply(null,lats)-Math.min.apply(null,lats),
+                        Math.max.apply(null,lons)-Math.min.apply(null,lons));
+  // ここが広すぎるときは、押し間違いか、日付変更線をまたいでいる。どちらも受けない
+  if(span > MESH_MAX_SPAN_DEG) return '四隅が離れすぎています。押し間違いかもしれません';
+  // 辺の長さ。同じ点を2回押した・一直線に並んだ、を弾く
+  for(let i=0;i<4;i++){
+    const d = distMeters(c[i], c[(i+1)%4]);
+    if(!(d >= MESH_MIN_EDGE_M)) return '四隅のうち2つが近すぎます（同じ場所を押していませんか）';
+  }
+  // 平らな面として見たときの向き。4つとも同じ向きに曲がっていれば、
+  // ねじれても凹んでもいない（＝ふつうの四角）
+  const x = c.map(p=>p[1]*Math.cos(c[0][0]*Math.PI/180)), y = c.map(p=>p[0]);
+  let plus=0, minus=0, area=0;
+  for(let i=0;i<4;i++){
+    const a=i, b=(i+1)%4, d=(i+2)%4;
+    const cr = (x[b]-x[a])*(y[d]-y[b]) - (y[b]-y[a])*(x[d]-x[b]);
+    if(cr > 0) plus++; else if(cr < 0) minus++;
+    area += x[a]*y[b] - x[b]*y[a];
+  }
+  if(plus && minus) return '四隅がねじれています。押した順番をご確認ください';
+  if(Math.abs(area)/2 < 1e-12) return '四隅が一直線に並んでいます';
+  return '';
+}
+function meshCorners(u){
+  const c = u && u.mesh_corners;
+  return meshCornerError(c) ? null : c;
+}
+/* 縦の長さ（上流の辺の中点から、下流の辺の中点まで）。
+   左岸側と右岸側で長さが違うので、真ん中で測る */
+function meshLength(u){
+  const c = meshCorners(u); if(!c) return '';
+  const up = [(c[0][0]+c[1][0])/2, (c[0][1]+c[1][1])/2];
+  const dn = [(c[3][0]+c[2][0])/2, (c[3][1]+c[2][1])/2];
+  return distMeters(up, dn);
+}
+/* 横の幅（上流の辺と下流の辺の平均） */
+function meshWidth(u){
+  const c = meshCorners(u); if(!c) return '';
+  return (distMeters(c[0], c[1]) + distMeters(c[3], c[2])) / 2;
+}
+/* 縦に何行できるか。間隔で割って、1行未満なら1行 */
+function meshRowsOf(u){
+  const manual = countOf(u && u.mesh_rows);
+  if(manual!==null && manual!=='' && manual>0) return manual;
+  const L = meshLength(u), gap = numOf(u && u.mesh_row_m);
+  if(L==='' || gap==='' || !(gap>0)) return 0;
+  return Math.max(1, Math.round(L/gap));
+}
+/* 横に何列できるか。幅を間隔で割って丸めるので、全マスが同じ幅に少しずつ伸び縮みする
+   （端に半端なマスを作らない。指定と多少ずれるのは承知のうえ） */
+function meshColsOf(u){
+  const W = meshWidth(u), gap = numOf(u && u.mesh_col_m);
+  if(W==='' || gap==='' || !(gap>0)) return 0;
+  return Math.max(1, Math.round(W/gap));
+}
+/* 四隅の中を、行と列で分けたときのマスの中心。
+   4つの角を「上下」「左右」で混ぜる（双線形内挿）。
+   狭い範囲なので、緯度経度をそのまま混ぜてよい */
+function meshCellCenter(c, rows, cols, row, col){
+  const u = (col + 0.5) / cols;         // 左岸から右岸へ
+  const v = (row + 0.5) / rows;         // 上流から下流へ
+  const up = [c[0][0] + (c[1][0]-c[0][0])*u, c[0][1] + (c[1][1]-c[0][1])*u];
+  const dn = [c[3][0] + (c[2][0]-c[3][0])*u, c[3][1] + (c[2][1]-c[3][1])*u];
+  return [up[0] + (dn[0]-up[0])*v, up[1] + (dn[1]-up[1])*v];
+}
+/* 1マスの四隅（地図に描くため） */
+function meshCellPoly(c, rows, cols, row, col){
+  const at = (uu,vv)=>{
+    const up = [c[0][0] + (c[1][0]-c[0][0])*uu, c[0][1] + (c[1][1]-c[0][1])*uu];
+    const dn = [c[3][0] + (c[2][0]-c[3][0])*uu, c[3][1] + (c[2][1]-c[3][1])*uu];
+    return [up[0] + (dn[0]-up[0])*vv, up[1] + (dn[1]-up[1])*vv];
+  };
+  const u0=col/cols, u1=(col+1)/cols, v0=row/rows, v1=(row+1)/rows;
+  return [at(u0,v0), at(u1,v0), at(u1,v1), at(u0,v1)];
+}
+/* 格子の見積り。決める前に「何マスになるか」を見せるためのもの。
+   上限を超えていても、超えた数のまま返す */
+function meshPlan(u){
+  const c = meshCorners(u);
+  if(!c) return null;
+  const rows = meshRowsOf(u), cols = meshColsOf(u);
+  if(!(rows>0) || !(cols>0)) return null;
+  return {corners:c, rows, cols, n: rows*cols, length: meshLength(u), width: meshWidth(u)};
+}
+/* 実際に使う格子。上限を超えていたら作らない。
+   保存のときだけ止めていると、壊れた記録で画面が固まる */
+function meshGeom(u){
+  const g = meshPlan(u);
+  if(!g) return null;
+  if(!Number.isInteger(g.rows) || !Number.isInteger(g.cols)) return null;
+  if(g.n > MESH_MAX_CELLS) return null;
+  return g;
+}
+/* マスの位置。格子が決まっていなければ空 */
+function meshCellPos(u, row, col){
+  const g = meshGeom(u);
+  if(!g || row<0 || col<0 || row>=g.rows || col>=g.cols) return null;
+  return meshCellCenter(g.corners, g.rows, g.cols, row, col);
+}
+function meshCellsOf(unitUuid){ return DB.meshCellsOf(unitUuid); }
+/* 格子には版がある。四隅や細かさを変えると、同じ「3行2列」でも
+   川の別の場所を指すことになる。版を持たないと、古いマスが
+   新しい格子のマスとして表示され、位置と集計が静かに壊れる */
+function meshGridId(u){ return String((u && u.mesh_grid_id) || ''); }
+/* その格子の定義を、文字にしたもの。同じなら版を変えない */
+function meshGridSig(u){
+  const c = (u && u.mesh_corners) || [];
+  return JSON.stringify([c, numOf(u && u.mesh_row_m), numOf(u && u.mesh_col_m)]);
+}
+function meshIsCurrent(u, cell){
+  return String((cell && cell.grid_id) || '') === meshGridId(u);
+}
+/* いまの格子のマスだけ */
+function meshCurrentCells(u, cells){
+  return (cells || meshCellsOf(u.uuid)).filter(c=>meshIsCurrent(u, c));
+}
+/* 前の格子で入れたマス。記録としては残すが、一覧や集計には混ぜない */
+function meshOldCells(u, cells){
+  return (cells || meshCellsOf(u.uuid)).filter(c=>!meshIsCurrent(u, c));
+}
+/* 入力済みのマスを、行×列で引けるようにする */
+function meshCellMap(cells){
+  const m = {};
+  (cells||[]).forEach(x=>{ m[x.row+'_'+x.col] = x; });
+  return m;
+}
+/* マスから水深・流速の最小・最大・代表を出す。0を落とさない */
+function meshStats(cells, field, manual){
+  const v = nums((cells||[]).map(x=>x[field]));
+  const man = numOf(manual);
+  if(!v.length) return {n:0, min:'', max:'', avg:'', manual:man, rep:man};
+  const avg = v.reduce((a,b)=>a+b, 0)/v.length;
+  return {n:v.length, min:Math.min.apply(null,v), max:Math.max.apply(null,v),
+          avg, manual:man, rep: man!=='' ? man : avg};
+}
+/* 書き出しの控えがあればそこから、無ければ保存から読む */
+function snapCells(u, snap){
+  if(snap && Array.isArray(snap.mc)) return snap.mc.filter(x=>x.unit_uuid===u.uuid);
+  return meshCellsOf(u.uuid);
+}
+/* その記録の水深・流速。メッシュならマスから、それ以外は測点から。
+   どちらも「手で入れた代表値があればそちらを使う」は同じ */
+function unitDepth(u, snap){
+  if(!isMesh(u)) return depthStats(u);
+  return meshStats(meshCurrentCells(u, snapCells(u, snap)), 'depth_cm', u.depth_rep_cm);
+}
+function unitVelocity(u, snap){
+  if(!isMesh(u)) return velocityStats(u);
+  return meshStats(meshCurrentCells(u, snapCells(u, snap)), 'velocity_ms', u.velocity_rep_ms);
+}
+
+/* ---------- 地図の色分け ---------- */
+const ENV_COLOR_BY = ['なし','環境区分','河床材料','礫の状況','流速','水深'];
+function envColorBy(){ return prefs().env_color_by || 'なし'; }
+function envSetColorBy(v){ if(!envFlushOk()) return; prefSet('env_color_by', v); render(); }
+/* 区分ごとの色。数が多くないので、見分けやすい色を並べる */
+const ENV_CAT_COLORS = ['#4aa3ff','#3fb950','#f0883e','#d29922','#a371f7',
+                        '#f778ba','#56d4dd','#8b949e'];
+function envCatColor(list, v){
+  const i = list.indexOf(v);
+  return i < 0 ? '#8b949e' : ENV_CAT_COLORS[i % ENV_CAT_COLORS.length];
+}
+/* 数の大小を色にする。青（小）→緑→黄→赤（大） */
+function envRampColor(v, lo, hi){
+  const n = numOf(v);
+  if(n==='') return '#8b949e';          // 未記入だけを灰色にする
+  // 値が1つだけ、または全部同じときは幅が無い。
+  // ここで灰色を返すと、入れてあるのに「未記入」に見える
+  if(!(hi > lo)) return 'rgb(63,185,80)';
+  const t = Math.max(0, Math.min(1, (n - lo) / (hi - lo)));
+  const stops = [[74,163,255],[63,185,80],[210,153,34],[240,136,62],[248,81,73]];
+  const x = t * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x));
+  const f = x - i;
+  const c = [0,1,2].map(k => Math.round(stops[i][k] + (stops[i+1][k]-stops[i][k]) * f));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+/* いまの基準で、その記録の色を決める。
+   代表値は測点やマスから出したものを使う（手入力だけを見ると、
+   測点を入れた記録が未記入の色になる） */
+function envColorOf(u, range){
+  const by = envColorBy();
+  if(by === '環境区分') return envCatColor(OPT.habitat, habitatList(u.habitat_type)[0]);
+  if(by === '河床材料') return envCatColor(OPT.substrate, u.substrate1);
+  if(by === '礫の状況') return envCatColor(OPT.gravel, u.gravel_condition);
+  if(by === '流速')     return envRampColor(unitVelocity(u).rep, range.vLo, range.vHi);
+  if(by === '水深')     return envRampColor(unitDepth(u).rep, range.dLo, range.dHi);
+  return null;             // 「なし」なら、これまでどおり河川形態で色を変える
+}
+/* 色の幅は、いま出している記録から作る */
+function envColorRange(svUuid){
+  const list = DB.unitsOf(svUuid);
+  const v = nums(list.map(x=>unitVelocity(x).rep));
+  const d = nums(list.map(x=>unitDepth(x).rep));
+  return {vLo: v.length?Math.min.apply(null,v):0, vHi: v.length?Math.max.apply(null,v):0,
+          dLo: d.length?Math.min.apply(null,d):0, dHi: d.length?Math.max.apply(null,d):0,
+          vN: v.length, dN: d.length};
+}
+/* 何色が何を指すか。地図の下に出す */
+function envLegendHtml(svUuid){
+  const by = envColorBy();
+  if(by === 'なし') return '';
+  const wrap = (inner)=>`<div id="envLegend">${inner}</div>`;
+  const chip = (col, label)=>`<span style="display:inline-flex;align-items:center;
+    gap:4px;margin:0 8px 4px 0"><span style="width:12px;height:12px;border-radius:6px;
+    background:${col};display:inline-block"></span>${esc(label)}</span>`;
+  if(by === '流速' || by === '水深'){
+    const r = envColorRange(svUuid);
+    const lo = by==='流速' ? r.vLo : r.dLo, hi = by==='流速' ? r.vHi : r.dHi;
+    const n  = by==='流速' ? r.vN : r.dN;
+    const unit = by==='流速' ? ' m/s' : ' cm';
+    const dg   = by==='流速' ? 2 : 0;
+    if(!(hi > lo)){
+      const why = n===0 ? 'まだ入っていないので、色は分かれません'
+                : n===1 ? '値が1つだけなので、色は分かれません'
+                        : 'どれも同じ値なので、色は分かれません';
+      // 入っている分は同じ色で出る。その色も凡例に出さないと、
+      // 地図の色が何を指すのか分からない
+      const same = n===0 ? '' : chip(envRampColor(lo, lo, hi), fmtNum(lo, dg)+unit);
+      return wrap(`<div class="tiny muted">${esc(by)}：${why}　${same}`
+        + chip('#8b949e','未記入') + '</div>');
+    }
+    return wrap(`<div class="tiny muted">${esc(by)}　`
+      + [0,0.25,0.5,0.75,1].map(t=>{
+          const v = lo + (hi-lo)*t;
+          return chip(envRampColor(v, lo, hi), fmtNum(v, dg)+unit);
+        }).join('') + '</div>');
+  }
+  const list = by==='環境区分' ? OPT.habitat : (by==='河床材料' ? OPT.substrate : OPT.gravel);
+  return wrap(`<div class="tiny muted">${esc(by)}　`
+    + list.map(o=>chip(envCatColor(list, o), o)).join('')
+    + chip('#8b949e','未記入') + '</div>');
+}
+
+/* ============================================================
+   物理環境の記録（地図の上で、その場で入れる）
+   点を置いた時点で記録ができ、打った内容は少し待ってから自動で保存される。
+   保存ボタンだけに頼ると、打ったのに書き出しに出ない、が起きる。
+   ============================================================ */
+function fixCoord(v){ const n=numOf(v); return n==='' ? '' : n.toFixed(6); }
+function timeValue(d){ d=d||new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+/* 現在地を1回だけ取る。画面が変わっていたら書き込まない */
+function getFixOnce(cb){
+  if(!navigator.geolocation){ cb(null); return; }
+  const gen = screenGen();
+  navigator.geolocation.getCurrentPosition(p=>{
+    if(screenStale(gen)) return;
+    lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
+    cb({lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy});
+  }, ()=>{ if(!screenStale(gen)) cb(null); },
+     {enableHighAccuracy:true, maximumAge:3000, timeout:15000});
+}
+function gpsHint(){
+  const f = freshFix(20000);
+  if(!f) return '位置：まだ取れていません（空の見えるところでお待ちください）';
+  if(f.acc > GPS_MAX_ACC) return `位置：±${Math.round(f.acc)}m（粗いので位置は付けません）`;
+  return `位置：±${Math.round(f.acc)}m で受かっています`;
+}
+
+/* ---------- 環境区分（いくつでも選べる） ---------- */
+function pickHabMulti(btn){
+  const all = btn.parentElement.querySelectorAll('button');
+  if(btn.textContent === 'なし'){
+    all.forEach(b=>b.classList.remove('on'));
+    btn.classList.add('on');
+  }else{
+    btn.classList.toggle('on');
+    all.forEach(b=>{ if(b.textContent==='なし') b.classList.remove('on'); });
+    if(!Array.from(all).some(b=>b.classList.contains('on'))){
+      all.forEach(b=>{ if(b.textContent==='なし') b.classList.add('on'); });
+    }
+  }
+}
+/* いま押されている環境区分（正式な名前で）。順番は選択肢の並びにそろえる */
+function habMultiVal(){
+  const on = $$(`[data-segmulti="envhab"] button.on`)
+    .map(b=>b.textContent).filter(x=>x!=='なし').map(habitatLong);
+  return OPT.habitat.filter(h=>on.indexOf(h)>=0).join('・');
+}
+
+/* ---------- 記録のひな形 ---------- */
+// 初期値をここ1か所に決める。地図からもメッシュからも作るので、散らかさない
+function newUnit(sv, method, reachUuid){
+  const kind = method==='ライン' ? 'L' : (method==='メッシュ' ? 'M' : 'P');
+  return {
+    uuid: uuid(), survey_uuid: sv,
+    reach_uuid: reachUuid!==undefined ? reachUuid : ((activeReach(sv)||{}).uuid || ''),
+    name: envAutoName(sv, kind),
+    env_method: method || '点',
+    habitat_type:'', started_at: nowISO(), ended_at:'',
+    survey_time_start: timeValue(), survey_time_end:'',
+    // 点のとき
+    latitude:'', longitude:'', gps_accuracy:'', position_source:'',
+    // ラインのとき
+    line_start_lat:'', line_start_lon:'', line_start_acc:'',
+    line_end_lat:'', line_end_lon:'', line_end_acc:'',
+    line_vias:[], line_direction:'上流→下流', chained_from:'',
+    // 長さ・面積
+    length_m_manual:'', width_m:'', area_m2_manual:'', track:[],
+    // 代表値と測点
+    depth_rep_cm:'', velocity_rep_ms:'', env_points:[],
+    // 河床材料・カバー
+    substrate1:'', substrate2:'', substrate_pct:{}, gravel_condition:'',
+    cover_left:[], cover_right:[], cover_left_length_m:'', cover_right_length_m:'',
+    water_temp_c:'',
+    // メッシュのとき
+    mesh_corners:[], mesh_row_m:'', mesh_col_m:'', mesh_grid_id:'',
+    memo:'', photos:[],
+  };
+}
+
+/* ---------- ライン（始まり・曲がり・終わり） ---------- */
+/* つぎに足すもの。LS＝ラインの始まり／LE＝終わり／V＝曲がり */
+let ENV_NEXT = {kind:'P', auto:false, line:'', survey:''};
+function envKindWord(k){
+  return k==='P' ? 'ポイント' : k==='LS' ? 'ラインの始まり'
+       : k==='LE' ? 'ラインの終わり' : '曲がり';
+}
+function envUseSurvey(svUuid){
+  if(ENV_NEXT.survey !== svUuid) ENV_NEXT = {kind:'P', auto:false, line:'', survey:svUuid};
+}
+function envSetKind(k){
+  // 地図の上の印だけを書き替えるときは画面を作り直さないが、
+  // 作り直しに落ちることもあるので、先に打ちかけを書いておく
+  if(!envFlushOk()) return;
+  const sv = ENV_NEXT.survey;
+  // 同じものをもう一度押したら、入れ替えをやめる（同じものを続けて足したいとき）
+  if(ENV_NEXT.kind === k) ENV_NEXT = {kind:k, auto:false, line:ENV_NEXT.line, survey:sv};
+  else if(k === 'P')      ENV_NEXT = {kind:'P', auto:false, line:'', survey:sv};
+  // 曲がりは続けて置くもの。交互には入れない
+  else if(k === 'V')      ENV_NEXT = {kind:'V', auto:false, line:ENV_NEXT.line, survey:sv};
+  else                    ENV_NEXT = {kind:k, auto:true, line:ENV_NEXT.line, survey:sv};
+  // 地図の上の印と案内だけを書き替える。画面ごと作り直すと地図がちらつく
+  if(!envSyncNextUI()) render();
+}
+/* 足したあとに、つぎを決める */
+function envAdvance(added, lineUuid){
+  const sv = ENV_NEXT.survey;
+  if(added === 'LS'){
+    ENV_NEXT = {kind: ENV_NEXT.auto ? 'LE' : ENV_NEXT.kind, auto:ENV_NEXT.auto,
+                line: lineUuid || '', survey:sv};
+  }else if(added === 'LE'){
+    ENV_NEXT = {kind: ENV_NEXT.auto ? 'LS' : ENV_NEXT.kind, auto:ENV_NEXT.auto,
+                line:'', survey:sv};
+  }
+}
+/* つなげる：ラインを閉じたら、その場所を次のラインの始まりにする。
+   縦断で歩くとき、境目を1回たたくだけで次の区間が始まる */
+function envChain(){ const v = prefs().env_chain; return v===undefined ? true : !!v; }
+function envSetChain(on){
+  prefSet('env_chain', !!on);
+  toast(on ? 'ラインをつなげます（閉じた場所が、つぎの始まりになります）'
+           : 'ラインをつなげません');
+  if(!envSyncNextUI()) render();
+}
+/* 「選んだ」のと「置いた」のと、どちらが後かを覚える。
+   つなげたときは、閉じたラインが選ばれたまま次のラインが始まるので、
+   選ばれているほうを先に見ると、曲がりが前のラインに付く */
+let ENV_SEQ = 0, ENV_SEL_SEQ = 0, ENV_PLACE_SEQ = 0;
+function envMarkSelected(){ ENV_SEL_SEQ = ++ENV_SEQ; }
+function envMarkPlaced(){ ENV_PLACE_SEQ = ++ENV_SEQ; }
+
+/* いま記録を作るなら、どの区間にぶら下がるか */
+function envReachOf(svUuid){ return (activeReach(svUuid)||{}).uuid || ''; }
+/* 同じ区間の記録か。つなぎ先を同じ区間に限らないと、
+   別の区間で押した「ラインの終わり」が、前の区間のラインを閉じてしまう */
+function sameReach(u, reachUuid){ return (u && (u.reach_uuid||'')) === (reachUuid||''); }
+
+/* LE でつなぐ相手を決める。
+   末尾を機械的に閉じると、L1 を選んでいるのに L2 が閉じる */
+function envLineTarget(svUuid){
+  const reach = envReachOf(svUuid);
+  const half = x => x && isLine(x) && linePt(x,'start') && !linePt(x,'end') && sameReach(x, reach);
+  // 1) いま選んでいる記録。人が選んだものを、いちばん先に見る
+  const sel = ENV_SEL ? DB.liveUnit(ENV_SEL) : null;
+  if(half(sel) && sel.survey_uuid===svUuid) return sel;
+  // 2) 直前に置いた始まり
+  if(ENV_NEXT.line){
+    const x = DB.liveUnit(ENV_NEXT.line);
+    if(half(x) && x.survey_uuid===svUuid) return x;
+  }
+  // 3) 終わっていないものがちょうど1本ならそれ。2本以上なら決めない（当て推量で閉じない）
+  const list = DB.unitsOf(svUuid).filter(half);
+  return list.length===1 ? list[0] : null;
+}
+/* 終わっていないライン（案内に出す） */
+function envPendingLine(svUuid){
+  const reach = envReachOf(svUuid);
+  const list = DB.unitsOf(svUuid).filter(x=>isLine(x) && linePt(x,'start')
+    && !linePt(x,'end') && sameReach(x, reach));
+  return list.length ? list[list.length-1] : null;
+}
+/* 曲がりを足す相手のライン。
+   1) 人が選び直した直後なら、その記録
+   2) いま引いている途中のライン
+   3) 選んでいるライン（終わっていてもよい）
+   4) 終わっていないラインがちょうど1本ならそれ
+   5) ラインがちょうど1本ならそれ */
+function envBendTarget(svUuid){
+  const reach = envReachOf(svUuid);
+  const isL = x => x && isLine(x) && linePt(x,'start') && sameReach(x, reach);
+  const half = x => isL(x) && !linePt(x,'end');
+  const mine = x => x && x.survey_uuid===svUuid;
+  const sel = ENV_SEL ? DB.liveUnit(ENV_SEL) : null;
+  if(ENV_SEL_SEQ > ENV_PLACE_SEQ && isL(sel) && mine(sel)) return sel;
+  if(ENV_NEXT.line){
+    const x = DB.liveUnit(ENV_NEXT.line);
+    if(half(x) && mine(x)) return x;
+  }
+  if(isL(sel) && mine(sel)) return sel;
+  const halves = DB.unitsOf(svUuid).filter(half);
+  if(halves.length===1) return halves[0];
+  const lines = DB.unitsOf(svUuid).filter(isL);
+  return lines.length===1 ? lines[0] : null;
+}
+/* 曲がりを1つ足す */
+function envAddBend(svUuid, la, lo, acc, targetUuid){
+  let x;
+  if(targetUuid){
+    const t = DB.liveUnit(targetUuid);
+    x = (t && t.survey_uuid===svUuid && isLine(t) && linePt(t,'start')) ? t : null;
+    if(!x){ toast('現在地を取っている間に、曲げる相手のラインが変わったので置いていません'); return null; }
+  }else{
+    x = envBendTarget(svUuid);
+  }
+  if(!x){
+    toast('どのラインを曲げるか決められません。先にラインを選ぶか、ラインの始まりを置いてください');
+    return null;
+  }
+  const v = {lat: la, lon: lo};
+  const a = (acc===undefined || acc===null || acc==='') ? '' : Math.round(acc);
+  if(a!=='') v.acc = a;
+  x.line_vias = (x.line_vias||[]).concat([v]);
+  if(!DB.put(DB.key.un, x)){
+    toast('曲がりを置けませんでした（端末の空き容量をご確認ください）');
+    return null;
+  }
+  ENV_SEL = x.uuid;
+  envHistPush({type:'曲がり', sv:svUuid, uuid:x.uuid, name:x.name});
+  // 曲がりは「置いた」に数えない。数えると、ラインを選んで曲がりを1つ足しただけで、
+  // つぎの曲がりが別のライン（引いている途中のもの）へ行ってしまう
+  toast(`${x.name||''} に曲がりを置きました（${x.line_vias.length}個目）`);
+  return x;
+}
+function envUndoBend(u){
+  if(!envFlushOk()) return false;
+  const x = DB.liveUnit(u); if(!x) return false;
+  const via = (x.line_vias||[]).slice();
+  if(!via.length){ toast('取り消す曲がりがありません'); return false; }
+  via.pop();
+  x.line_vias = via;
+  if(!DB.put(DB.key.un, x)){ toast('取り消せませんでした（端末の空き容量をご確認ください）'); return false; }
+  toast(`曲がりを1つ取り消しました（残り ${via.length}個）`);
+  return true;
+}
+function envClearBends(u){
+  if(!envFlushOk()) return false;
+  const x = DB.liveUnit(u); if(!x) return false;
+  const n = (x.line_vias||[]).length;
+  if(!n){ toast('消す曲がりがありません'); return false; }
+  if(!confirm(`${x.name||''} の曲がり ${n}個をすべて消します。よろしいですか？`)) return false;
+  x.line_vias = [];
+  if(!DB.put(DB.key.un, x)){ toast('消せませんでした（端末の空き容量をご確認ください）'); return false; }
+  toast('曲がりをすべて消しました');
+  return true;
+}
+
+/* 直前にしたことを控えておき、1つずつ戻せるようにする。
+   置き間違いは現場で必ず起きる。アプリを閉じるまでの間だけ覚える */
+let ENV_HIST = [];
+const ENV_HIST_MAX = 30;
+function envHistPush(item){
+  if(!item) return;
+  // どの区間で行った操作かも覚える。覚えないと、別の区間の操作を取り消してしまう
+  item.reach = envReachOf(item.sv) || '';
+  ENV_HIST.push(item);
+  if(ENV_HIST.length > ENV_HIST_MAX) ENV_HIST.shift();
+}
+function envHistMine(x, svUuid){
+  return !!x && x.sv === svUuid && (x.reach||'') === (envReachOf(svUuid)||'');
+}
+function envHistClear(svUuid){ ENV_HIST = ENV_HIST.filter(x=>x && x.sv === svUuid); }
+function envCanUndo(svUuid){ return ENV_HIST.some(x=>envHistMine(x, svUuid)); }
+/* 1つ戻す。戻せたら true */
+function envUndo(svUuid){
+  if(!envFlushOk()) return false;
+  let i = ENV_HIST.length - 1;
+  while(i >= 0 && !envHistMine(ENV_HIST[i], svUuid)) i--;
+  if(i < 0){ toast('戻せるものがありません'); return false; }
+  const h = ENV_HIST[i];
+  ENV_HIST.splice(i, 1);
+
+  if(h.type === '置いた'){
+    if(!DB.liveUnit(h.uuid)){ toast('その記録はもうありません'); return true; }
+    if(!DB.softDelete(DB.key.un, h.uuid)){
+      toast('戻せませんでした（端末の空き容量をご確認ください）'); return false;
+    }
+    if(ENV_SEL === h.uuid) ENV_SEL = null;
+    if(ENV_FORM === h.uuid){ ENV_FORM=''; ENV_DIRTY=false; }
+    if(ENV_NEXT.line === h.uuid){
+      ENV_NEXT = {kind:ENV_NEXT.kind, auto:ENV_NEXT.auto, line:'', survey:ENV_NEXT.survey};
+    }
+    toast(`${h.name||''} を取り消しました`);
+    return true;
+  }
+  if(h.type === '終わり'){
+    if(!DB.liveUnit(h.uuid)){ toast('その記録はもうありません'); return true; }
+    let all;
+    try{ all = DB.loadRaw(DB.key.un); }
+    catch(e){ toast('保存された記録を読み取れないため、戻せませんでした'); return false; }
+    const t = nowISO();
+    all.forEach(x=>{
+      if(!x) return;
+      if(x.uuid === h.uuid){
+        x.line_end_lat=''; x.line_end_lon=''; x.line_end_acc='';
+        x.survey_time_end = h.prevTime || '';
+        x.ended_at = h.prevEnded || '';
+        x.updated_at = t;
+      }
+      // つなげるで自動的に始まったラインも、一緒に取り消す
+      if(h.next && x.uuid === h.next && !x.deleted_at){ x.deleted_at = t; x.updated_at = t; }
+    });
+    if(!DB.save(DB.key.un, all)){
+      toast('戻せませんでした（端末の空き容量をご確認ください）'); return false;
+    }
+    if(h.next && ENV_SEL === h.next) ENV_SEL = h.uuid;
+    ENV_NEXT = {kind:'LE', auto:ENV_NEXT.auto, line:h.uuid, survey:svUuid};
+    toast(`${h.name||''} の終わりを取り消しました`);
+    return true;
+  }
+  if(h.type === '曲がり') return envUndoBend(h.uuid);
+  if(h.type === '動かした'){
+    if(!DB.liveUnit(h.uuid)){ toast('その記録はもうありません'); return true; }
+    if(!envMoveTo(h.uuid, h.which, h.prev.lat, h.prev.lon, h.prev.acc, h.prev.src, true)) return false;
+    toast(`${h.name||''} の${h.which}を元に戻しました`);
+    return true;
+  }
+  return false;
+}
+
+/* ---------- 入力欄（地図の下にそのまま出す） ---------- */
+let ENV_SEL = null;         // いま選んでいる記録
+let ENV_FORM = '';          // いま画面に出ている入力欄の持ち主
+let ENV_DIRTY = false;      // その入力欄を、人が触ったか
+let ENV_AUTO_TIMER = null;
+let ENV_GPS_TIMER = null;
+let ENV_FIX_FOR = '';
+let ENV_MOVE = null;        // {uuid, which} which は '点' / '始点' / '終点'
+
+function envMoveOn(u, which){
+  return !!(ENV_MOVE && ENV_MOVE.uuid === u && (!which || ENV_MOVE.which === which));
+}
+// 別の記録を選んだら「位置と時刻を直す」はたたんだ状態で出す
+function envFixFold(u){
+  if(!u || ENV_FIX_FOR === u) return;
+  ENV_FIX_FOR = u;
+  try{ if(foldOpen('envfix', false)) foldSet('envfix', false); }catch(e){}
+}
+
+function envItemFormHtml(cur, sv, opt){
+  if(!cur) return '';
+  const g = k => (cur[k]!==undefined && cur[k]!=='' ? cur[k] : '');
+  const pct = substratePct(cur);
+  const kind = envKindOf(cur);
+  const pt = ptOf(cur.latitude, cur.longitude);
+  envFixFold(cur.uuid);
+  const 位置欄 = kind==='M' ? '' : (kind==='L' ? ['始点','終点'] : ['点']).map(w=>{
+    const key = w==='始点' ? 'start' : (w==='終点' ? 'end' : '');
+    const ある = key ? !!linePt(cur, key) : !!pt;
+    const 待ち = envMoveOn(cur.uuid, w);
+    const 文字 = ある
+      ? esc(key ? fixCoord(cur['line_'+key+'_lat'])+', '+fixCoord(cur['line_'+key+'_lon'])
+                : fixCoord(cur.latitude)+', '+fixCoord(cur.longitude))
+      : '<span class="badge">まだありません</span>';
+    return `<div class="row" style="margin-bottom:6px">
+      <div class="grow"><div class="small muted">${esc(w)}</div><div>${文字}</div></div>
+      <button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="envGrabHere('${cur.uuid}','${w}')">いまここ</button>
+      <button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="envMoveStart('${cur.uuid}','${w}')">${待ち?'やめる':'地図で直す'}</button>
+    </div>`;
+  }).join('');
+  const 位置の案内 = kind==='M'
+    ? `<div class="tiny muted">場所は四隅で決まっています。
+        <a href="#" onclick="nav('meshSetup','${cur.uuid}'); return false;">範囲と格子を決め直す</a></div>`
+    : '<div class="tiny muted">「地図で直す」を押してから、地図をタップしてください。</div>';
+  return `
+    <div id="envItemForm">
+      <div class="card">
+        <div class="row">
+          <div class="grow"><b style="font-size:18px">${esc(cur.name||'')}</b>
+            <div class="small muted">${kind==='L'
+              ? (linePt(cur,'end') ? '区間 '+esc(fmtDist(lineDist(cur)))
+                  + (lineVias(cur).length ? `　曲がり ${lineVias(cur).length}個` : '')
+                : '<span class="badge">終わりがまだ</span>')
+              : (pt ? esc(fixCoord(cur.latitude)+', '+fixCoord(cur.longitude))
+                    : '<span class="badge">位置なし</span>')}
+              ${cur.survey_time_start ? '　'+esc(cur.survey_time_start) : ''}</div>
+          </div>
+          <button class="btn ghost small" style="width:auto;padding:4px 10px"
+            onclick="envDelete('${cur.uuid}')">消す</button>
+        </div>
+
+        ${foldHtml('envfix', kind==='M' ? '時刻を直す' : '位置と時刻を直す', '', 位置欄
+          + (kind==='L' ? `<div class="row" style="margin-top:6px">
+              <div class="grow"><div class="small muted">曲がり</div>
+                <div>${lineVias(cur).length}個</div></div>
+              <button class="btn ghost small" style="width:auto;padding:4px 10px"
+                onclick="if(envUndoBend('${cur.uuid}')) render()">最後を取り消す</button>
+              <button class="btn ghost small" style="width:auto;padding:4px 10px"
+                onclick="if(envClearBends('${cur.uuid}')) render()">全部消す</button>
+            </div>` : '')
+          + 位置の案内
+          + `<div class="two" style="margin-top:8px">
+            <label class="field"><span class="lab">開始時刻</span>
+              <input type="time" id="ev_t1" value="${esc(cur.survey_time_start||'')}"></label>
+            ${kind==='L' ? `<label class="field"><span class="lab">終了時刻</span>
+              <input type="time" id="ev_t2" value="${esc(cur.survey_time_end||'')}"></label>` : ''}
+          </div>`,
+          envMoveOn(cur.uuid))}
+
+        ${kind==='L' ? `<label class="field"><span class="lab">歩いた向き</span></label>
+        ${segHtml('envdir', OPT.lineDir, cur.line_direction||'上流→下流')}
+        <div class="two" style="margin-top:8px">
+          <label class="field"><span class="lab">区間長（m・手入力を優先）</span>
+            <input id="ev_len" inputmode="decimal" value="${esc(g('length_m_manual'))}"
+              placeholder="${esc(fmtDist(lineStraight(cur)))}"></label>
+          <label class="field"><span class="lab">川幅（m）</span>
+            <input id="ev_wid" inputmode="decimal" value="${esc(g('width_m'))}"></label>
+        </div>` : ''}
+
+        <label class="field"><span class="lab">環境区分（いくつでも選べます）</span></label>
+        <div class="seg" data-segmulti="envhab">
+          ${['なし'].concat(OPT.habitat).map(o=>{
+            const short = o==='なし' ? 'なし' : habitatShort(o);
+            const sel = habitatList(g('habitat_type'));
+            const on = (o==='なし' ? !sel.length : sel.indexOf(o)>=0);
+            return `<button type="button" class="${on?'on':''}"
+              onclick="pickHabMulti(this)" title="${esc(o)}">${esc(short)}</button>`;
+          }).join('')}
+        </div>
+
+        <label class="field"><span class="lab">河床材料</span></label>
+        ${segHtml('envsub', OPT.substrate, g('substrate1'), true)}
+
+        <label class="field"><span class="lab">礫の状況</span></label>
+        ${segHtml('envgr', OPT.gravel, g('gravel_condition'), true)}
+
+        <div class="two" style="margin-top:10px">
+          <label class="field"><span class="lab">流速（m/s）</span>
+            <input id="ev_v" inputmode="decimal" value="${esc(g('velocity_rep_ms'))}"
+              placeholder="例）0.45"></label>
+          <label class="field"><span class="lab">水深（cm）</span>
+            <input id="ev_d" inputmode="decimal" value="${esc(g('depth_rep_cm'))}"
+              placeholder="例）25"></label>
+        </div>
+        <div class="tiny muted">淀みの流速0・干出の水深0も、そのまま入れてください。</div>
+
+        <label class="field" style="margin-top:8px"><span class="lab">水温（℃）</span>
+          <input id="ev_wt" inputmode="decimal" value="${esc(g('water_temp_c'))}"></label>
+
+        ${foldHtml('envpct', '河床材料の割合',
+          '<span class="tiny muted">分かるときだけ</span>', `
+          ${OPT.substrate.map(k=>`
+            <div class="row" style="margin-top:6px">
+              <div class="grow small">${esc(k)}
+                <span class="tiny muted">${esc(SUBSTRATE_NOTE[k]||'')}</span></div>
+              <div style="width:92px">
+                <input id="evp_${SUBSTRATE_NO[k]}" inputmode="decimal"
+                  value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
+            </div>`).join('')}
+          <div class="tiny muted" style="margin-top:6px">合計100％が目安です（合わなくても保存できます）。</div>`)}
+
+        ${foldHtml('envcov', 'カバー（左右岸）', '', ['left','right'].map(side=>{
+          const label = side==='left' ? '左岸' : '右岸';
+          const cl = coverList(cur, side);
+          return `<div class="sect">${label}</div>
+            ${[0,1,2].map(i=>{
+              const c = cl[i] || {};
+              const opts = ['<option value="">（選ばない）</option>'].concat(
+                OPT.bankCover.map(o=>`<option value="${esc(o)}"${o===c.type?' selected':''}>${esc(o)}</option>`)
+              ).join('');
+              return `<div class="row" style="margin-top:8px">
+                <div class="grow"><select id="evc_${side}_${i}_t">${opts}</select></div>
+                <div style="width:92px">
+                  <input id="evc_${side}_${i}" inputmode="decimal" placeholder="割合%"
+                    value="${esc(c.pct!==undefined?c.pct:'')}"></div>
+              </div>`;
+            }).join('')}
+            <label class="field" style="margin-top:6px"><span class="lab">${label}のカバー長（m）</span>
+              <input id="evc_${side}_len" inputmode="decimal"
+                value="${esc(cur['cover_'+side+'_length_m']!==undefined?cur['cover_'+side+'_length_m']:'')}"></label>`;
+        }).join(''))}
+
+        <label class="field" style="margin-top:8px"><span class="lab">メモ</span>
+          <textarea id="ev_memo" rows="2">${esc(g('memo'))}</textarea></label>
+        <div id="ev_err"></div>
+      </div>
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">写真</div>
+        ${photoPanelHtml()}
+      </div>
+    </div>
+    <div class="tiny muted" id="ev_saved">入れたそばから、自動で保存されます。</div>
+    <button class="btn primary" onclick="saveEnvItem('${cur.uuid}')">保存する</button>
+    ${(opt && opt.noPoints) || envKindOf(cur)==='M' ? ''
+      : `<button class="btn" onclick="nav('unitEnv','${cur.uuid}')">
+      測点を入れる（${envPoints(cur).length}点）</button>`}`;
+}
+
+/* 入力欄のつなぎ込み。触るたびに、少し待ってから保存する */
+function envItemFormWire(cur){
+  ENV_FORM = cur ? cur.uuid : '';
+  ENV_DIRTY = false;
+  if(!cur) return;
+  SCREENS._photos = (cur.photos||[]).slice();
+  renderPhotoPanel();
+  envShowError(envItemError());
+  const box = $('#envItemForm');
+  if(!box) return;
+  box.addEventListener('input',  ()=>envAutoSave(cur.uuid));
+  box.addEventListener('change', ()=>envAutoSave(cur.uuid));
+  // 選ぶボタン（環境区分・河床材料・礫の状況）は input も change も出さない。
+  // 拾わないと、押したのに記録にも書き出しにも入らない
+  box.addEventListener('click', e=>{
+    if(e.target && e.target.closest && e.target.closest('[data-seg] button, [data-segmulti] button')){
+      envAutoSave(cur.uuid);
+    }
+  });
+}
+
+/* いま画面に入っている値が、おかしくないか。おかしければ理由を返す */
+function envItemError(){
+  const sv = sel => { const el=$(sel); return el ? String(el.value).trim() : ''; };
+  return rangeCheck([['水深', sv('#ev_d'), 0, 2000], ['流速', sv('#ev_v'), 0, 10],
+                     ['水温', sv('#ev_wt'), -5, 45],
+                     ['区間長', sv('#ev_len'), 0, 100000], ['川幅', sv('#ev_wid'), 0, 2000]]
+    .concat(OPT.substrate.map(k=>[k+'の割合', sv('#evp_'+SUBSTRATE_NO[k]), 0, 100]))
+    .concat(['left','right'].map(side=>{
+      const label = side==='left' ? '左岸' : '右岸';
+      return [label+'のカバー長', sv('#evc_'+side+'_len'), 0, 100000];
+    }))
+    .concat(['left','right'].reduce((a,side)=>{
+      const label = side==='left' ? '左岸' : '右岸';
+      [0,1,2].forEach(i=>a.push([label+'のカバーの割合', sv('#evc_'+side+'_'+i), 0, 100]));
+      return a;
+    }, [])));
+}
+/* おかしい値の理由を、画面に出しつづける（消えるお知らせでは見落とす） */
+function envShowError(err){
+  const box = $('#ev_err'); if(!box) return;
+  box.innerHTML = err
+    ? `<div class="warnbox">${esc(err)}<br>直すまで、この記録は保存されません。
+        打った内容は消えません。</div>`
+    : '';
+}
+function envAutoSave(u){
+  ENV_DIRTY = true;
+  if(ENV_AUTO_TIMER){ clearTimeout(ENV_AUTO_TIMER); ENV_AUTO_TIMER = null; }
+  ENV_AUTO_TIMER = setTimeout(()=>{ ENV_AUTO_TIMER = null; envAutoSaveNow(u); }, ENV_AUTO_MS);
+}
+/* すぐ保存する。記録を選び替える前や、画面を離れる前に使う */
+function envAutoSaveNow(u){
+  if(!u) return false;
+  // 画面に出ている入力欄の持ち主だけに書く。
+  // 選び替えた直後は ENV_SEL が先に変わるので、それで判断すると別の記録へ書いてしまう
+  if(u !== ENV_FORM) return false;
+  // 触っていない入力欄は書き戻さない
+  if(!ENV_DIRTY) return false;
+  if(!$('#ev_d')) return false;
+  const err = envItemError();
+  envShowError(err);
+  if(err) return false;                     // おかしい値があるうちは保存しない
+  return saveEnvItem(u, {quiet:true});
+}
+/* いま自動保存を待っている分があれば、先に書いてしまう。
+   返り値は「先へ進んでよいか」。
+   触っていない・書くものが無い → true（進んでよい）
+   おかしい値がある・保存に失敗した → false（進むと打った内容が消える） */
+function envFlush(){
+  if(ENV_AUTO_TIMER){ clearTimeout(ENV_AUTO_TIMER); ENV_AUTO_TIMER = null; }
+  // 付けられなかった写真があれば、もう一度試す。付くまでは先へ進めない
+  if(ENV_PHOTO_PENDING && !envPhotoTouch(ENV_PHOTO_PENDING)) return false;
+  if(!ENV_FORM || !ENV_DIRTY) return true;
+  return envAutoSaveNow(ENV_FORM);
+}
+/* 書けなかったときは、そこで止めて理由を伝える。
+   止めずに画面を作り直すと、「打った内容は消えません」と出したそばから消えてしまう */
+function envFlushOk(){
+  if(envFlush()) return true;
+  toast('打った内容をまだ保存できていません。赤い断りを直すか、その欄を空にしてください');
+  return false;
+}
+/* 写真だけを、待たずにその場で保存する。
+   600ミリ秒待つ形だと、撮った直後にアプリを閉じたとき記録に付かない。
+   owner は「この写真が誰のものか」。縮小に時間がかかっている間に別の記録へ移ると、
+   そちらへ写真が混ざるので、始めたときの相手と同じでなければ書かない */
+function envSavePhotosNow(owner){
+  const target = owner || ENV_FORM;
+  if(!target || target !== ENV_FORM) return false;
+  const u = DB.liveUnit(target); if(!u) return false;
+  const now = (SCREENS._photos||[]).slice();
+  const before = Array.isArray(u.photos) ? u.photos : [];
+  // すでに保存されているものと同じなら、書かなくてよい。
+  // ここで必ず書きに行くと、端末がいっぱいのときに
+  // 「足した写真を外しても先へ進めない」行き止まりになる
+  if(before.length === now.length
+     && before.every((p,i)=> p && now[i] && p.id === now[i].id)) return true;
+  u.photos = now;
+  return !!DB.put(DB.key.un, u);
+}
+
+function saveEnvItem(u, opt){
+  const quiet = !!(opt && opt.quiet);
+  const rec = DB.liveUnit(u); if(!rec) return false;
+  const err = envItemError();
+  if(err){ envShowError(err); if(!quiet) toast(err); return false; }
+
+  rec.habitat_type     = habMultiVal();
+  rec.substrate1       = segVal('envsub');
+  rec.gravel_condition = segVal('envgr');
+  rec.depth_rep_cm     = numVal('#ev_d');
+  rec.velocity_rep_ms  = numVal('#ev_v');
+  rec.water_temp_c     = numVal('#ev_wt');
+  rec.memo             = (($('#ev_memo')||{}).value||'').trim();
+  rec.photos           = (SCREENS._photos||[]).slice();
+  // 時刻の欄は、出ている画面から呼ばれたときだけ書く（消さないため）
+  if($('#ev_t1')) rec.survey_time_start = (($('#ev_t1')||{}).value||'').trim();
+  if($('#ev_t2')) rec.survey_time_end   = (($('#ev_t2')||{}).value||'').trim();
+  if(isLine(rec)){
+    const dir = segVal('envdir');
+    if(dir) rec.line_direction = dir;
+    rec.length_m_manual = numVal('#ev_len');
+    rec.width_m         = numVal('#ev_wid');
+  }
+
+  const pct = {};
+  OPT.substrate.forEach(k=>{ pct[k] = numVal('#evp_'+SUBSTRATE_NO[k]); });
+  rec.substrate_pct = pct;
+  // 割合を入れてあれば、多い順に代表と2番目を自動で入れる。
+  // 先に空にしておく。残したままだと、割合を全部消しても古い2番目が書き出しに出る
+  rec.substrate2 = '';
+  const rank = substrateRank({substrate_pct:pct});
+  if(rank.length){
+    rec.substrate1 = rank[0].name;
+    rec.substrate2 = rank[1] ? rank[1].name : '';
+  }
+  ['left','right'].forEach(side=>{
+    const arr = [];
+    [0,1,2].forEach(i=>{
+      const type = (($('#evc_'+side+'_'+i+'_t')||{}).value||'').trim();
+      const p = numVal('#evc_'+side+'_'+i);
+      if(type) arr.push({type, pct:p});
+    });
+    rec['cover_'+side] = arr;
+    rec['cover_'+side+'_length_m'] = numVal('#evc_'+side+'_len');
+  });
+
+  // 丸ごと置き換える。併合だとカバーを減らしたときに古い枠が残る
+  if(!DB.put(DB.key.un, rec)) return false;
+  envShowError('');
+  ENV_DIRTY = false;
+  if(quiet){
+    // 打っている最中なので、画面は作り直さない。地図の色だけ追いつかせる
+    envDrawAll(rec.survey_uuid);
+    const mark = $('#ev_saved');
+    if(mark) mark.textContent = '保存しました（' + timeValue() + '）';
+    return true;
+  }
+  toast('保存しました');
+  render();
+  return true;
+}
+
+/* ---------- 地図（物理環境） ---------- */
+let ENVMAP = null, ENVLAYER = [];
+/* 見ていた場所を、調査ごとに覚える（開き直すたびに全体へ戻らないように） */
+let ENV_VIEW = {}, ENV_MAP_SV = '';
+function envRememberView(svUuid){
+  if(!ENVMAP || !svUuid) return;
+  try{
+    const c = ENVMAP.getCenter();
+    ENV_VIEW[svUuid] = {lat:c.lat, lon:c.lng, zoom:ENVMAP.getZoom(),
+                        bearing: mapBearing(ENVMAP)};
+  }catch(e){}
+}
+/* 地図の大きさ（小さいまま入力欄も見るか、大きくして地図に集中するか） */
+function envMapBig(){ return !!prefs().env_map_big; }
+function envToggleBig(){ prefSet('env_map_big', !envMapBig()); render(); }
+
+/* まとめて消すために選んでいる最中。{sv, set} を持つ */
+let ENV_PICK = null;
+function envPickOn(){ return !!(ENV_PICK && ENV_PICK.set); }
+function envPickStart(svUuid){ ENV_PICK = {sv: svUuid, set: new Set()}; render(); }
+function envPickCancel(){ ENV_PICK = null; render(); }
+function envPickToggle(u){
+  if(!envPickOn()) return;
+  if(ENV_PICK.set.has(u)) ENV_PICK.set.delete(u); else ENV_PICK.set.add(u);
+  envPickSync();
+}
+/* 選んだ数と印を、その場で書き替える（画面ごと作り直すと地図がちらつく） */
+function envPickSync(){
+  const n = envPickOn() ? ENV_PICK.set.size : 0;
+  document.querySelectorAll('[data-seg="envsel"] button[data-u]').forEach(b=>{
+    b.classList.toggle('on', !!(envPickOn() && ENV_PICK.set.has(b.dataset.u)));
+  });
+  const btn = $('#envPickDel');
+  if(btn){
+    btn.textContent = n ? `選んだ ${n}件を消す` : '消すものを押してください';
+    btn.disabled = !n;
+  }
+}
+/* まとめて消す。1回の保存で書く。
+   1件ずつ書くと、途中で失敗したときに「消えたもの・残ったもの」が混ざる */
+function envPickDelete(svUuid){
+  if(!envPickOn() || !ENV_PICK.set.size) return;
+  if(!envFlushOk()) return;
+  const ids = Array.from(ENV_PICK.set);
+  const names = ids.map(u=>(DB.get(DB.key.un, u)||{}).name||'').filter(Boolean);
+  const list = names.slice(0,5).join('・') + (names.length>5 ? `ほか${names.length-5}件` : '');
+  if(!confirm(`${list} の ${ids.length}件を消します。中の記録も一緒に見えなくなります。\nよろしいですか？`)) return;
+  let all;
+  try{ all = DB.loadRaw(DB.key.un); }
+  catch(e){ toast('保存された記録を読み取れないため、消せませんでした'); return; }
+  const t = nowISO();
+  let n = 0;
+  all.forEach(x=>{
+    if(x && ENV_PICK.set.has(x.uuid) && x.survey_uuid===svUuid && !x.deleted_at){
+      x.deleted_at = t; x.updated_at = t; n++;
+    }
+  });
+  if(!n){ toast('消せるものがありませんでした'); ENV_PICK = null; render(); return; }
+  if(!DB.save(DB.key.un, all)){
+    toast('消せませんでした（端末の空き容量をご確認ください）');
+    return;                      // 何も変えない
+  }
+  ENV_PICK = null;
+  if(ENV_SEL && !DB.liveUnit(ENV_SEL)) ENV_SEL = null;
+  if(ENV_NEXT.line && !DB.liveUnit(ENV_NEXT.line)){
+    ENV_NEXT = {kind:ENV_NEXT.kind, auto:ENV_NEXT.auto, line:'', survey:ENV_NEXT.survey};
+  }
+  toast(`${n}件を消しました`);
+  render();
+}
+/* いま選んでいるもの・つなげる・案内の一行を、その場で書き替える。
+   画面ごと作り直すと地図がちらつくので、必要なところだけ直す */
+function envSyncNextUI(){
+  const bars = document.querySelectorAll('.mapicons a[data-k]');
+  bars.forEach(a=>{
+    const k = a.dataset.k;
+    if(k === 'compass') return;         // 方位は別の印
+    const on = (k==='chain') ? envChain() : (ENV_NEXT.kind === k);
+    a.classList.toggle('on', !!on);
+  });
+  const hint = $('#envHint');
+  if(hint){
+    const w = envKindWord(ENV_NEXT.kind);
+    let to = '';
+    if(ENV_NEXT.kind === 'V'){
+      // どのラインに付くのかを出す。つなげたときは、選ばれているものと違うことがある
+      const t = envBendTarget(ENV_NEXT.survey);
+      to = t ? `　<b>${esc(t.name||'')}</b> に足します`
+             : '　<span class="badge">どのラインに足すか決められません</span>';
+    }
+    hint.innerHTML = `つぎ：<b>${esc(w)}</b>${to}　地図をタップ／狙いの印で置けます`
+      + (ENV_NEXT.auto ? '（始まり→終わりで交互）' : '（同じものが続きます）');
+  }
+  const box = $('#envPending');
+  if(box){
+    const p = envPendingLine(ENV_NEXT.survey);
+    box.innerHTML = p ? `<div class="warnbox">${esc(p.name)} は始まりだけです。`
+      + `ラインの終わりを置いてください。</div>` : '';
+  }
+  // 地図のボタンが出ていなければ、押した印は付け替えられない。
+  // 呼んだ側が画面を作り直せるよう、false を返す
+  return !!bars.length;
+}
+/* 置いてあるものの点を全部集める（全体が入るように動かすため） */
+function envAllPoints(svUuid){
+  const pts = [];
+  DB.unitsOf(svUuid).forEach(x=>{
+    if(isMesh(x)){ const g = meshGeom(x); if(g) g.corners.forEach(p=>pts.push(p)); return; }
+    const a = ptOf(x.latitude, x.longitude); if(a) pts.push(a);
+    linePath(x).forEach(p=>pts.push(p));
+  });
+  return pts;
+}
+/* 地図をはじめて開いたときの、まん中 */
+function envMapCenter(sv, cur){
+  if(cur){
+    const p = isLine(cur) ? (linePt(cur,'start') || linePt(cur,'end'))
+                          : ptOf(cur.latitude, cur.longitude);
+    if(p) return p;
+  }
+  const list = DB.unitsOf(sv.uuid).filter(x=>!isMesh(x));
+  for(let i=list.length-1;i>=0;i--){
+    const x = list[i];
+    const p = isLine(x) ? (linePt(x,'start') || linePt(x,'end'))
+                        : ptOf(x.latitude, x.longitude);
+    if(p) return p;
+  }
+  const r = DB.reddsOf(sv.uuid).map(x=>ptOf(x.latitude, x.longitude)).filter(Boolean)[0];
+  if(r) return r;
+  if(lastFix) return [lastFix.lat, lastFix.lon];
+  return [43.5, 142.5];
+}
+function closeEnvMap(){
+  // 片付ける前に、見ている場所を覚えておく
+  if(ENV_MAP_SV && ENVMAP){ try{ envRememberView(ENV_MAP_SV); }catch(e){} }
+  ENV_MAP_SV = '';
+  if(ENVMAP){ try{ ENVMAP.remove(); }catch(e){} }
+  ENVMAP = null; ENVLAYER = []; MESHLAYER = []; MEMARK = [];
+  compassStop();          // 向きの追いかけを、地図と一緒に止める
+  if(ENV_GPS_TIMER){ clearInterval(ENV_GPS_TIMER); ENV_GPS_TIMER = null; }
+  // 入力欄の持ち主を手放す。手放さないと、産卵床やメモの画面で足した写真が
+  // 直前に開いていた物理環境の記録へ書き込まれてしまう。
+  // 画面を作り直したあと、物理環境の画面なら onMount で付け直される
+  ENV_FORM = ''; ENV_DIRTY = false;
+}
+// 地図に置く印。文字を入れた丸（画像を使わないので同梱ファイルが増えない）
+function envBadge(txt, color, size, strong){
+  const fs = size <= 24 ? 10 : 12;
+  return L.divIcon({ className:'', iconSize:[size,size], iconAnchor:[size/2,size/2],
+    html:`<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};
+      border:${strong?3:2}px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4);color:#fff;
+      font-size:${fs}px;font-weight:700;display:flex;align-items:center;
+      justify-content:center;overflow:hidden">${esc(txt||'')}</div>` });
+}
+function envDrawAll(svUuid){
+  if(!ENVMAP) return;
+  ENVLAYER.forEach(l=>{ try{ ENVMAP.removeLayer(l); }catch(e){} });
+  ENVLAYER = [];
+  const range = envColorRange(svUuid);
+  DB.unitsOf(svUuid).filter(x=>!isMesh(x)).forEach(x=>{
+    const on = x.uuid === ENV_SEL;
+    const byCol = envColorOf(x, range);
+    const col = byCol || (on ? '#e0a030' : (isLine(x) ? '#4aa3dd' : '#4ec38a'));
+    const put = (pt, txt)=>{
+      ENVLAYER.push(L.marker(pt, {icon:envBadge(txt, col, on?30:24, on),
+        zIndexOffset: on ? 1000 : 0})
+        .on('click', e=>{ L.DomEvent.stop(e); envSelect(x.uuid); }).addTo(ENVMAP));
+    };
+    if(isLine(x)){
+      const a = linePt(x,'start'), b = linePt(x,'end');
+      if(a) put(a, x.name||'');
+      if(b) put(b, '終');
+      lineVias(x).forEach(v=>{
+        ENVLAYER.push(L.circleMarker(v, {radius:on?6:4, color:'#fff', weight:2,
+          fillColor:col, fillOpacity:1, bubblingMouseEvents:false})
+          .on('click', e=>{ L.DomEvent.stop(e); envSelect(x.uuid); }).addTo(ENVMAP));
+      });
+      const path = linePath(x);
+      if(path.length >= 2) ENVLAYER.push(L.polyline(path,
+        {color:col, weight:on?6:4, opacity:.9, bubblingMouseEvents:false})
+        .on('click', e=>{ L.DomEvent.stop(e); envSelect(x.uuid); }).addTo(ENVMAP));
+    }else{
+      const pt = ptOf(x.latitude, x.longitude);
+      if(pt) put(pt, x.name||'');
+    }
+  });
+  // ここでは地図を動かさない。
+  // 置くたびに全体表示へ戻ると、寄って作業しているときに邪魔になる
+}
+/* 全体が入るように動かす。押したときだけ */
+function envFitAll(svUuid){
+  if(!ENVMAP) return;
+  const pts = envAllPoints(svUuid);
+  if(!pts.length){ toast('まだ何も置かれていません'); return; }
+  try{ ENVMAP.fitBounds(L.latLngBounds(pts).pad(0.3), {animate:false}); }catch(e){}
+  envRememberView(svUuid);
+}
+/* 指では、すでにある点とまったく同じ場所を狙えない。
+   すぐ近く（指1本ぶん）に置いてあるものがあれば、そこへぴったり重ねる。
+   もっと寄れば、この幅は実際の距離としては小さくなる */
+const ENV_SNAP_PX = 18;
+function envSnapTo(svUuid, lat, lon, except){
+  if(!ENVMAP || typeof ENVMAP.latLngToContainerPoint !== 'function') return null;
+  let here; try{ here = ENVMAP.latLngToContainerPoint([lat, lon]); }catch(e){ return null; }
+  let near = null, dist = ENV_SNAP_PX;
+  DB.unitsOf(svUuid).filter(x=>!isMesh(x)).forEach(x=>{
+    if(except && x.uuid === except) return;
+    const corners = [];
+    if(isLine(x)){
+      const a = linePt(x,'start'), b = linePt(x,'end');
+      if(a) corners.push({pt:a, w:'始点'});
+      if(b) corners.push({pt:b, w:'終点'});
+    }else{
+      const pt = ptOf(x.latitude, x.longitude);
+      if(pt) corners.push({pt, w:''});
+    }
+    corners.forEach(c=>{
+      let d;
+      try{ d = here.distanceTo(ENVMAP.latLngToContainerPoint(c.pt)); }catch(e){ return; }
+      if(d <= dist){ dist = d; near = {lat:c.pt[0], lon:c.pt[1], name:x.name||'', w:c.w}; }
+    });
+  });
+  return near;
+}
+function envSnapTell(sn){
+  if(!sn) return;
+  toast(`${sn.name}${sn.w ? 'の'+sn.w : ''} に重ねました`);
+}
+
+/* いまの種類（点／ラインの始まり・終わり／曲がり）で1件足す。
+   source は '地図' か 'GPS'（呼ぶ側が必ず渡す。中で推測すると、位置の「決め方」が化ける）。
+   targetUuid は、現在地を待ちはじめる前に決めたつなぎ先。
+   待っている間に人が別のラインを選んでも、そちらへ書かれないようにする */
+function envAddAt(svUuid, lat, lon, acc, source, targetUuid){
+  if(!DB.survey(svUuid)) return null;
+  if(!envFlushOk()) return null;   // いま打っている分を、置く前に書いてしまう
+  const la = +(+lat).toFixed(6), lo = +(+lon).toFixed(6);
+  if(!validPt([la, lo])){ toast('位置がおかしいので追加できません'); return null; }
+  const k = ENV_NEXT.survey===svUuid ? ENV_NEXT.kind : 'P';
+  const accV = (acc===undefined || acc===null || acc==='') ? '' : Math.round(acc);
+
+  if(k === 'V') return envAddBend(svUuid, la, lo, acc, targetUuid);
+
+  if(k === 'LE'){
+    // 始まりだけのラインにつなぐ。無ければ足さない（勝手に線を作らない）
+    let x;
+    if(targetUuid){
+      const t = DB.liveUnit(targetUuid);
+      x = (t && t.survey_uuid===svUuid && isLine(t)
+           && linePt(t,'start') && !linePt(t,'end')) ? t : null;
+      if(!x){ toast('現在地を取っている間に、つなぐ相手のラインが変わったので置いていません'); return null; }
+    }else{
+      x = envLineTarget(svUuid);
+    }
+    if(!x){
+      const half = DB.unitsOf(svUuid).filter(y=>isLine(y)
+        && linePt(y,'start') && !linePt(y,'end') && sameReach(y, envReachOf(svUuid)));
+      toast(half.length > 1
+        ? `終わっていないラインが${half.length}本あります。どれにつなぐか、下のボタンで先に選んでください`
+        : 'つなぐラインがありません。先に「ラインの始まり」を置いてください');
+      return null;
+    }
+    const prevTime = x.survey_time_end || '', prevEnded = x.ended_at || '';
+    x.line_end_lat = la; x.line_end_lon = lo; x.line_end_acc = accV;
+    if(!x.survey_time_end) x.survey_time_end = timeValue();
+    x.ended_at = x.ended_at || nowISO();
+
+    // つなげる：閉じた場所を、次のラインの始まりにする。
+    // 「閉じる」と「次を始める」を別々に保存すると、片方だけ成功したときに
+    // 閉じたのに次が始まっていない半端な状態が残る。1回の保存でまとめて書く
+    const nx = envChain() ? Object.assign(newUnit(svUuid, 'ライン', x.reach_uuid||''), {
+      line_direction: x.line_direction || '上流→下流',
+      line_start_lat: la, line_start_lon: lo, line_start_acc: accV,
+      chained_from: x.uuid,
+    }) : null;
+
+    let all;
+    try{ all = DB.loadRaw(DB.key.un); }
+    catch(e){ toast('保存された記録を読み取れないため、置けませんでした'); return null; }
+    const i = all.findIndex(y=>y.uuid===x.uuid);
+    if(i < 0){ toast('この区間が見つかりません'); return null; }
+    x.updated_at = nowISO();
+    all[i] = x;
+    if(nx){ nx.created_at = nowISO(); nx.updated_at = nx.created_at; all.push(nx); }
+    if(!DB.save(DB.key.un, all)) return null;   // 保存できていないので、何も変えない
+
+    envHistPush({type:'終わり', sv:svUuid, uuid:x.uuid, name:x.name,
+      next: nx ? nx.uuid : '', prevTime, prevEnded});
+    envMarkPlaced();
+    envAdvance('LE');
+    let more = '';
+    if(nx){
+      // 交互にするかどうかは、人が決めたままにする（勝手に戻さない）
+      ENV_NEXT = {kind:'LE', auto:ENV_NEXT.auto, line:nx.uuid, survey:svUuid};
+      more = `　つづけて ${nx.name} が始まりました`;
+    }
+    ENV_SEL = x.uuid;          // いま閉じたものを選ぶ（前の記録に書き込ませない）
+    toast(`${x.name} の終わりを置きました（${fmtDist(lineDist(x))}）${more}`);
+    return x;
+  }
+
+  const rec = newUnit(svUuid, k==='LS' ? 'ライン' : '点');
+  if(k === 'LS'){
+    rec.line_start_lat = la; rec.line_start_lon = lo; rec.line_start_acc = accV;
+  }else{
+    rec.latitude = la; rec.longitude = lo; rec.gps_accuracy = accV;
+    rec.position_source = source || '地図';
+    rec.survey_time_end = rec.survey_time_start;   // 点は幅を持たない
+    rec.ended_at = nowISO();
+  }
+  if(!DB.put(DB.key.un, rec)){ toast('置けませんでした（端末の空き容量をご確認ください）'); return null; }
+  envHistPush({type:'置いた', sv:svUuid, uuid:rec.uuid, name:rec.name});
+  envMarkPlaced();
+  envAdvance(k, rec.uuid);
+  // 置いたものをそのまま選ぶ。選ばないと、前の記録の入力欄が出たままになり、
+  // 新しい点のつもりで前の記録に書き込んでしまう
+  ENV_SEL = rec.uuid;
+  toast(`${rec.name} を置きました`);
+  return rec;
+}
+/* いまいる場所に足す */
+function envAddHere(svUuid){
+  if(!envFlushOk()) return;
+  toast('現在地を取っています…');
+  // どのラインに足すかは、いま決めておく。待っている間に選び直されても、
+  // 返ってきた座標が別のラインへ行かないようにする
+  const t = ENV_NEXT.kind === 'LE' ? envLineTarget(svUuid)
+          : ENV_NEXT.kind === 'V'  ? envBendTarget(svUuid) : null;
+  const tu = t ? t.uuid : '';
+  getFixOnce(f=>{
+    if(!f){ toast('現在地を取れませんでした。地図をタップしても置けます'); return; }
+    if(f.acc > GPS_MAX_ACC){
+      toast(`いまの位置は ±${Math.round(f.acc)}m と粗いので置いていません。地図をタップしてください`);
+      return;
+    }
+    if(envAddAt(svUuid, f.lat, f.lon, f.acc, 'GPS', tu)) render();
+  });
+}
+function envSelect(u){
+  if(ENV_SEL === u) return;
+  if(!envFlushOk()) return;   // 打ちかけを書けないなら、切り替えない
+  ENV_SEL = u;
+  envMarkSelected();     // 人が選んだ。曲がりの行き先は、これを先に見る
+  render();
+}
+function envDelete(u){
+  const rec = DB.get(DB.key.un, u); if(!rec) return;
+  if(!confirm(`${rec.name||''} を消します。よろしいですか？`)) return;
+  // 消す前に、打ちかけを先に書く。書けないなら消さない
+  // （600ミリ秒待ちの最中に消すと、直前の入力が失われる）
+  if(!envFlushOk()) return;
+  if(ENV_AUTO_TIMER){ clearTimeout(ENV_AUTO_TIMER); ENV_AUTO_TIMER = null; }
+  if(DB.softDelete(DB.key.un, u)){
+    if(ENV_SEL === u) ENV_SEL = null;
+    if(ENV_NEXT.line === u){
+      ENV_NEXT = {kind:ENV_NEXT.kind, auto:ENV_NEXT.auto, line:'', survey:ENV_NEXT.survey};
+    }
+    ENV_FORM = ''; ENV_DIRTY = false;
+    toast('ゴミ箱へ入れました'); render();
+  }
+}
+/* 位置を書き替える。which は '点' / '始点' / '終点' */
+function envMoveTo(u, which, la, lo, acc, source, undoing){
+  // 動かし始めたあとに打った分も、先に書いてしまう。
+  // 書けないまま動かすと、このあとの画面の作り直しで入力が消える
+  if(!envFlushOk()) return false;
+  const rec = DB.liveUnit(u); if(!rec) return false;
+  const a = (acc===undefined || acc===null || acc==='') ? '' : Math.round(acc);
+  // 動かす前の場所を控える（1つ戻すため）
+  const prev = which === '始点'
+      ? {lat:rec.line_start_lat, lon:rec.line_start_lon, acc:rec.line_start_acc, src:''}
+    : which === '終点'
+      ? {lat:rec.line_end_lat, lon:rec.line_end_lon, acc:rec.line_end_acc, src:''}
+      : {lat:rec.latitude, lon:rec.longitude, acc:rec.gps_accuracy, src:rec.position_source||''};
+  if(which === '始点'){
+    rec.line_start_lat = la; rec.line_start_lon = lo; rec.line_start_acc = a;
+  }else if(which === '終点'){
+    rec.line_end_lat = la; rec.line_end_lon = lo; rec.line_end_acc = a;
+    if(!rec.survey_time_end) rec.survey_time_end = timeValue();
+  }else{
+    rec.latitude = la; rec.longitude = lo; rec.gps_accuracy = a;
+    // 位置を動かす処理の中で決め方を推測しない。呼ぶ側が渡したものだけ書く
+    if(source) rec.position_source = source;
+  }
+  if(!DB.put(DB.key.un, rec)){
+    toast('直せませんでした（端末の空き容量をご確認ください）');
+    return false;
+  }
+  ENV_MOVE = null;
+  if(!undoing) envHistPush({type:'動かした', sv:rec.survey_uuid, uuid:u, which, name:rec.name, prev});
+  return true;
+}
+function envMoveStart(u, which){
+  if(!envFlushOk()) return;
+  if(envMoveOn(u, which)){ ENV_MOVE = null; toast('直すのをやめました'); render(); return; }
+  ENV_MOVE = {uuid:u, which:which};
+  toast(`地図をタップすると、${which}をそこへ動かします（もう一度押すとやめます）`);
+  render();
+}
+/* いまいる場所へ直す */
+function envGrabHere(u, which){
+  if(!envFlushOk()) return;
+  toast('現在地を取っています…');
+  getFixOnce(f=>{
+    if(!f){ toast('現在地を取れませんでした。地図で直すこともできます'); return; }
+    if(f.acc > GPS_MAX_ACC){
+      toast(`いまの位置は ±${Math.round(f.acc)}m と粗いので直していません。地図で直してください`);
+      return;
+    }
+    if(envMoveTo(u, which, f.lat, f.lon, f.acc, 'GPS')) render();
+  });
+}
+
+/* ---------- 物理環境の地図（主戦場・魚類調査アプリと同じ作り） ---------- */
+SCREENS.envMap = (argStr)=>{
+  const a = (()=>{ try{ return JSON.parse(argStr||'{}'); }catch(e){ return {}; } })();
+  const svUuid = a.sv;
+  const s = DB.survey(svUuid); if(!s) return SCREENS.home();
+  envUseSurvey(svUuid);        // 別の調査から持ち越さない
+  // メッシュの範囲は位置の持ち方が違うので、点・線の並びに混ぜない。
+  // 混ぜると、位置の無い点として並んでしまう
+  const meshes = DB.unitsOf(svUuid).filter(isMesh);
+  const list = DB.unitsOf(svUuid).filter(x=>!isMesh(x));
+  if(a.record && list.some(x=>x.uuid===a.record)) ENV_SEL = a.record;
+  // 選んでいるものが消えていたら、いちばん新しいものにする
+  if(ENV_SEL && !list.some(x=>x.uuid===ENV_SEL)) ENV_SEL = null;
+  if(!ENV_SEL && list.length) ENV_SEL = list[list.length-1].uuid;
+  const cur = ENV_SEL ? list.find(x=>x.uuid===ENV_SEL) : null;
+
+  const chip = (x)=>{
+    const half = (isLine(x) && !linePt(x,'end'));
+    const picking = envPickOn();
+    const on = picking ? ENV_PICK.set.has(x.uuid) : (x.uuid===ENV_SEL);
+    const act = picking ? `envPickToggle('${x.uuid}')` : `envSelect('${x.uuid}')`;
+    return `<button type="button" data-u="${x.uuid}" class="${on?'on':''}"
+      onclick="${act}">${picking && on ? '&check; ' : ''}${esc(x.name||'')}${half?'…':''}</button>`;
+  };
+
+  return {
+    title:'物理環境（地図で記録）',
+    sub:[{text:s.name||s.river_name||''},
+         {text:s.status||'未開始', cls: s.status==='調査中'?'ok':''},
+         {text:`${list.length}件`}],
+    html:`
+      ${baseMapButtonsHtml()}
+      <div id="envmap" class="map"
+        style="height:${envMapBig()?'80vh':'46vh'};min-height:260px"></div>
+
+      ${foldHtml('envcolorfold', '色分け',
+        `<span class="tiny muted">${esc(envColorBy())}</span>`, `
+        <div onclick="setTimeout(()=>envSetColorBy(segVal('envcolor')||'なし'),0)">
+          ${segHtml('envcolor', ENV_COLOR_BY, envColorBy())}</div>
+        ${envLegendHtml(svUuid)}
+        <div class="tiny muted">選んだ項目で、地図の点と線の色が変わります。</div>`, false)}
+
+      <div class="tiny muted" id="envHint"></div>
+      <div class="tiny muted" id="envGps"></div>
+      <div id="envPending"></div>
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">メッシュの範囲</div>
+        ${meshes.map(x=>`<button class="btn ghost small"
+          style="width:auto;padding:4px 10px;margin:0 6px 6px 0"
+          onclick="nav('mesh','${x.uuid}')">${esc(x.name||'')}（${meshCellsOf(x.uuid).length}マス）</button>`).join('')}
+        <div><button class="btn ghost small" style="width:auto;padding:4px 10px"
+          onclick="meshCreate('${svUuid}')">メッシュの範囲を作る</button></div>
+        <div class="tiny muted">メッシュは別の画面で記録します。マスごとに水深・流速・河床材料を入れられます。</div>
+      </div>
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">記録</div>
+        ${list.length
+          ? `<div class="seg" data-seg="envsel">${list.map(chip).join('')}</div>
+             ${envPickOn() ? `
+               <button class="btn ghost small" id="envPickDel" style="margin-top:8px"
+                 onclick="envPickDelete('${svUuid}')">消すものを押してください</button>
+               <button class="btn ghost small" onclick="envPickCancel()">やめる</button>
+               <div class="tiny muted">消すものを押して選んでください。
+                 選んでいるあいだは、新しく置けません。</div>`
+             : `<button class="btn ghost small" style="width:auto;padding:4px 10px;margin-top:8px"
+                 onclick="envPickStart('${svUuid}')">選んで消す</button>`}`
+          : '<div class="tiny muted">まだありません。地図をタップするか、地図の右下の狙いの印で置いてください。</div>'}
+      </div>
+
+      ${envItemFormHtml(cur, s)}
+
+      <div class="sp"></div>
+      <div class="card">
+        <div class="row">
+          <div class="grow"><div class="tiny muted">いま現場にいるとき</div>
+            <div>${s.status==='調査中' ? '記録中です' : '「はじめる」で時刻が入ります'}</div></div>
+          ${s.status==='調査中'
+            ? `<button class="btn ghost small" style="width:auto;margin:0;padding:6px 12px"
+                 onclick="finishSurvey('${svUuid}')">終える</button>`
+            : `<button class="btn ghost small" style="width:auto;margin:0;padding:6px 12px"
+                 onclick="startSurvey('${svUuid}')">はじめる</button>`}
+        </div>
+      </div>
+      <button class="btn" onclick="nav('units','${svUuid}')">物理環境の一覧</button>
+      <button class="btn" onclick="nav('notes','${svUuid}')">メモ（${DB.notesOf(svUuid).length}）</button>
+      <button class="btn" onclick="nav('exportHub','${svUuid}')">書き出す</button>`,
+    onMount(){
+      startGps();
+      const box = $('#envGps');
+      if(box) ENV_GPS_TIMER = setInterval(()=>{
+        if(!$('#envGps')){ clearInterval(ENV_GPS_TIMER); ENV_GPS_TIMER=null; return; }
+        $('#envGps').textContent = gpsHint();
+        drawMe(ENVMAP);          // いる場所を追いかける
+      }, 2000);
+
+      if(ENV_PICK && ENV_PICK.sv !== svUuid) ENV_PICK = null;
+      if(ENV_MOVE && !DB.liveUnit(ENV_MOVE.uuid)) ENV_MOVE = null;
+      envHistClear(svUuid);       // ほかの調査の分は持ち越さない
+      envItemFormWire(cur);
+      envSyncNextUI();            // 案内は、地図が出ていなくても書ける
+
+      // 地図。前に見ていた場所があればそこへ戻す（勝手に動かさない）
+      if(typeof L==='undefined' || !$('#envmap')) return;
+      const v = ENV_VIEW[svUuid];
+      const c = v ? [v.lat, v.lon] : envMapCenter(s, cur);
+      ENVMAP = makeMap('envmap', c, v ? v.zoom : 17, v ? v.bearing : 0);
+      const map = ENVMAP;
+      if(!map) return;
+      applyBaseMap(map, baseMapName());
+      addLocateControl(map);
+      addMapIconBar(map, [
+        {icon: envMapBig()?'shrink':'expand',
+         title: envMapBig()?'地図を小さく':'地図を大きく', tap:()=>envToggleBig()},
+        {icon:'fitAll', title:'置いたものが全部入るように', tap:()=>envFitAll(svUuid)},
+      ], 'topright');
+      // 足すものは、押しやすい下側に置く
+      addMapIconBar(map, [
+        {icon:'point',     key:'P',  title:'つぎはポイント', tap:()=>envSetKind('P')},
+        {icon:'lineStart', key:'LS', title:'つぎはラインの始まり', tap:()=>envSetKind('LS')},
+        {icon:'lineEnd',   key:'LE', title:'つぎはラインの終わり', tap:()=>envSetKind('LE')},
+        {icon:'lineBend',  key:'V',  title:'つぎはラインの曲がり', tap:()=>envSetKind('V')},
+      ], 'bottomleft');
+      addMapIconBar(map, [
+        {icon:'addHere', title:'いまいる場所に足す', tap:()=>envAddHere(svUuid)},
+        {icon:'chain',   key:'chain', title:'ラインをつなげる／つなげない',
+         tap:()=>envSetChain(!envChain())},
+        {icon:'undo', title:'1つ戻す（直前に置いた・動かした分）',
+         tap:()=>{ if(envUndo(svUuid)) render(); }},
+      ], 'bottomright');
+      envSyncNextUI();
+      envDrawAll(svUuid);
+      drawMe(map);              // 開いた時点でも、いる場所を出す
+      ENV_MAP_SV = svUuid;      // 片付ける直前に、見ている場所を覚えるため
+      map.on('click', e=>{
+        // 直す待ちのときは、新しく置かずに動かす
+        if(ENV_MOVE){
+          const m = ENV_MOVE;
+          // すぐ近くに置いてあるものがあれば、そこへ重ねる
+          const sn = envSnapTo(svUuid, e.latlng.lat, e.latlng.lng, m.uuid);
+          const la = sn ? sn.lat : e.latlng.lat, lo = sn ? sn.lon : e.latlng.lng;
+          if(envMoveTo(m.uuid, m.which, la, lo, '', '地図')){ envSnapTell(sn); render(); }
+          return;
+        }
+        if(envPickOn()){ toast('消すものを選んでいます。先に「やめる」を押してください'); return; }
+        const sn = envSnapTo(svUuid, e.latlng.lat, e.latlng.lng, null);
+        const la = sn ? sn.lat : e.latlng.lat, lo = sn ? sn.lon : e.latlng.lng;
+        if(envAddAt(svUuid, la, lo, '', '地図')){ envSnapTell(sn); render(); }
+      });
+      // はじめて開いたときだけ、置いてあるものが入るようにする
+      if(!v){
+        const pts = envAllPoints(svUuid);
+        if(pts.length>1){
+          try{ map.fitBounds(L.latLngBounds(pts).pad(0.3), {animate:false}); }catch(e){}
+        }
+        envRememberView(svUuid);
+      }
+      setTimeout(()=>{ if(ENVMAP) ENVMAP.invalidateSize(); }, 60);
+    }
+  };
+};
+
+/* ---------- 測点を続けて打つ ---------- */
+function strVal(sel){ const el=$(sel); return el ? String(el.value).trim() : ''; }
+/* 1点ずつ打って、押すたびに足していく。欄は空になり、そのまま次の点を打てる */
+function addEnvPoint(u){
+  if(!DB.liveUnit(u)) return;
+  const d = numVal('#p_d'), v = numVal('#p_v');
+  if(d==='' && v===''){ toast('水深か流速のどちらかは入れてください'); return; }
+  const err = rangeCheck([['水深', strVal('#p_d'), 0, 2000], ['流速', strVal('#p_v'), 0, 10]]);
+  if(err){ toast(err); return; }
+
+  const pt = {depth_cm:d, velocity_ms:v, substrate:segVal('p_sub'), note:strVal('#p_note')};
+  // いま立っている場所を添える。
+  // 古い測位や粗すぎる位置は付けない（前の測点の場所が付くほうが困る）
+  const fix = freshFix(20000);
+  let msg = '';
+  if(fix && fix.acc<=GPS_MAX_ACC){
+    pt.latitude = +fix.lat.toFixed(6);
+    pt.longitude = +fix.lon.toFixed(6);
+    pt.gps_accuracy = Math.round(fix.acc);
+    pt.position_source = 'GPS';
+  }else{
+    msg = fix ? '（位置は粗すぎるので付けていません）' : '（位置が取れていません）';
+  }
+  const rec = DB.liveUnit(u); if(!rec) return;
+  const pts = envPoints(rec).slice();
+  pts.push(pt);
+  rec.env_points = pts;
+  if(!DB.put(DB.key.un, rec)) return;      // 保存できていないので欄も消さない
+  toast(`${pts.length}点目${msg}`);
+  render();
+}
+function delEnvPoint(u, i){
+  const rec = DB.liveUnit(u); if(!rec) return;
+  const pts = envPoints(rec).slice();
+  if(i<0 || i>=pts.length) return;
+  if(!confirm(`${i+1}点目を消します。よろしいですか？`)) return;
+  const rec2 = DB.liveUnit(u); if(!rec2) return;
+  const pts2 = envPoints(rec2).slice();
+  pts2.splice(i,1);
+  rec2.env_points = pts2;
+  if(DB.put(DB.key.un, rec2)){ toast('消しました'); render(); }
+}
+
+/* ============================================================
+   メッシュ（面で測る）
+   四隅を押さえて、縦と横の間隔からマスを作り、1マスずつ入れていく。
+   マスの位置は四隅から計算で出す（1マスずつGPSを取ると格子から外れる）。
+   ============================================================ */
+let MESHLAYER = [];
+let MESH_CORNERS = [];      // いま画面で押さえている四隅（決めるまでは記録に書かない）
+
+// 「なし」も実在する選択肢として受け取る（カバーの「なし」を空欄と取り違えないため）
+function segRaw(field){
+  const on = document.querySelector(`[data-seg="${field}"] button.on`);
+  return on ? on.textContent : '';
+}
+function setSegRaw(field, value){
+  const btns = $$(`[data-seg="${field}"] button`);
+  const b = btns.find(x=>x.textContent===(value||'なし'));
+  if(b){ pickSeg(b); return true; }
+  return false;
+}
+// いまの画面を、別の画面で置き換える（積み上げない）
+function navReplace(name, arg){
+  if(!envFlushOk()) return;
+  STACK[STACK.length-1] = {name, arg};
+  render();
+}
+function meshDot(color, size){
+  return L.divIcon({ className:'', iconSize:[size,size], iconAnchor:[size/2,size/2],
+    html:`<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};
+      border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4)"></div>` });
+}
+
+/* 物理環境の地図から、メッシュの範囲を作る */
+function meshCreate(svUuid){
+  if(!DB.survey(svUuid)) return null;
+  // 打ちかけを書けないうちは作らない。作ってから画面だけ止まると、
+  // 押すたびに空の範囲が増えていく
+  if(!envFlushOk()) return null;
+  const rec = newUnit(svUuid, 'メッシュ');
+  const pr = prefs();
+  if(pr.mesh_row_m!==undefined) rec.mesh_row_m = pr.mesh_row_m;
+  if(pr.mesh_col_m!==undefined) rec.mesh_col_m = pr.mesh_col_m;
+  if(!DB.put(DB.key.un, rec)){ toast('作れませんでした（端末の空き容量をご確認ください）'); return null; }
+  toast(`${rec.name} を作りました。四隅を押さえてください`);
+  nav('meshSetup', rec.uuid);
+  return rec;
+}
+
+/* ---------- 範囲と格子を決める ---------- */
+SCREENS.meshSetup = (u)=>{
+  const rec = DB.liveUnit(u); if(!rec) return SCREENS.home();
+  const c = meshCorners(rec);
+  const pr = prefs();
+  const gapDef = rec.mesh_row_m!==undefined && rec.mesh_row_m!=='' ? rec.mesh_row_m
+               : (pr.mesh_row_m!==undefined ? pr.mesh_row_m : '');
+  const colDef = rec.mesh_col_m!==undefined && rec.mesh_col_m!=='' ? rec.mesh_col_m
+               : (pr.mesh_col_m!==undefined ? pr.mesh_col_m : '');
+  const cells = meshCellsOf(u).length;
+  return {
+    title:'範囲と格子',
+    sub:[{text:rec.name||''},{text:`${cells}マス入力済み`}],
+    html:`
+      <div class="card">
+        <div class="tiny muted">川の四隅を、この順で押さえてください。地図をタップしても決められます。</div>
+        <div class="tablewrap"><table><tbody>
+          ${['上流の左岸','上流の右岸','下流の右岸','下流の左岸'].map((nm,i)=>`
+            <tr>
+              <td class="muted">${i+1}. ${nm}</td>
+              <td class="num small" id="mc_${i}">${c ? esc(c[i][0].toFixed(6)+', '+c[i][1].toFixed(6))
+                : '<span class="badge">まだ</span>'}</td>
+              <td style="text-align:right">
+                <button class="btn ghost small" style="width:auto;margin:0;padding:4px 10px"
+                  onclick="grabMeshCorner(${i})">いまここ</button></td>
+            </tr>`).join('')}
+        </tbody></table></div>
+        <div class="tiny muted" id="mesh_gps"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn ghost small" style="width:auto;padding:4px 10px"
+            onclick="undoMeshCorner()">1つ戻す</button>
+          <button class="btn ghost small" style="width:auto;padding:4px 10px"
+            onclick="clearMeshCorners()">四隅を消してやり直す</button>
+        </div>
+      </div>
+
+      ${baseMapButtonsHtml()}
+      <div id="meshmap" class="map" style="height:40vh;min-height:240px"></div>
+      <div class="tiny muted" style="margin-top:8px">地図をタップすると、1→2→3→4 の順で四隅が決まります。</div>
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">格子の細かさ</div>
+        <label class="field"><span class="lab">縦の間隔（m）</span>
+          <input id="mesh_gap" inputmode="decimal" value="${esc(gapDef)}"
+            oninput="showMeshPlan()" placeholder="例）5"></label>
+        <label class="field"><span class="lab">横の間隔（m）</span>
+          <input id="mesh_colm" inputmode="decimal" value="${esc(colDef)}"
+            oninput="showMeshPlan()" placeholder="例）5"></label>
+        <div class="tiny muted" id="mesh_plan" style="margin-top:8px"></div>
+        <div class="tiny muted">前に使った値を初期値にしています。現場に合わせて変えてください。<br>
+          割り切れない分は、全部のマスに均して少しずつ伸び縮みします
+          （端にだけ半端なマスは作りません）。</div>
+      </div>
+
+      <button class="btn primary" onclick="saveMesh('${u}')">この格子で決める</button>
+      ${cells ? `<div class="warnbox">すでに <b>${cells}マス</b> 入力しています。
+        四隅や細かさを変えると、同じ「3行2列」でも川の別の場所を指すことになります。
+        そのため<b>前の格子で入れたマスは、新しい格子の一覧・まとめには混ぜません</b>。
+        記録は消えません。CSVには「前の格子のマス」として出ます。</div>` : ''}`,
+    onMount(){
+      startGps();
+      MESH_CORNERS = (meshCorners(rec)||[]).slice();
+      showMeshPlan();
+      const box = $('#mesh_gps');
+      if(box) ENV_GPS_TIMER = setInterval(()=>{
+        if(!$('#mesh_gps')){ clearInterval(ENV_GPS_TIMER); ENV_GPS_TIMER=null; return; }
+        $('#mesh_gps').textContent = gpsHint();
+      }, 2000);
+      if(typeof L==='undefined' || !$('#meshmap')) return;
+      const first = MESH_CORNERS[0] || (lastFix ? [lastFix.lat, lastFix.lon] : null);
+      ENVMAP = makeMap('meshmap', first || [43.5,142.5], first ? 17 : 9, 0);
+      if(!ENVMAP) return;
+      applyBaseMap(ENVMAP, baseMapName());
+      addLocateControl(ENVMAP);
+      drawMeshSetup();
+      drawMe(ENVMAP);
+      ENVMAP.on('click', ev=>{
+        const list = MESH_CORNERS;
+        if(list.length>=4) list.length = 0;   // 4つそろっていたら、押し直しで作り直す
+        list.push([+ev.latlng.lat.toFixed(6), +ev.latlng.lng.toFixed(6)]);
+        drawMeshSetup(); showMeshPlan();
+      });
+      setTimeout(()=>{ if(ENVMAP) ENVMAP.invalidateSize(); }, 60);
+    }
+  };
+};
+/* いまいる場所を四隅の1つとして押さえる */
+function grabMeshCorner(i){
+  toast('現在地を取っています…');
+  getFixOnce(f=>{
+    if(!f){ toast('現在地を取れませんでした'); return; }
+    if(f.acc > GPS_MAX_ACC){
+      toast(`いまの位置は ±${Math.round(f.acc)}m と粗いので押さえていません`);
+      return;
+    }
+    const list = MESH_CORNERS;
+    while(list.length < i) list.push(null);
+    list[i] = [+f.lat.toFixed(6), +f.lon.toFixed(6)];
+    drawMeshSetup(); showMeshPlan();
+    toast(`${i+1}つ目を押さえました`);
+  });
+}
+/* 押さえた四隅を、最後の1つだけ取り消す。
+   順番を飛ばして押さえた分の空きも一緒に片付ける
+   （残すと、次の地図タップが1つ目ではなく2つ目として入ってしまう） */
+function undoMeshCorner(){
+  const list = MESH_CORNERS;
+  let i = list.length - 1;
+  while(i >= 0 && !list[i]) i--;
+  if(i < 0){ toast('戻す四隅がありません'); return; }
+  list.length = i;
+  while(list.length && !list[list.length-1]) list.pop();
+  drawMeshSetup(); showMeshPlan();
+  toast(`${i+1}つ目を取り消しました`);
+}
+function clearMeshCorners(){
+  if(!confirm('押さえた四隅を消します。よろしいですか？')) return;
+  MESH_CORNERS = [];
+  drawMeshSetup(); showMeshPlan();
+}
+/* いま画面にある値だけで作った、仮の記録 */
+function tmpMeshUnit(){
+  return { mesh_corners: MESH_CORNERS.filter(Boolean),
+           mesh_row_m: strVal('#mesh_gap'), mesh_col_m: strVal('#mesh_colm') };
+}
+/* 四隅と格子を地図に描く */
+function drawMeshSetup(){
+  const list = MESH_CORNERS.filter(Boolean);
+  // 押さえた分を画面の表に書き戻す（地図が無くても効かせる）
+  [0,1,2,3].forEach(i=>{
+    const el = $('#mc_'+i); if(!el) return;
+    const pt = MESH_CORNERS[i];
+    el.innerHTML = (pt && validPt(pt))
+      ? esc(pt[0].toFixed(6)+', '+pt[1].toFixed(6))
+      : '<span class="badge">まだ</span>';
+  });
+  if(!ENVMAP || typeof L==='undefined') return;
+  try{ MESHLAYER.forEach(x=>ENVMAP.removeLayer(x)); }catch(e){}
+  MESHLAYER = [];
+  list.forEach((pt,i)=>{
+    if(!validPt(pt)) return;
+    MESHLAYER.push(L.marker(pt, {icon:meshDot('#4aa3dd',13)}).addTo(ENVMAP));
+    MESHLAYER.push(L.marker(pt, {icon:L.divIcon({className:'',
+      html:`<div style="color:#4aa3dd;font-weight:700;text-shadow:0 0 3px #000">${i+1}</div>`,
+      iconSize:[16,16], iconAnchor:[-6,16]})}).addTo(ENVMAP));
+  });
+  const g = meshPlan(tmpMeshUnit());
+  if(!g) return;
+  MESHLAYER.push(L.polygon(g.corners, {color:'#4aa3dd', weight:2, fillOpacity:.06}).addTo(ENVMAP));
+  // 細かすぎるとぼやけるので、線は最大30本ずつ。
+  // ただし引く場所は本当の境目にする（間引いた本数で割ると、線が実際とずれる）
+  const pick = (total)=>{
+    const out = [], step = Math.max(1, Math.ceil((total-1)/30));
+    for(let i=step;i<total;i+=step) out.push(i);
+    return out;
+  };
+  pick(g.rows).forEach(r=>{
+    const v = r/g.rows;
+    const p1 = [g.corners[0][0]+(g.corners[3][0]-g.corners[0][0])*v,
+                g.corners[0][1]+(g.corners[3][1]-g.corners[0][1])*v];
+    const p2 = [g.corners[1][0]+(g.corners[2][0]-g.corners[1][0])*v,
+                g.corners[1][1]+(g.corners[2][1]-g.corners[1][1])*v];
+    MESHLAYER.push(L.polyline([p1,p2], {color:'#4aa3dd', weight:1, opacity:.5}).addTo(ENVMAP));
+  });
+  pick(g.cols).forEach(cc=>{
+    const uu = cc/g.cols;
+    const p1 = [g.corners[0][0]+(g.corners[1][0]-g.corners[0][0])*uu,
+                g.corners[0][1]+(g.corners[1][1]-g.corners[0][1])*uu];
+    const p2 = [g.corners[3][0]+(g.corners[2][0]-g.corners[3][0])*uu,
+                g.corners[3][1]+(g.corners[2][1]-g.corners[3][1])*uu];
+    MESHLAYER.push(L.polyline([p1,p2], {color:'#4aa3dd', weight:1, opacity:.5}).addTo(ENVMAP));
+  });
+  try{ ENVMAP.fitBounds(L.latLngBounds(g.corners).pad(0.25), {animate:false}); }catch(e){}
+}
+/* 何マスになるかを、決める前に見せる */
+function showMeshPlan(){
+  const box = $('#mesh_plan'); if(!box) return;
+  const tmp = tmpMeshUnit();
+  const list = MESH_CORNERS.filter(Boolean);
+  const cerr = list.length===4 ? meshCornerError(list) : '';
+  if(cerr){ box.textContent = cerr; drawMeshSetup(); return; }
+  if(!meshCorners(tmp)){ box.textContent = '四隅を4つとも押さえると、マスの数が出ます。';
+    drawMeshSetup(); return; }
+  const g = meshPlan(tmp);
+  if(!g){ box.textContent = `縦 ${fmtDist(meshLength(tmp))}／横 ${fmtDist(meshWidth(tmp))}。`
+    + '縦の間隔と横の間隔を入れてください。'; drawMeshSetup(); return; }
+  box.textContent = `縦 ${fmtDist(g.length)}（${g.rows}行）× 横 ${fmtDist(g.width)}（${g.cols}列）`
+    + ` ＝ ${g.n}マス`
+    + `（1マス およそ 縦${(g.length/g.rows).toFixed(1)}m × 横${(g.width/g.cols).toFixed(1)}m）`
+    + (g.n > MESH_MAX_CELLS ? `　※${MESH_MAX_CELLS}マスを超えるので決められません` : '');
+  drawMeshSetup();
+}
+/* 格子を決めて保存する */
+function saveMesh(u){
+  const rec = DB.liveUnit(u); if(!rec) return;
+  const list = MESH_CORNERS.filter(Boolean);
+  const cerr = meshCornerError(list);
+  if(cerr){ toast(cerr); return; }
+  const tmp = tmpMeshUnit();
+  const err = rangeCheck([['縦の間隔', strVal('#mesh_gap'), 0.1, 1000],
+                          ['横の間隔', strVal('#mesh_colm'), 0.1, 1000]]);
+  if(err){ toast(err); return; }
+  const g = meshPlan(tmp);
+  if(!g){ toast('縦の間隔と横の間隔を入れてください'); return; }
+  if(g.n > MESH_MAX_CELLS){
+    toast(`${g.n}マスは多すぎます（${MESH_MAX_CELLS}マスまで）。間隔を広げるか、範囲を分けてください`);
+    return;
+  }
+  const before = meshGridSig(rec);
+  rec.env_method  = 'メッシュ';
+  rec.mesh_corners = list;
+  rec.mesh_row_m  = numOf(strVal('#mesh_gap'));
+  rec.mesh_col_m  = numOf(strVal('#mesh_colm'));
+  // 中身が変わったときだけ版を新しくする。
+  // 版が変われば、前の格子で入れたマスは一覧にも集計にも混ざらない
+  if(!rec.mesh_grid_id || meshGridSig(rec)!==before) rec.mesh_grid_id = uuid();
+  if(!DB.put(DB.key.un, rec)) return;
+  // 次に作るときの初期値として覚えておく（この端末だけ）
+  prefSet('mesh_row_m', rec.mesh_row_m);
+  prefSet('mesh_col_m', rec.mesh_col_m);
+  toast(`${g.rows}行 × ${g.cols}列 ＝ ${g.n}マスにしました`);
+  navReplace('mesh', u);
+}
+
+/* ---------- 格子の一覧 ---------- */
+SCREENS.mesh = (u)=>{
+  const rec = DB.liveUnit(u); if(!rec) return SCREENS.home();
+  const g = meshGeom(rec);
+  const all = meshCellsOf(u);
+  const cells = meshCurrentCells(rec, all);
+  const cmap = meshCellMap(cells);
+  const dep = meshStats(cells, 'depth_cm', rec.depth_rep_cm);
+  const vel = meshStats(cells, 'velocity_ms', rec.velocity_rep_ms);
+  const old = meshOldCells(rec, all).length;
+  const out = cells.filter(x=> !g || x.row>=g.rows || x.col>=g.cols).length;
+
+  const grid = g ? `<div style="overflow-x:auto"><table style="min-width:100%">
+    <thead><tr><th class="tiny muted">行＼列</th>
+      ${Array.from({length:g.cols},(_,c)=>`<th class="tiny muted">${c+1}</th>`).join('')}
+    </tr></thead><tbody>
+    ${Array.from({length:g.rows},(_,r)=>`<tr>
+      <td class="tiny muted">${r+1}</td>
+      ${Array.from({length:g.cols},(_,c)=>{
+        const cell = cmap[r+'_'+c];
+        const on = !!cell;
+        return `<td style="text-align:center;padding:2px">
+          <button class="btn ghost small" style="width:auto;margin:0;padding:6px 8px;min-width:44px
+            ${on?';background:#1b3a24;border-color:#2ea043;color:#7ee787':''}"
+            onclick="nav('meshCell','${esc(JSON.stringify({u, row:r, col:c}))}')">
+            ${on ? (numOf(cell.depth_cm)===''?'●':esc(fmtNum(numOf(cell.depth_cm),0))) : '＋'}
+          </button></td>`;
+      }).join('')}
+    </tr>`).join('')}
+    </tbody></table></div>` : '';
+
+  return {
+    title:'メッシュ',
+    sub:[{text:rec.name||''},{text:`${cells.length}マス`}]
+      .concat(old ? [{text:`前の格子 ${old}`}] : []),
+    html:`
+      ${g ? `<div class="card">
+        <div class="row">
+          <div class="grow"><div class="tiny muted">格子</div>
+            <div>${g.rows}行 × ${g.cols}列 ＝ ${g.n}マス</div></div>
+          <div class="grow"><div class="tiny muted">入力済み</div>
+            <div style="font-weight:700">${cells.length}マス</div></div>
+          <div class="grow"><div class="tiny muted">大きさ</div>
+            <div>${esc(fmtDist(g.length))} × ${esc(fmtDist(g.width))}</div></div>
+        </div>
+      </div>`
+      : `<div class="warnbox">まだ格子を決めていません。
+          下の「範囲と格子を決める」から、四隅を押さえてください。</div>`}
+
+      ${old ? `<div class="warnbox">前の格子で入れたマスが <b>${old}件</b> あります。
+        四隅か細かさを変えたためです。同じ行・列でも川の別の場所を指すので、
+        下の表とまとめには混ぜていません。記録は消えていません。
+        CSVには「前の格子のマス」として出ます。</div>` : ''}
+      ${out ? `<div class="warnbox">いまの格子からはみ出したマスが ${out}件 あります。</div>` : ''}
+
+      ${g ? `<div class="card">
+        <div class="sect" style="margin-top:0">マス（数字は水深cm）</div>
+        <div class="tiny muted">緑は入力済み。タップで開きます。左が左岸、上が上流です。</div>
+        ${grid}
+      </div>` : ''}
+
+      ${cells.length ? `<div class="card">
+        <div class="sect" style="margin-top:0">マスからのまとめ</div>
+        <div class="small">水深　${dep.n
+          ? esc(fmtNum(dep.min,0)+'〜'+fmtNum(dep.max,0)+' cm（平均 '+fmtNum(dep.avg,1)+'）') : '—'}</div>
+        <div class="small">流速　${vel.n
+          ? esc(fmtNum(vel.min,2)+'〜'+fmtNum(vel.max,2)+' m/s（平均 '+fmtNum(vel.avg,2)+'）') : '—'}</div>
+        <div class="tiny muted">この値が、この範囲の代表値としてCSVに出ます
+          （代表値に手入力があれば、そちらを使います）。</div>
+      </div>` : ''}
+
+      ${baseMapButtonsHtml()}
+      <div id="meshmap2" class="map" style="height:40vh;min-height:240px"></div>
+
+      <button class="btn" onclick="nav('meshSetup','${u}')">範囲と格子を決め直す</button>
+      <button class="btn" onclick="nav('unitEnv','${u}')">この範囲の環境を入れる</button>
+      <button class="btn ghost" onclick="envDelete('${u}')">この範囲をゴミ箱へ</button>`,
+    onMount(){
+      if(typeof L==='undefined' || !$('#meshmap2')) return;
+      const g2 = meshGeom(rec);
+      const c = (g2 ? g2.corners[0] : null) || (lastFix ? [lastFix.lat, lastFix.lon] : null);
+      ENVMAP = makeMap('meshmap2', c || [43.5,142.5], c ? 17 : 9, 0);
+      if(!ENVMAP) return;
+      applyBaseMap(ENVMAP, baseMapName());
+      addLocateControl(ENVMAP);
+      drawMe(ENVMAP);
+      if(!g2) return;
+      MESHLAYER = [];
+      // マスが多いと重いので、描くのは400マスまで
+      const draw = Math.min(g2.n, 400);
+      let k = 0;
+      for(let r=0;r<g2.rows && k<draw;r++){
+        for(let cc=0;cc<g2.cols && k<draw;cc++,k++){
+          const on = !!cmap[r+'_'+cc];
+          const poly = L.polygon(meshCellPoly(g2.corners, g2.rows, g2.cols, r, cc),
+            {color: on ? '#4ec38a' : '#4aa3dd', weight:1,
+             fillOpacity: on ? .35 : .05}).addTo(ENVMAP);
+          poly.on('click', ()=>nav('meshCell', JSON.stringify({u, row:r, col:cc})));
+          MESHLAYER.push(poly);
+        }
+      }
+      try{ ENVMAP.fitBounds(L.latLngBounds(g2.corners).pad(0.2), {animate:false}); }catch(e){}
+      setTimeout(()=>{ if(ENVMAP) ENVMAP.invalidateSize(); }, 60);
+    }
+  };
+};
+
+/* ---------- 1マスの入力 ---------- */
+SCREENS.meshCell = (argStr)=>{
+  const a = (()=>{ try{ return JSON.parse(argStr||'{}'); }catch(e){ return {}; } })();
+  const rec = DB.liveUnit(a.u); if(!rec) return SCREENS.home();
+  const g = meshGeom(rec); if(!g) return SCREENS.home();
+  const row = +a.row, col = +a.col;
+  if(!(row>=0 && col>=0 && row<g.rows && col<g.cols)) return SCREENS.home();
+  const cells = meshCurrentCells(rec);
+  const cur = meshCellMap(cells)[row+'_'+col] || {};
+  const pos = meshCellCenter(g.corners, g.rows, g.cols, row, col);
+  const pct = (cur.substrate_pct && typeof cur.substrate_pct==='object') ? cur.substrate_pct : {};
+  const gv = k => (cur[k]!==undefined && cur[k]!=='' ? cur[k] : '');
+  return {
+    title:`${row+1}行 ${col+1}列`,
+    sub:[{text:rec.name||''}].concat(cur.uuid ? [{text:'入力済み', cls:'ok'}] : []),
+    html:`
+      <div class="card">
+        <div class="tiny muted">位置（四隅から計算）
+          ${esc(pos[0].toFixed(6)+', '+pos[1].toFixed(6))}</div>
+        ${cur.measured_at ? `<div class="tiny muted">記録した時刻 ${esc(fmtTime(cur.measured_at))}
+          （最初に保存したとき、自動で付きます。CSVにも出ます）</div>` : ''}
+        <label class="field"><span class="lab">水深（cm）</span>
+          <input id="mx_d" inputmode="decimal" value="${esc(gv('depth_cm'))}"
+            placeholder="干出していれば 0"></label>
+        <label class="field"><span class="lab">流速（m/s）</span>
+          <input id="mx_v" inputmode="decimal" value="${esc(gv('velocity_ms'))}"
+            placeholder="淀んでいれば 0"></label>
+        <label class="field"><span class="lab">河床材料（いちばん多いもの）</span></label>
+        ${segHtml('mx_sub', OPT.substrate, gv('substrate'), true)}
+      </div>
+
+      ${foldHtml('mxmore', '詳しく入れる',
+        '<span class="tiny muted">環境区分・礫・カバー・割合</span>', `
+        <label class="field"><span class="lab">環境区分</span></label>
+        ${segHtml('mx_hab', OPT.habitat, gv('habitat_type'), true)}
+        <label class="field"><span class="lab">礫の状況</span></label>
+        ${segHtml('mx_gr', OPT.gravel, gv('gravel_condition'), true)}
+        <label class="field"><span class="lab">カバー</span></label>
+        ${segHtml('mx_cov', OPT.bankCover, gv('cover'))}
+        <div class="tiny muted">「なし」は選択肢のひとつです（岸にカバーが無い、という記録）。</div>
+        <div class="sect">河床材料の割合（％）</div>
+        <div class="tiny muted">分かるときだけ。合計100％が目安です。</div>
+        ${OPT.substrate.map(k=>`
+          <div class="row" style="margin-top:6px">
+            <div class="grow small">${esc(k)}
+              <span class="tiny muted">${esc(SUBSTRATE_NOTE[k]||'')}</span></div>
+            <div style="width:92px">
+              <input id="mxp_${SUBSTRATE_NO[k]}" inputmode="decimal"
+                value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
+          </div>`).join('')}
+        <label class="field" style="margin-top:8px"><span class="lab">備考</span>
+          <input id="mx_note" value="${esc(gv('note'))}"></label>`)}
+
+      <button class="btn primary" onclick="saveMeshCell('${a.u}',${row},${col},false)">
+        保存する</button>
+      <button class="btn" onclick="saveMeshCell('${a.u}',${row},${col},true)">
+        保存して次のマスへ</button>
+      ${cells.length ? `<button class="btn ghost" onclick="copyPrevMeshCell('${a.u}',${row},${col})">
+        1つ前のマスと同じにする</button>` : ''}
+      ${cur.uuid ? `<button class="btn ghost" onclick="delMeshCell('${cur.uuid}')">
+        このマスの記録を消す</button>` : ''}`,
+    onMount(){
+      const el=$('#mx_d'); if(el) el.focus();
+    }
+  };
+};
+
+function saveMeshCell(u, row, col, next){
+  const unit = DB.liveUnit(u); if(!unit) return;
+  const g = meshGeom(unit); if(!g) return;
+  const checks = [['水深', strVal('#mx_d'), 0, 2000], ['流速', strVal('#mx_v'), 0, 10]];
+  OPT.substrate.forEach(k=>checks.push([k+'の割合', strVal('#mxp_'+SUBSTRATE_NO[k]), 0, 100]));
+  const err = rangeCheck(checks);
+  if(err){ toast(err); return; }
+
+  // いまの格子のマスだけを「同じマス」とみなす。
+  // 前の格子の同じ行・列に上書きすると、別の場所の記録を書き換えてしまう
+  const cur = meshCellMap(meshCurrentCells(unit))[row+'_'+col];
+  const rec = cur ? (DB.get(DB.key.mc, cur.uuid) || {uuid:cur.uuid})
+                  : {uuid:uuid(), survey_uuid:unit.survey_uuid, unit_uuid:u,
+                     row, col, measured_at:nowISO()};
+  rec.grid_id = meshGridId(unit);
+  // 記録した時刻は最初の保存のときに付く。あとから直しても上書きしない
+  if(!rec.measured_at) rec.measured_at = nowISO();
+  rec.survey_uuid = rec.survey_uuid || unit.survey_uuid;
+  rec.unit_uuid = rec.unit_uuid || u;
+  rec.row = row; rec.col = col;
+  const pos = meshCellCenter(g.corners, g.rows, g.cols, row, col);
+  rec.latitude  = +pos[0].toFixed(6);
+  rec.longitude = +pos[1].toFixed(6);
+  rec.depth_cm     = numVal('#mx_d');
+  rec.velocity_ms  = numVal('#mx_v');
+  rec.substrate        = segVal('mx_sub');
+  rec.habitat_type     = segVal('mx_hab');
+  rec.gravel_condition = segVal('mx_gr');
+  // カバーだけは正本の一覧に「なし」が実在するので、そのまま受ける
+  rec.cover = segRaw('mx_cov');
+  rec.note  = strVal('#mx_note');
+  const pct = {};
+  OPT.substrate.forEach(k=>{ pct[k] = numVal('#mxp_'+SUBSTRATE_NO[k]); });
+  rec.substrate_pct = pct;
+  // 何も入っていないマスは作らない（開いただけで増えないように）。
+  // 0 は「測った0」なので、空欄かどうかで見る
+  if(!cur && rec.depth_cm==='' && rec.velocity_ms==='' && !rec.substrate
+     && !rec.habitat_type && !rec.gravel_condition && !rec.cover && !rec.note
+     && !Object.keys(pct).some(k=>pct[k]!=='')){
+    toast('何か入れてから保存してください');
+    return;
+  }
+  if(!DB.put(DB.key.mc, rec)) return;
+  toast('保存しました');
+  if(next){
+    // 右へ。行の終わりなら次の行の左へ。最後なら一覧へ戻る
+    let r = row, c = col + 1;
+    if(c >= g.cols){ c = 0; r += 1; }
+    if(r >= g.rows){ navReplace('mesh', u); return; }
+    navReplace('meshCell', JSON.stringify({u, row:r, col:c}));
+  }else{
+    navReplace('mesh', u);
+  }
+}
+/* 1つ前のマス（左どなり。行の頭なら前の行の右端）の中身を写す */
+function copyPrevMeshCell(u, row, col){
+  const unit = DB.liveUnit(u); if(!unit) return;
+  const g = meshGeom(unit); if(!g) return;
+  let r = row, c = col - 1;
+  if(c < 0){ r = row - 1; c = g.cols - 1; }
+  if(r < 0){ toast('1つ前のマスがありません'); return; }
+  const prev = meshCellMap(meshCurrentCells(unit))[r+'_'+c];
+  if(!prev){ toast('1つ前のマスは、まだ入力されていません'); return; }
+  const put = (sel, v)=>{ const el=$(sel); if(el) el.value = (v===undefined||v===null)?'':v; };
+  put('#mx_d', prev.depth_cm); put('#mx_v', prev.velocity_ms); put('#mx_note', prev.note||'');
+  setSegValue('mx_sub', prev.substrate||'なし');
+  setSegValue('mx_hab', prev.habitat_type||'なし');
+  setSegValue('mx_gr', prev.gravel_condition||'なし');
+  setSegRaw('mx_cov', prev.cover);
+  const pct = (prev.substrate_pct && typeof prev.substrate_pct==='object') ? prev.substrate_pct : {};
+  OPT.substrate.forEach(k=>put('#mxp_'+SUBSTRATE_NO[k], pct[k]));
+  toast(`${r+1}行 ${c+1}列 の中身を写しました`);
+}
+function delMeshCell(uu){
+  if(!confirm('このマスの記録を消します。よろしいですか？')) return;
+  const rec = DB.get(DB.key.mc, uu);
+  if(DB.softDelete(DB.key.mc, uu)){
+    toast('消しました');
+    if(rec) navReplace('mesh', rec.unit_uuid); else goBack();
+  }
+}
+
+/* ---------- 川の環境（測点・河床材料の割合・岸のカバー）
+              魚類調査アプリの「川の環境」と同じ作り ---------- */
+SCREENS.unitEnv = (u)=>{
+  const rec = DB.liveUnit(u); if(!rec) return SCREENS.home();
+  ENV_SEL = rec.uuid;
+  const mesh = isMesh(rec);
+  const pts = envPoints(rec);
+  const d = unitDepth(rec), v = unitVelocity(rec);
+  const pct = substratePct(rec);
+  const sum = substratePctSum(rec);
+  const rank = substrateRank(rec);
+
+  const ptRows = pts.map((pt,i)=>`<tr>
+      <td class="num muted">${i+1}</td>
+      <td class="num">${numOf(pt.depth_cm)===''?'—':fmtNum(numOf(pt.depth_cm),0)}</td>
+      <td class="num">${numOf(pt.velocity_ms)===''?'—':fmtNum(numOf(pt.velocity_ms),2)}</td>
+      <td class="small muted">${esc(pt.substrate||'')}</td>
+      <td class="small muted">${numOf(pt.latitude)===''
+        ? '<span class="badge">なし</span>'
+        : '±'+fmtNum(numOf(pt.gps_accuracy),0)+'m'}</td>
+      <td style="text-align:right"><button class="btn ghost small"
+        style="width:auto;margin:0;padding:4px 10px"
+        onclick="delEnvPoint('${rec.uuid}',${i})">消す</button></td>
+    </tr>`).reverse().join('');
+
+  const coverBlock = (side, label)=>{
+    const list = coverList(rec, side);
+    // 8種類×3枠×左右でボタンを並べると、スマホでは押しにくい。
+    // 「なし」は正本の一覧にある選択肢なので、空欄は別に用意する
+    const rows = [0,1,2].map(i=>{
+      const c = list[i] || {};
+      const opts = ['<option value="">（選ばない）</option>'].concat(
+        OPT.bankCover.map(o=>`<option value="${esc(o)}"${o===c.type?' selected':''}>${esc(o)}</option>`)
+      ).join('');
+      return `<div class="row" style="margin-top:8px">
+        <div class="grow"><select id="cv_${side}_${i}_t">${opts}</select></div>
+        <div style="width:92px">
+          <input id="cv_${side}_${i}" inputmode="decimal" placeholder="割合%"
+            value="${esc(c.pct!==undefined?c.pct:'')}">
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="card">
+      <div class="sect" style="margin-top:0">${label}のカバー</div>
+      <div class="tiny muted">種類と、その岸に占める割合（%）を3つまで。</div>
+      ${rows}
+      <label class="field" style="margin-top:8px"><span class="lab">カバーの長さ（m）</span>
+        <input id="cv_${side}_len" inputmode="decimal"
+          value="${esc(rec['cover_'+side+'_length_m']!==undefined?rec['cover_'+side+'_length_m']:'')}"></label>
+      <div class="tiny muted">いまの合計 ${fmtNum(coverPctSum(rec,side),0)}%　／
+        カバー：${coverPresent(rec,side)||'—'}</div>
+    </div>`;
+  };
+
+  return {
+    title:'川の環境',
+    sub:[{text:rec.name||''},
+         {text: mesh ? `${meshCellsOf(rec.uuid).length}マス` : `測点 ${pts.length}`}],
+    html:`
+      ${mesh ? `<div class="card">
+        <div class="tiny muted">この範囲は<b>マスで測ります</b>。水深・流速はマスごとに入れてください。</div>
+        <button class="btn" onclick="nav('mesh','${rec.uuid}')">マスの一覧へ</button>
+      </div>` : `
+      <div class="card">
+        <div class="sect" style="margin-top:0">測点（水深・流速）</div>
+        <div class="two">
+          <label class="field"><span class="lab">水深（cm）</span>
+            <input id="p_d" inputmode="decimal" placeholder="例）35"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();addEnvPoint('${rec.uuid}');}"></label>
+          <label class="field"><span class="lab">流速（m/s）</span>
+            <input id="p_v" inputmode="decimal" placeholder="例）0.48"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();addEnvPoint('${rec.uuid}');}"></label>
+        </div>
+        <label class="field"><span class="lab">その場の河床材料</span></label>
+        ${segHtml('p_sub', OPT.substrate, '', true)}
+        <label class="field"><span class="lab">備考</span>
+          <input id="p_note" placeholder="任意"></label>
+        <button class="btn primary" onclick="addEnvPoint('${rec.uuid}')">この測点を記録して次へ</button>
+        <div class="tiny muted" id="gpsNow">${esc(gpsHint())}</div>
+        <div class="tiny muted">0 も「測って0だった」として残ります。水深と流速はどちらか片方でも構いません。
+          記録したときに立っている場所も、いっしょに残します。</div>
+      </div>
+
+      ${pts.length ? `<div class="card" style="padding:4px 12px">
+        <div class="tablewrap"><table><thead><tr><th class="num">番号</th><th class="num">水深cm</th>
+          <th class="num">流速m/s</th><th>河床材</th><th>位置</th><th></th></tr></thead>
+        <tbody>${ptRows}</tbody></table></div></div>` : ''}`}
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">${mesh?'マス':'測点'}のまとめ</div>
+        <div class="tablewrap"><table><tbody>
+          <tr><td class="muted">水深</td><td class="num">${d.n
+            ? `${fmtNum(d.min,0)} 〜 ${fmtNum(d.max,0)} cm（平均 ${fmtNum(d.avg,1)}）` : '—'}</td></tr>
+          <tr><td class="muted">流速</td><td class="num">${v.n
+            ? `${fmtNum(v.min,2)} 〜 ${fmtNum(v.max,2)} m/s（平均 ${fmtNum(v.avg,2)}）` : '—'}</td></tr>
+          <tr><td style="font-weight:700">代表の水深</td>
+              <td class="num" style="font-weight:700">${d.rep===''?'—':fmtNum(d.rep,0)+' cm'}</td></tr>
+          <tr><td style="font-weight:700">代表の流速</td>
+              <td class="num" style="font-weight:700">${v.rep===''?'—':fmtNum(v.rep,2)+' m/s'}</td></tr>
+        </tbody></table></div>
+        <div class="tiny muted">書き出しに出るのは代表の値です。
+          手で入れればそちらを、入れなければ${mesh?'マス':'測点'}の平均を使います。</div>
+        <div class="two">
+          <label class="field"><span class="lab">代表の水深を手で入れる（cm）</span>
+            <input id="e_drep" inputmode="decimal"
+              value="${esc(rec.depth_rep_cm!==undefined?rec.depth_rep_cm:'')}"></label>
+          <label class="field"><span class="lab">代表の流速を手で入れる（m/s）</span>
+            <input id="e_vrep" inputmode="decimal"
+              value="${esc(rec.velocity_rep_ms!==undefined?rec.velocity_rep_ms:'')}"></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="sect" style="margin-top:0">河床材料の割合</div>
+        ${OPT.substrate.map(k=>`<div class="row" style="margin-top:4px">
+          <div class="grow small">${esc(k)}${SUBSTRATE_NOTE[k]
+            ?` <span class="tiny muted">${esc(SUBSTRATE_NOTE[k])}</span>`:''}</div>
+          <div style="width:90px"><input id="sp_${SUBSTRATE_NO[k]}" inputmode="decimal"
+            placeholder="%" value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
+        </div>`).join('')}
+        <div class="${Math.abs(sum-100)>0.5 && sum>0 ? 'warnbox':'tiny muted'}" style="margin-top:8px">
+          いまの合計 ${fmtNum(sum,0)}%${Math.abs(sum-100)>0.5 && sum>0
+            ? '　100%になっていません（このままでも保存はできます）' : ''}
+        </div>
+        <div class="tiny muted">いちばん多い：${rank[0]?esc(rank[0].name):'—'}
+          　次に多い：${rank[1]?esc(rank[1].name):'—'}</div>
+        <div class="tiny muted">保存すると、この2つが「河床材料」「次に多い河床材料」に入ります。</div>
+      </div>
+
+      ${coverBlock('left','左岸')}
+      ${coverBlock('right','右岸')}
+
+      <button class="btn primary" onclick="saveEnv('${rec.uuid}')">環境を保存する</button>`,
+    onMount(){
+      startGps();                       // 測点に位置を添えるため
+      const el=$('#p_d'); if(el) el.focus();
+      const box = $('#gpsNow');
+      if(box) ENV_GPS_TIMER = setInterval(()=>{
+        if(!$('#gpsNow')){ clearInterval(ENV_GPS_TIMER); ENV_GPS_TIMER=null; return; }
+        $('#gpsNow').textContent = gpsHint();
+      }, 2000);
+    }
+  };
+};
+/* 代表値・河床材料の割合・岸のカバーをまとめて保存する */
+function saveEnv(u){
+  const rec = DB.liveUnit(u); if(!rec) return;
+  const checks = [['代表の水深', strVal('#e_drep'), 0, 2000],
+                  ['代表の流速', strVal('#e_vrep'), 0, 10]];
+  OPT.substrate.forEach(k=>checks.push([k+'の割合', strVal('#sp_'+SUBSTRATE_NO[k]), 0, 100]));
+  ['left','right'].forEach(side=>{
+    const label = side==='left' ? '左岸' : '右岸';
+    [0,1,2].forEach(i=>checks.push([label+'のカバーの割合', strVal('#cv_'+side+'_'+i), 0, 100]));
+    checks.push([label+'のカバーの長さ', strVal('#cv_'+side+'_len'), 0, 100000]);
+  });
+  const err = rangeCheck(checks);
+  if(err){ toast(err); return; }
+  rec.depth_rep_cm    = numVal('#e_drep');
+  rec.velocity_rep_ms = numVal('#e_vrep');
+
+  const pct = {};
+  OPT.substrate.forEach(k=>{ pct[k] = numVal('#sp_'+SUBSTRATE_NO[k]); });
+  rec.substrate_pct = pct;
+  // 割合を入れたなら、多い順の1位2位を代表・2番目にする。
+  // 先に空にしておく（割合を全部消したときに、古い2番目が残らないように）
+  rec.substrate2 = '';
+  const rank = substrateRank({substrate_pct:pct});
+  if(rank.length){
+    rec.substrate1 = rank[0].name;
+    rec.substrate2 = rank[1] ? rank[1].name : '';
+  }
+
+  ['left','right'].forEach(side=>{
+    const list = [];
+    [0,1,2].forEach(i=>{
+      const type = strVal('#cv_'+side+'_'+i+'_t');
+      const p = numVal('#cv_'+side+'_'+i);
+      if(type) list.push({type, pct:p});
+    });
+    rec['cover_'+side] = list;
+    rec['cover_'+side+'_length_m'] = numVal('#cv_'+side+'_len');
+  });
+
+  if(DB.put(DB.key.un, rec)){ toast('保存しました'); goBack(); }
 }
 
 SCREENS.units = (sv)=>{
   const s = DB.survey(sv); if(!s) return SCREENS.home();
   const list = DB.unitsOf(sv);
   const cards = list.map(u=>{
+    const d = unitDepth(u), v = unitVelocity(u);
     const rep = [
-      num(u.depth_cm_rep)!=null ? `水深${u.depth_cm_rep}cm` : '',
-      num(u.velocity_ms_rep)!=null ? `流速${u.velocity_ms_rep}m/s` : '',
-      u.substrate_rep || grainMain(u.substrate_pct) || ''
+      d.rep!=='' ? `水深${fmtNum(d.rep,0)}cm` : '',
+      v.rep!=='' ? `流速${fmtNum(v.rep,2)}m/s` : '',
+      u.substrate1 || ''
     ].filter(Boolean).join(' ／ ');
-    return `<div class="card tap" onclick="nav('unitEdit','${esc(JSON.stringify({sv, u:u.uuid}))}')">
-      <div class="row">
-        <div class="grow"><b>${esc(u.name||'（名称未設定）')}</b>
-          <span class="badge">${esc(u.river_form||'形態なし')}</span></div>
-        <div class="small muted">${unitLength(u)>0?fmtDist(unitLength(u)):'—'}</div>
+    const n = isMesh(u) ? `${meshCellsOf(u.uuid).length}マス`
+            : `${envPoints(u).length}測点`;
+    const go = isMesh(u) ? `nav('mesh','${u.uuid}')`
+             : `nav('envMap','${esc(JSON.stringify({sv, record:u.uuid}))}')`;
+    return `<div class="card">
+      <div class="tap" onclick="${go}">
+        <div class="row">
+          <div class="grow"><b>${esc(u.name||'（名称未設定）')}</b>
+            <span class="badge">${esc(envMethod(u))}</span>
+            ${u.habitat_type?`<span class="badge">${esc(habitatShort(u.habitat_type))}</span>`:''}</div>
+          <div class="small muted">${esc(fmtDist(unitLengths(u).used))}</div>
+        </div>
+        <div class="small muted" style="margin-top:6px">${esc(rep||'代表値の記入なし')}　${esc(n)}</div>
       </div>
-      <div class="small muted" style="margin-top:6px">${esc(rep||'代表値の記入なし')}</div>
+      ${isMesh(u) ? '' : `<button class="btn ghost small" style="width:auto;padding:4px 10px;margin-top:8px"
+        onclick="nav('unitEnv','${u.uuid}')">測点を入れる</button>`}
     </div>`;
   }).join('');
+  const cnt = k => list.filter(x=>envMethod(x)===k).length;
   return {
     title:'物理環境の一覧',
-    sub:[{text:s.name},{text:`${list.length} 区間`}],
+    sub:[{text:s.name},{text:`点${cnt('点')}・線${cnt('ライン')}・メッシュ${cnt('メッシュ')}`}],
     html:`
-      <button class="btn primary big" onclick="nav('unitEdit','${esc(JSON.stringify({sv}))}')">＋ 物理環境を記録</button>
+      <button class="btn primary big" onclick="nav('envMap','${esc(JSON.stringify({sv}))}')">地図で記録する</button>
+      <button class="btn" onclick="meshCreate('${sv}')">＋ メッシュの範囲を作る</button>
       <div class="sp"></div>
       ${ list.length ? cards : `<div class="empty">まだ物理環境の記録がありません。</div>` }`
   };
 };
 
-SCREENS.unitEdit = (argStr)=>{
-  const a = JSON.parse(argStr||'{}');
-  const sv = a.sv, editing = !!a.u;
-  const s = DB.survey(sv); if(!s) return SCREENS.home();
-  const cur = activeReach(sv);
-  const carry = (SCREENS._unitCarry && SCREENS._unitCarry.survey_uuid===sv) ? SCREENS._unitCarry : {};
-  let u;
-  if(editing){ u = DB.get(DB.key.un, a.u); if(!u || u.deleted_at) return SCREENS.home(); }
-  // 続けて記録するときは、前の区間の終点をそのまま始点にする（歩きながら区切っていくため）
-  const fromPrev = !editing && ptOf(carry.end_lat, carry.end_lon) != null;
-  if(!editing) u = null;
-  if(!editing) u = { uuid:uuid(), survey_uuid:sv, reach_uuid: cur?cur.uuid:'', name:'',
-             river_form: carry.river_form||'', started_at:nowISO(), ended_at:'',
-             start_lat: fromPrev?carry.end_lat:'', start_lon: fromPrev?carry.end_lon:'',
-             end_lat:'', end_lon:'',
-             length_m_auto:'', length_m_manual:'', river_width_m:'',
-             depth_cm_rep:'', velocity_ms_rep:'', env_points:[],
-             substrate_rep:'', substrate_pct:{}, memo:'' };
-
-  if(!editing){
-    const pending = findNewDraft('unit', sv);
-    if(pending) u.uuid = pending.uuid;
-  }
-  const udraft = editDraftGet(u.uuid);
-  if(udraft && udraft._kind==='unit'){
-    u = Object.assign({}, u, udraft);
-    if(Array.isArray(udraft.env_points)) u.env_points = udraft.env_points;
-  }
-  const pct = u.substrate_pct||{};
-  const grainInputs = OPT.substrate.map(g=>`
-    <label class="field" style="margin-bottom:8px"><span class="lab">${esc(g)}（％）</span>
-      <input class="grainpct" data-grain="${esc(g)}" type="number" step="1" min="0" max="100"
-        inputmode="decimal" value="${esc(pct[g]??'')}" oninput="updateGrainTotal()"></label>`).join('');
-
-  return {
-    title: editing ? '物理環境の編集' : '物理環境の記録',
-    sub:[{text:s.name}],
-    html:`
-      <div class="sect">河川形態</div>
-      <label class="field"><span class="lab">どの構造か <span class="req">*</span></span>
-        ${segHtml('uForm', OPT.riverForm, u.river_form, false)}</label>
-      <label class="field"><span class="lab">名前（空欄なら「早瀬1」のように自動で付けます）</span>
-        <input id="uName" value="${esc(u.name||'')}" placeholder="自動"></label>
-
-      <div class="sect">区間（始点〜終点）</div>
-      ${ fromPrev ? `<div class="card" style="border-color:var(--accent2)">
-        <div class="small">前の区間「${esc(carry.name||'')}」の終点を、始点に入れてあります。</div>
-        <div class="tiny muted" style="margin-top:6px">分流など、続きでない場合は下のボタンか地図で置き直してください。</div>
-        <div class="sp"></div>
-        <button class="btn ghost small" onclick="unitClearStart()">始点を消してやり直す</button>
-      </div>` : '' }
-      <div class="btn-grid">
-        <button class="btn" onclick="unitMark('start')">今いる場所を始点に</button>
-        <button class="btn" onclick="unitMark('end')">今いる場所を終点に</button>
-      </div>
-      <div class="sp"></div>
-      ${baseMapButtonsHtml()}
-      <div class="btn-grid">
-        <button class="btn" id="uPickStart" onclick="unitPickMode('start')">地図で始点を置く</button>
-        <button class="btn" id="uPickEnd" onclick="unitPickMode('end')">地図で終点を置く</button>
-      </div>
-      <div class="sp"></div>
-      <div id="unitMap"></div>
-      <div class="tiny muted" style="margin-top:6px" id="uMapHint">
-        上のボタンで「始点」か「終点」を選んでから地図をタップします。置いた点は長押しで動かせます。
-        緑＝始点、赤＝終点、太い線＝記録済みの区間、小さい点＝産卵床です。
-      </div>
-      <div class="sp"></div>
-      <div class="two">
-        <label class="field"><span class="lab">始点 緯度</span>
-          <input id="uSLat" inputmode="decimal" value="${esc(u.start_lat??'')}" oninput="updateUnitLen()"></label>
-        <label class="field"><span class="lab">始点 経度</span>
-          <input id="uSLon" inputmode="decimal" value="${esc(u.start_lon??'')}" oninput="updateUnitLen()"></label>
-      </div>
-      <div class="two">
-        <label class="field"><span class="lab">終点 緯度</span>
-          <input id="uELat" inputmode="decimal" value="${esc(u.end_lat??'')}" oninput="updateUnitLen()"></label>
-        <label class="field"><span class="lab">終点 経度</span>
-          <input id="uELon" inputmode="decimal" value="${esc(u.end_lon??'')}" oninput="updateUnitLen()"></label>
-      </div>
-      <div class="card"><div class="row"><div class="grow small muted">始点と終点の直線距離</div>
-        <div style="font-weight:700" id="uLenOut">—</div></div></div>
-      <div class="two">
-        <label class="field"><span class="lab">区間長の手入力（m）※入れるとこちらを使います</span>
-          <input id="uLenM" type="number" step="1" inputmode="decimal" value="${esc(u.length_m_manual??'')}"
-            placeholder="蛇行している場合など"></label>
-        <label class="field"><span class="lab">川幅（m）</span>
-          <input id="uWidth" type="number" step="0.1" inputmode="decimal" value="${esc(u.river_width_m??'')}"></label>
-      </div>
-
-      <div class="sect">代表水深・代表流速</div>
-      <div class="two">
-        <label class="field"><span class="lab">代表水深（cm）</span>
-          <input id="uDep" type="number" step="1" inputmode="decimal" value="${esc(u.depth_cm_rep??'')}"></label>
-        <label class="field"><span class="lab">代表流速（m/s）</span>
-          <input id="uVel" type="number" step="0.01" inputmode="decimal" value="${esc(u.velocity_ms_rep??'')}"></label>
-      </div>
-      <div class="tiny muted" style="margin-bottom:8px">
-        そのまま代表値を入れても、下に測点を足して平均を入れても構いません。
-      </div>
-      <div id="envList"></div>
-      <div class="btn-grid">
-        <button class="btn" onclick="envAdd()">＋ 測点を追加</button>
-        <button class="btn" onclick="unitRepFromPoints()">測点の平均を代表値に入れる</button>
-      </div>
-
-      <div class="sect">河床材料</div>
-      <label class="field"><span class="lab">代表河床材料</span>
-        <span class="tiny muted" style="display:block; margin:-2px 0 6px">${GRAIN_HINT}</span>
-        ${segHtml('uSub', OPT.substrate, u.substrate_rep, true)}</label>
-      <div class="small muted" style="margin:10px 0 6px">粒径区分ごとの割合（分かる範囲で。全部でなくても構いません）</div>
-      <div class="two">${grainInputs}</div>
-      <div class="card"><div class="row"><div class="grow small muted">合計</div>
-        <div style="font-weight:700" id="grainTotalOut">—</div></div></div>
-
-      <div class="sect">その他</div>
-      <label class="field"><span class="lab">メモ</span>
-        <textarea id="uMemo">${esc(u.memo||'')}</textarea></label>
-
-      <button class="btn primary big" onclick="saveUnit('${u.uuid}','${sv}',${editing})">保存する</button>
-      ${ editing ? `<div class="sp"></div><button class="btn danger" onclick="deleteUnit('${u.uuid}')">この記録を削除</button>` : '' }
-    `,
-    onMount:()=>{
-      SCREENS._unitUuid = u.uuid; SCREENS._editSv = sv;
-      if(udraft) toast('書きかけを復元しました');
-      SCREENS._env = envPoints(u);
-      renderEnvList();
-      updateUnitLen();
-      updateGrainTotal();
-      initUnitMap(sv, u.uuid);
-    }
-  };
-};
-
-/* ---------- 物理環境の入力画面に出す地図 ---------- */
-let UNITMAP=null, UNIT_MK={start:null, end:null}, UNIT_LINE=null, UNIT_MODE='start';
-function closeUnitMap(){
-  if(UNITMAP){ try{ UNITMAP.remove(); }catch(e){} }
-  UNITMAP=null; UNIT_MK={start:null, end:null}; UNIT_LINE=null;
-}
-function unitPickMode(which){
-  UNIT_MODE = which;
-  const bs=$('#uPickStart'), be=$('#uPickEnd');
-  if(bs) bs.classList.toggle('primary', which==='start');
-  if(be) be.classList.toggle('primary', which==='end');
-  toast(which==='start' ? '地図をタップすると始点を置きます' : '地図をタップすると終点を置きます');
-}
-function initUnitMap(sv, selfUuid){
-  if(typeof L==='undefined' || !$('#unitMap')) return;
-  UNITMAP = L.map('unitMap', { zoomControl:true });
-  applyBaseMap(UNITMAP, baseMapName());
-
-  // 目印：記録済みの区間と産卵床
-  DB.unitsOf(sv).forEach(x=>{
-    if(x.uuid===selfUuid) return;
-    const a=ptOf(x.start_lat,x.start_lon), b=ptOf(x.end_lat,x.end_lon);
-    if(!a||!b) return;
-    L.polyline([a,b], {color:formColor(x.river_form), weight:6, opacity:.6}).addTo(UNITMAP)
-      .bindTooltip(`${x.name||''}（${x.river_form||''}）`);
-  });
-  DB.reddsOf(sv).forEach(r=>{
-    const p=ptOf(r.latitude, r.longitude);
-    if(p) L.circleMarker(p, {radius:4, color:'#9aa8b4', weight:1, fillOpacity:.35}).addTo(UNITMAP);
-  });
-  if(lastFix){
-    L.circleMarker([lastFix.lat,lastFix.lon], {radius:5, color:'#fff', weight:2,
-      fillColor:'#4aa3dd', fillOpacity:1}).addTo(UNITMAP).bindTooltip('今いる場所（GPS）');
-  }
-
-  const s=ptOf($('#uSLat').value, $('#uSLon').value), e=ptOf($('#uELat').value, $('#uELon').value);
-  const center = s || e || (lastFix?[lastFix.lat,lastFix.lon]:null);
-  UNITMAP.setView(center || [43.5,142.5], center ? 17 : 9);
-  if(s) unitSetPoint('start', s, false);
-  if(e) unitSetPoint('end', e, false);
-  // 始点が決まっていれば、次のタップは終点にするのが自然
-  unitPickMode(s ? 'end' : 'start');
-  UNITMAP.on('click', ev=>unitSetPoint(UNIT_MODE, [ev.latlng.lat, ev.latlng.lng], true));
-  setTimeout(()=>{ if(UNITMAP) UNITMAP.invalidateSize(); }, 60);
-}
-function unitPinIcon(color){
-  return L.divIcon({ className:'', iconSize:[24,24], iconAnchor:[12,12],
-    html:`<div style="width:18px;height:18px;border-radius:50%;background:${color};
-      border:3px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.4)"></div>` });
-}
-// which: 'start'（緑）/ 'end'（赤）。advance=true なら始点を置いた後に終点モードへ進む
-function unitSetPoint(which, pt, advance){
-  if(!UNITMAP) return;
-  const color = which==='start' ? '#4ec38a' : '#e05555';
-  if(!UNIT_MK[which]){
-    UNIT_MK[which] = L.marker(pt, {draggable:true, icon:unitPinIcon(color)}).addTo(UNITMAP)
-      .bindTooltip(which==='start'?'始点':'終点');
-    UNIT_MK[which].on('dragend', ()=>{
-      const p=UNIT_MK[which].getLatLng();
-      unitWritePoint(which, [p.lat, p.lng]);
-      unitDrawLine();
-    });
-  }else{
-    UNIT_MK[which].setLatLng(pt);
-  }
-  unitWritePoint(which, pt);
-  unitDrawLine();
-  if(advance && which==='start' && !UNIT_MK.end) unitPickMode('end');
-}
-function unitWritePoint(which, pt){
-  const la = which==='start' ? $('#uSLat') : $('#uELat');
-  const lo = which==='start' ? $('#uSLon') : $('#uELon');
-  if(la) la.value = (+pt[0]).toFixed(6);
-  if(lo) lo.value = (+pt[1]).toFixed(6);
-  updateUnitLen();
-}
-function unitDrawLine(){
-  if(!UNITMAP) return;
-  const s=ptOf($('#uSLat').value, $('#uSLon').value), e=ptOf($('#uELat').value, $('#uELon').value);
-  if(UNIT_LINE){ try{ UNITMAP.removeLayer(UNIT_LINE); }catch(err){} UNIT_LINE=null; }
-  if(s && e) UNIT_LINE = L.polyline([s,e], {color:'#fff', weight:3, opacity:.9, dashArray:'6,6'}).addTo(UNITMAP);
-}
-function unitClearStart(){
-  ['#uSLat','#uSLon'].forEach(s=>{ const el=$(s); if(el) el.value=''; });
-  if(UNITMAP && UNIT_MK.start){ try{ UNITMAP.removeLayer(UNIT_MK.start); }catch(e){} UNIT_MK.start=null; }
-  unitDrawLine();
-  updateUnitLen();
-  unitPickMode('start');
-  toast('始点を消しました。地図か「今いる場所を始点に」で置き直せます');
-}
-
-function unitMark(which){
-  if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
-  const gen = screenGen();
-  toast('位置を取得中…');
-  navigator.geolocation.getCurrentPosition(p=>{
-    lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
-    if(screenStale(gen)) return;
-    if(UNITMAP) unitSetPoint(which, [lastFix.lat, lastFix.lon], false);
-    else {
-      const la = which==='start' ? $('#uSLat') : $('#uELat');
-      const lo = which==='start' ? $('#uSLon') : $('#uELon');
-      if(la) la.value = lastFix.lat.toFixed(6);
-      if(lo) lo.value = lastFix.lon.toFixed(6);
-      updateUnitLen();
-    }
-    toast((which==='start'?'始点':'終点')+'を記録しました（誤差 約'+Math.round(lastFix.acc)+'m）');
-  }, ()=>toast('位置を取れませんでした'), {enableHighAccuracy:true, timeout:15000, maximumAge:0});
-}
-function unitStraightLength(){
-  const s=[parseFloat($('#uSLat').value), parseFloat($('#uSLon').value)];
-  const e=[parseFloat($('#uELat').value), parseFloat($('#uELon').value)];
-  if(!validPt(s) || !validPt(e)) return null;
-  return Math.round(distMeters(s,e));
-}
-function updateUnitLen(){
-  const el=$('#uLenOut'); if(!el) return;
-  const d = unitStraightLength();
-  el.textContent = d==null ? '—' : fmtDist(d);
-}
-function unitRepFromPoints(){
-  envSync();
-  const fake = { env_points: SCREENS._env||[] };
-  const d = envMean(fake,'depth_cm'), v = envMean(fake,'velocity_ms');
-  if(d==='' && v===''){ toast('測点に水深・流速を入れてください'); return; }
-  if(d!=='' && $('#uDep')) $('#uDep').value = d;
-  if(v!=='' && $('#uVel')) $('#uVel').value = v;
-  toast('測点の平均を代表値に入れました');
-}
-function collectGrainPct(){
-  const out={};
-  $$('.grainpct').forEach(el=>{
-    const g = el.getAttribute('data-grain');
-    const v = numOf(el);
-    if(v!=='') out[g]=v;
-  });
-  return out;
-}
-function updateGrainTotal(){
-  const el=$('#grainTotalOut'); if(!el) return;
-  const pct = collectGrainPct();
-  const keys = Object.keys(pct);
-  if(!keys.length){ el.textContent='—'; el.style.color=''; return; }
-  const t = grainTotal(pct);
-  el.textContent = t+'％';
-  // 100からずれていたら気づけるように色を変える（保存は止めない）
-  el.style.color = Math.abs(t-100) < 0.01 ? 'var(--accent)' : 'var(--warn)';
-}
-function saveUnit(u, sv, editing){
-  const form = segVal('uForm');
-  if(!form){ toast('河川形態を選んでください'); return; }
-  const ps = parsePos($('#uSLat').value, $('#uSLon').value);
-  const pe = parsePos($('#uELat').value, $('#uELon').value);
-  if(!ps.ok){ toast('始点の'+ps.why); return; }
-  if(!pe.ok){ toast('終点の'+pe.why); return; }
-  envSync();
-  const prev = DB.get(DB.key.un, u) || {};
-  const name = ($('#uName').value||'').trim() || prev.name || unitAutoName(sv, form);
-  const rec = {
-    uuid:u, survey_uuid:sv,
-    reach_uuid: prev.reach_uuid || (activeReach(sv)||{}).uuid || '',
-    name, river_form:form,
-    started_at: prev.started_at || nowISO(), ended_at: nowISO(),
-    start_lat: numVal('#uSLat'), start_lon: numVal('#uSLon'),
-    end_lat: numVal('#uELat'), end_lon: numVal('#uELon'),
-    length_m_auto: unitStraightLength() ?? '',
-    length_m_manual: numVal('#uLenM'),
-    river_width_m: numVal('#uWidth'),
-    depth_cm_rep: numVal('#uDep'), velocity_ms_rep: numVal('#uVel'),
-    env_points: (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note),
-    substrate_rep: segVal('uSub'),
-    substrate_pct: collectGrainPct(),
-    memo: $('#uMemo').value||'',
-  };
-  if(!DB.upsert(DB.key.un, rec)) return;
-  editDraftClear(u);
-  SCREENS._unitUuid = null;
-  // 次の区間の始点に使えるよう、終点と名前を覚えておく
-  SCREENS._unitCarry = { survey_uuid:sv, river_form:form, name, end_lat:rec.end_lat, end_lon:rec.end_lon };
-  SCREENS._env = null;
-  toast('保存しました');
-  goBack();
-}
-function deleteUnit(u){
-  if(!confirm('この物理環境の記録を削除しますか？')) return;
-  editDraftClear(u); SCREENS._unitUuid = null;
-  DB.softDelete(DB.key.un, u);
-  toast('ゴミ箱へ入れました');
-  goBack();
-}
 
 /* ============================================================
    調査メモ（産卵床とは別に、調査全体に紐づくメモ）
@@ -2296,7 +4493,11 @@ function countBy(list, field, fallback){
   list.forEach(x=>{ const k=x[field]||fallback; m.set(k,(m.get(k)||0)+1); });
   return [...m.entries()].sort((a,b)=>b[1]-a[1]);
 }
-function fmtNum(v, d){ return v==null ? '—' : (+v).toFixed(d==null?1:d); }
+// 空欄は '—'。'' を渡すと (+'') が 0 になり、測っていないものが「0.0」と出てしまう
+function fmtNum(v, d){
+  if(v==='' || v===null || v===undefined || isNaN(+v)) return '—';
+  return (+v).toFixed(d==null?1:d);
+}
 
 // 区間ごとの集計。区間長は手入力があればそちらを使う
 // 産卵床の数は「産卵床」を含む記録だけを数える。
@@ -2394,24 +4595,32 @@ SCREENS.summary = (sv)=>{
       </div>
 
       ${ units.length ? `
-      <div class="sect">物理環境（河川構造ごと）</div>
+      <div class="sect">物理環境（環境区分ごと）</div>
       <div class="tablewrap"><table>
-        <tr><th>形態</th><th class="num">区間数</th><th class="num">延長</th><th class="num">代表水深</th><th class="num">代表流速</th><th>主な河床材料</th></tr>
-        ${OPT.riverForm.map(f=>{
-          const list = units.filter(x=>x.river_form===f);
+        <tr><th>環境区分</th><th class="num">件数</th><th class="num">延長</th><th class="num">代表水深</th><th class="num">代表流速</th><th>主な河床材料</th></tr>
+        ${OPT.habitat.map(f=>{
+          // 環境区分は複数選べる。延長が二重に数えられないよう、いちばん先頭の区分だけで数える
+          const list = units.filter(x=>habitatList(x.habitat_type)[0]===f);
           if(!list.length) return '';
-          const len = list.reduce((a,x)=>a+unitLength(x), 0);
-          const d = list.map(x=>num(x.depth_cm_rep)).filter(v=>v!=null);
-          const v = list.map(x=>num(x.velocity_ms_rep)).filter(v=>v!=null);
-          const mats = countBy(list.map(x=>({m:x.substrate_rep||grainMain(x.substrate_pct)||'未記入'})),'m','未記入');
+          const lens = list.map(x=>unitLengths(x).used).filter(x=>x!=='' && isFinite(x));
+          const len = lens.length ? lens.reduce((a,b)=>a+b,0) : '';
+          const d = nums(list.map(x=>unitDepth(x).rep));
+          const v = nums(list.map(x=>unitVelocity(x).rep));
+          const mats = countBy(list.map(x=>({m:x.substrate1||'未記入'})),'m','未記入');
           return `<tr><td>${esc(f)}</td><td class="num">${list.length}</td>
-            <td class="num">${len>0?fmtDist(len):'—'}</td>
+            <td class="num">${esc(fmtDist(len))}</td>
             <td class="num">${d.length?fmtNum(d.reduce((a,b)=>a+b,0)/d.length,0)+'cm':'—'}</td>
             <td class="num">${v.length?fmtNum(v.reduce((a,b)=>a+b,0)/v.length,2)+'m/s':'—'}</td>
             <td>${esc(mats.map(([k,n])=>`${k}${n>1?`(${n})`:''}`).join('・'))}</td></tr>`;
         }).join('')}
+        ${(()=>{
+          const rest = units.filter(x=>!habitatList(x.habitat_type).length);
+          return rest.length ? `<tr><td>未記入</td><td class="num">${rest.length}</td>
+            <td class="num">—</td><td class="num">—</td><td class="num">—</td><td>—</td></tr>` : '';
+        })()}
       </table></div>
-      <div class="tiny muted" style="margin-top:8px">代表水深・代表流速は、各区間の代表値を平均したものです。</div>
+      <div class="tiny muted" style="margin-top:8px">代表水深・代表流速は、各記録の代表値を平均したものです。
+        環境区分を複数選んだ記録は、いちばん先頭の区分で数えています。</div>
       ` : '' }
 
       <div class="sect">水温</div>
@@ -2435,6 +4644,12 @@ SCREENS.summary = (sv)=>{
   };
 };
 
+</script>
+
+<!-- ============================================================
+     3. 地図・書き出し・ゴミ箱・起動
+     ============================================================ -->
+<script>
 /* ============================================================
    地図
    背景は国土地理院のタイル。既定は航空写真（瀬・淵や州の位置が見えるため）。
@@ -2557,15 +4772,20 @@ function baseMapButtonsHtml(){
   ).join('') + `</div>`;
 }
 // 画面に出ている地図をまとめて返す。ここを経由しないと、地図を増やしたときに切替が効かなくなる
-function allMaps(){ return [MAP, PICKMAP, UNITMAP, OMAP].filter(Boolean); }
+function allMaps(){ return [MAP, PICKMAP, ENVMAP, OMAP].filter(Boolean); }
 function applyBaseMap(map, name){
   if(!map) return;
   const b = BASEMAPS[name] || BASEMAPS['航空写真'];
   if(map._baseLayer){ try{ map.removeLayer(map._baseLayer); }catch(e){} }
   // crossOrigin を付けないと画像が「中身を見ない」応答になり、Service Worker が
   // タイルをキャッシュできず、圏外で背景地図が出なくなる（地理院タイルはCORS対応済み）
-  map._baseLayer = L.tileLayer(b.url, {maxZoom:b.max, maxNativeZoom:b.max,
+  // 地理院タイルは18までしか無い。そこから先は引き伸ばして寄れるようにする
+  map._baseLayer = L.tileLayer(b.url, {maxZoom:MAP_MAX_ZOOM, maxNativeZoom:b.max,
     crossOrigin:'anonymous', attribution:GSI_ATTR}).addTo(map);
+  // タイルが無かったら、上の段のタイルを切り出して埋める
+  map._baseLayer.on('tileerror', ev=>{
+    try{ tileErrorFill(ev.tile, ev.coords, b.url, 1); }catch(e){}
+  });
   if(map._baseLayer.bringToBack) map._baseLayer.bringToBack();
 }
 function switchBaseMap(btn, name){
@@ -2576,6 +4796,329 @@ function switchBaseMap(btn, name){
   // 押したボタンだけでなく、画面内のすべての切替ボタンの表示を合わせる
   $$('.seg.basemap button').forEach(b=>b.classList.toggle('on', b.textContent===name));
 }
+/* ============================================================
+   地図の土台（魚類調査アプリと同じ作り）
+   ・指2本でひねると回る。北の針と「自分の向きを上にする」ボタン
+   ・地図の上に置く記号ボタン（画像を使わず、その場で描く図）
+   ・現在地ボタン
+   ・タイルが無い段は、上の段を切り出して埋める
+   ============================================================ */
+/* 地図を寄せられる上限。タイルは18までなので、その先は引き伸ばして見せる。
+   小さい川では写真がぼやけても、マスの線や印はくっきり大きくなる */
+const MAP_MAX_ZOOM = 24;
+/* この端末で地図を回せるか。部品が読めていれば回せる */
+function canRotate(){
+  return !!(window.L && L.Map && L.Map.prototype
+    && typeof L.Map.prototype.setBearing === 'function');
+}
+function makeMap(elId, center, zoom, bearing){
+  const el = document.getElementById(elId);
+  if(!el || !window.L) return null;
+  const opt = {zoomControl:true, attributionControl:true, maxZoom:MAP_MAX_ZOOM};
+  if(canRotate()){
+    // 指2本でひねると回る。自前の向きボタンを出すので、部品のボタンは出さない
+    opt.rotate = true; opt.rotateControl = false;
+    opt.touchRotate = true; opt.shiftKeyRotate = true;
+    opt.bearing = numOf(bearing)==='' ? 0 : numOf(bearing);
+  }
+  const m = L.map(el, opt).setView(center||[43.5,142.5], zoom||14);
+  if(canRotate()) addCompassControls(m);
+  return m;
+}
+/* 地図の向き（北から時計回りの度）。回せない端末では 0 */
+function mapBearing(map){
+  try{ return (map && typeof map.getBearing==='function') ? map.getBearing() : 0; }
+  catch(e){ return 0; }
+}
+/* 方位。北の針（押すと北が上に戻る）と、自分の向きに合わせる印 */
+let COMPASS_ON = false, COMPASS_HANDLER = null, COMPASS_EV = 'deviceorientation';
+let COMPASS_GEN = 0;
+function addCompassControls(map){
+  const C = L.Control.extend({
+    options:{position:'topright'},
+    onAdd(){
+      const d = L.DomUtil.create('div','leaflet-bar mapicons');
+      // 北の針。地図が回れば、北もその分だけ回った先にある
+      const n = L.DomUtil.create('a','',d);
+      n.href='#'; n.title='北を上に戻す'; n.setAttribute('aria-label','北を上に戻す');
+      n.innerHTML = iconSvg('north');
+      const upd = ()=>{
+        const g = n.querySelector('svg');
+        if(g) g.style.transform = 'rotate(' + mapBearing(map) + 'deg)';
+      };
+      map.on('rotate', upd); upd();
+      L.DomEvent.on(n,'click',ev=>{
+        L.DomEvent.stop(ev);
+        compassStop();
+        try{ map.setBearing(0); }catch(e){}
+        upd();
+        toast('北を上に戻しました');
+      });
+      // 自分の向きを上にする
+      const c = L.DomUtil.create('a','',d);
+      c.href='#'; c.title='自分の向きを上にする';
+      c.setAttribute('aria-label','自分の向きを上にする');
+      c.dataset.k = 'compass';
+      c.innerHTML = iconSvg('compass');
+      if(COMPASS_ON) c.classList.add('on');
+      L.DomEvent.on(c,'click',ev=>{ L.DomEvent.stop(ev); compassToggle(map); });
+      L.DomEvent.disableClickPropagation(d);
+      return d;
+    }
+  });
+  const ctl = new C();
+  ctl.addTo(map);
+  return ctl;
+}
+function compassMark(on){
+  document.querySelectorAll('.mapicons a[data-k="compass"]').forEach(a=>{
+    a.classList.toggle('on', !!on);
+  });
+}
+function compassStop(){
+  if(COMPASS_HANDLER){
+    try{ window.removeEventListener(COMPASS_EV, COMPASS_HANDLER); }catch(e){}
+    COMPASS_HANDLER = null;
+  }
+  COMPASS_ON = false;
+  COMPASS_GEN++;            // 待っている許可が、あとから効かないように
+  compassMark(false);
+}
+/* 端末の向き（北から時計回りの度）を出す。
+   水平に持ったときは「上端の向き」、立てて持ったときは「画面の裏＝見ている向き」を使う。
+   どちらか一方だけだと、持ち方によって出せない・大きくずれる */
+function headingOf(e){
+  if(typeof e.webkitCompassHeading === 'number' && isFinite(e.webkitCompassHeading)){
+    return e.webkitCompassHeading;
+  }
+  if(!(e.absolute === true || COMPASS_EV === 'deviceorientationabsolute')) return null;
+  const a = e.alpha, b = e.beta, g = e.gamma;
+  if(!isFinite(a)) return null;
+  if(!isFinite(b) || !isFinite(g)) return (360 - a) % 360;
+  const d = Math.PI/180;
+  const cA=Math.cos(a*d), sA=Math.sin(a*d), cB=Math.cos(b*d), sB=Math.sin(b*d),
+        cG=Math.cos(g*d), sG=Math.sin(g*d);
+  const Ey = -sA*cB, Ny = cA*cB;                    // 端末の上端が向く方向
+  if(Math.hypot(Ey, Ny) > 0.15) return (Math.atan2(Ey, Ny)/d + 360) % 360;
+  const Ez = sG*cA + sB*cG*sA, Nz = sG*sA - sB*cG*cA;   // ほぼ立てて持っているとき
+  return (Math.atan2(-Ez, -Nz)/d + 360) % 360;
+}
+function compassStart(map){
+  const gen = ++COMPASS_GEN;
+  COMPASS_EV = ('ondeviceorientationabsolute' in window)
+    ? 'deviceorientationabsolute' : 'deviceorientation';
+  let got = false, prev = null;
+  COMPASS_HANDLER = (e)=>{
+    if(gen !== COMPASS_GEN) return;
+    const h = headingOf(e);
+    if(h === null) return;
+    if(!got){
+      got = true;
+      compassMark(true);
+      toast('自分の向きが画面の上になります（もう一度押すと戻ります）');
+    }
+    // 2度未満の揺れは無視する（じっとしていても地図が震える）
+    if(prev !== null && Math.abs(((h - prev + 540) % 360) - 180) < 2) return;
+    prev = h;
+    try{ map.setBearing(-h); }catch(err){}
+  };
+  window.addEventListener(COMPASS_EV, COMPASS_HANDLER);
+  COMPASS_ON = true;
+  compassMark(true);
+  toast('方位を確かめています…');
+  // 何も届かない端末（方位計が無い等）では、そのまま待たせない
+  setTimeout(()=>{
+    if(gen === COMPASS_GEN && COMPASS_ON && !got){
+      compassStop();
+      toast('この端末では方位を取れませんでした。指2本でひねると手で回せます');
+    }
+  }, 4000);
+}
+function compassToggle(map){
+  if(COMPASS_ON || COMPASS_HANDLER){
+    compassStop();
+    toast('向きに合わせるのをやめました（地図の向きはそのまま）');
+    return;
+  }
+  if(!canRotate()){ toast('この端末では地図を回せません'); return; }
+  // iPhone は、押した流れの中でしか許可を聞けない
+  const D = window.DeviceOrientationEvent;
+  if(D && typeof D.requestPermission === 'function'){
+    D.requestPermission().then(r=>{
+      if(r === 'granted') compassStart(map);
+      else toast('方位を使う許可が下りませんでした');
+    }).catch(()=>toast('方位を使えませんでした'));
+    return;
+  }
+  compassStart(map);
+}
+
+/* 上の段のどのタイルの、どの部分を切り出すか */
+function tileParentInfo(z, x, y, up){
+  const size = 256 >> up;                 // 切り出す幅（ピクセル）
+  return { z: z - up, x: x >> up, y: y >> up,
+    sx: (x - ((x >> up) << up)) * size,
+    sy: (y - ((y >> up) << up)) * size,
+    size };
+}
+/* 失敗したタイルの場所に、上の段のタイルを切り出して入れる。
+   上の段も無ければ、さらに上を試す（4段まで）。
+   航空写真は場所によって17段階までしか無く、そこへ寄ると真っ暗になっていた */
+function tileErrorFill(img, coords, url, up){
+  if(!img || !coords || up > 4) return;
+  const c = { z: coords.z, x: coords.x, y: coords.y };
+  const par = tileParentInfo(c.z, c.x, c.y, up);
+  if(par.z < 5) return;
+  const src = url.replace('{z}', par.z).replace('{x}', par.x).replace('{y}', par.y);
+  const im = new Image();
+  im.crossOrigin = 'anonymous';
+  im.onload = ()=>{
+    try{
+      const cv = document.createElement('canvas');
+      cv.width = 256; cv.height = 256;
+      const ctx = cv.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(im, par.sx, par.sy, par.size, par.size, 0, 0, 256, 256);
+      img.src = cv.toDataURL();
+    }catch(e){ tileErrorFill(img, coords, url, up+1); }
+  };
+  im.onerror = ()=>tileErrorFill(img, coords, url, up+1);
+  im.src = src;
+}
+
+/* いまいる場所の印 */
+let MEMARK = [];
+const ME_MAX_ACC = 500;      // これより粗い位置は、輪を描いても意味がない
+function meIcon(){
+  return L.divIcon({className:'', iconSize:[20,20], iconAnchor:[10,10],
+    html:`<div style="width:14px;height:14px;border-radius:50%;background:#2f81f7;
+      border:3px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.45),0 1px 4px rgba(0,0,0,.6)"
+      ></div>`});
+}
+/* いまいる場所を描き直す。
+   取ったばかりの位置があれば、それを使う（取り直すと、飛んだ先と印がずれる） */
+function drawMe(map, fix){
+  if(!map) return false;
+  try{ MEMARK.forEach(x=>map.removeLayer(x)); }catch(e){}
+  MEMARK = [];
+  const f = fix || freshFix(20000);
+  if(!f) return false;
+  const pt = [f.lat, f.lon];
+  if(!validPt(pt)) return false;
+  // どれくらい確かか。粗すぎるときは輪を出さない（画面が青一色になる）
+  if(f.acc > 0 && f.acc <= ME_MAX_ACC){
+    MEMARK.push(L.circle(pt, {radius:f.acc, color:'#2f81f7', weight:1,
+      fillColor:'#2f81f7', fillOpacity:.08, interactive:false}).addTo(map));
+  }
+  MEMARK.push(L.marker(pt, {icon:meIcon(), interactive:false,
+    zIndexOffset:2000}).addTo(map));
+  return true;
+}
+
+/* 地図の上に置く記号。
+   文字で書くと場所を取り、絵文字は端末によって「？」になるので、自前の図で描く */
+const MAP_ICONS = {
+  // ポイント（●）
+  point: '<circle cx="12" cy="12" r="5.5" fill="currentColor" stroke="none"/>',
+  // ラインの始まり（●から線が伸びる）
+  lineStart: '<circle cx="5.5" cy="12" r="4.2" fill="currentColor" stroke="none"/>'
+    + '<path d="M10.5 12 H21" stroke-dasharray="3.5 3"/>',
+  // ラインの終わり（線が来て■で閉じる）
+  lineEnd: '<path d="M3 12 H13.5" stroke-dasharray="3.5 3"/>'
+    + '<rect x="14.5" y="7.8" width="8.4" height="8.4" rx="1.5"'
+    + ' fill="currentColor" stroke="none"/>',
+  // ラインの曲がり（カクッと折れた線）
+  lineBend: '<path d="M3 19 L10 19 L10 9 L21 9" stroke-dasharray="0"/>'
+    + '<circle cx="10" cy="9" r="2.6" fill="currentColor" stroke="none"/>',
+  // 1つ戻す（左へ回る矢印）
+  undo: '<path d="M4 9 H14a5.5 5.5 0 0 1 0 11H9"/>'
+    + '<path d="M4 9 L8.5 4.5 M4 9 L8.5 13.5"/>',
+  // いまいる場所に足す（狙いの輪＋十字）
+  addHere: '<circle cx="12" cy="12" r="5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'
+    + '<circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>',
+  // 北の針（上が北。地図が回ると一緒に回る）
+  north: '<path d="M12 2.5 L16.5 21 L12 17 L7.5 21 Z" fill="currentColor" stroke="none"/>'
+    + '<path d="M12 17 L12 2.5" stroke-width="1.2"/>',
+  // 自分の向きに合わせる（方位計）
+  compass: '<circle cx="12" cy="12" r="9"/>'
+    + '<path d="M15.5 8.5 L10.5 10.5 L8.5 15.5 L13.5 13.5 Z"'
+    + ' fill="currentColor" stroke="none"/>',
+  // つなげる（鎖）
+  chain: '<path d="M9.5 14.5 L14.5 9.5"/>'
+    + '<path d="M13 6.5l1.5-1.5a3.5 3.5 0 0 1 5 5L18 11.5"/>'
+    + '<path d="M11 17.5L9.5 19a3.5 3.5 0 0 1-5-5L6 12.5"/>',
+  // 大きく（四隅へ開く）
+  expand: '<rect x="3" y="4" width="18" height="16" rx="2"/>'
+    + '<path d="M8.5 15.5 L15.5 8.5"/>'
+    + '<path d="M15.5 8.5 H11.8 M15.5 8.5 V12.2"/>'
+    + '<path d="M8.5 15.5 H12.2 M8.5 15.5 V11.8"/>',
+  // 小さく（四隅から閉じる）
+  shrink: '<rect x="3" y="4" width="18" height="16" rx="2"/>'
+    + '<path d="M8.5 15.5 L15.5 8.5"/>'
+    + '<path d="M8.5 15.5 H12.2 M8.5 15.5 V11.8" transform="rotate(180 12 12)"/>'
+    + '<path d="M15.5 8.5 H11.8 M15.5 8.5 V12.2" transform="rotate(180 12 12)"/>',
+  // 全部入るように（枠の中に置いたもの）
+  fitAll: '<path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3'
+    + 'M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>'
+    + '<circle cx="8.8" cy="15.2" r="2.4" fill="currentColor" stroke="none"/>'
+    + '<circle cx="15.4" cy="9.4" r="2.4" fill="currentColor" stroke="none"/>',
+};
+function iconSvg(name, size){
+  const n = size || 22;
+  return `<svg viewBox="0 0 24 24" width="${n}" height="${n}" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+    stroke-linejoin="round" aria-hidden="true">${MAP_ICONS[name]||''}</svg>`;
+}
+/* 記号のボタンを、まとめて1本の帯にして地図に置く */
+function addMapIconBar(map, items, pos){
+  const C = L.Control.extend({
+    options:{position: pos || 'topright'},
+    onAdd(){
+      const d = L.DomUtil.create('div','leaflet-bar mapicons');
+      items.forEach(it=>{
+        const a = L.DomUtil.create('a','',d);
+        a.href='#';
+        a.title = it.title || '';
+        a.setAttribute('aria-label', it.title || '');
+        if(it.key) a.dataset.k = it.key;
+        a.innerHTML = iconSvg(it.icon);
+        if(it.on) a.classList.add('on');
+        L.DomEvent.on(a,'click',ev=>{ L.DomEvent.stop(ev); it.tap(); });
+      });
+      L.DomEvent.disableClickPropagation(d);
+      return d;
+    }
+  });
+  const c = new C();
+  c.addTo(map);
+  return c;
+}
+/* 現在地ボタン。画像を使わない自前のボタン */
+function addLocateControl(map){
+  const C = L.Control.extend({
+    options:{position:'topleft'},
+    onAdd(){
+      const d = L.DomUtil.create('div','leaflet-bar');
+      const a = L.DomUtil.create('a','',d);
+      // ◎ は「いまいる場所へ」の印。絵文字は使わない（端末で「？」になる）
+      a.href='#'; a.title='いまいる場所へ'; a.textContent='◎';
+      a.style.cssText='font-weight:700;text-align:center;font-size:18px';
+      L.DomEvent.on(a,'click',ev=>{
+        L.DomEvent.stop(ev);
+        getFixOnce(f=>{
+          if(!f){ toast('いまいる場所を取れませんでした。空の見えるところでお試しください'); return; }
+          map.setView([f.lat,f.lon], Math.max(map.getZoom(),16), {animate:false});
+          drawMe(map, f);      // いま取れた位置で描く
+          if(f.acc > GPS_MAX_ACC) toast(`いまの位置は ±${Math.round(f.acc)}m と粗いです`);
+        });
+      });
+      L.DomEvent.disableClickPropagation(d);
+      return d;
+    }
+  });
+  map.addControl(new C());
+}
+
 // 産卵床の位置を示す赤い点。画像を使わないので同梱ファイルが増えない
 function reddPinIcon(){
   return L.divIcon({ className:'', iconSize:[26,26], iconAnchor:[13,13],
@@ -2590,8 +5133,9 @@ function speciesColor(name){
   const i = list.indexOf(name);
   return SPECIES_COLORS[(i<0 ? list.length : i) % SPECIES_COLORS.length];
 }
-// 河川形態ごとの色（物理環境の線に使う）
-const FORM_COLORS = {'早瀬':'#e0a030','平瀬':'#4ec38a','淵':'#7a6fd0','瀬頭':'#e07050'};
+// 環境区分ごとの色（物理環境の印に使う）。7区分ぶん用意する
+const FORM_COLORS = {'早瀬':'#e0a030','平瀬':'#4ec38a','淵':'#7a6fd0','瀬頭':'#e07050',
+                     'トロ':'#4aa3dd','たまり':'#c86fa8','その他':'#9aa8b4'};
 function formColor(f){ return FORM_COLORS[f] || '#9aa8b4'; }
 
 function ageOpacity(age){
@@ -2832,18 +5376,36 @@ function drawMap(sv){
       .bindPopup(`<b>${esc(r.name)}</b><br>区間長 ${fmtDist(reachLength(r))}`);
   });
 
-  // 物理環境の区間を、河川形態ごとの色の太い線で重ねる
+  // 物理環境を重ねる。点は丸、ラインは太い線、メッシュは四角。
+  // 色は「色分け」で選んだ項目。選んでいなければ環境区分の色
+  const envRange = envColorRange(sv);
   DB.unitsOf(sv).forEach(u=>{
-    const a=ptOf(u.start_lat,u.start_lon), b=ptOf(u.end_lat,u.end_lon);
-    if(!a || !b) return;
-    L.polyline([a,b], { color:formColor(u.river_form), weight:7, opacity:.75, dashArray:'1,0' })
-      .addTo(group)
-      .bindPopup(`<b>${esc(u.name||'')}</b>（${esc(u.river_form||'')}）<br>
-        区間長 ${fmtDist(unitLength(u))}<br>
-        ${esc([num(u.depth_cm_rep)!=null?`代表水深 ${u.depth_cm_rep}cm`:'',
-               num(u.velocity_ms_rep)!=null?`代表流速 ${u.velocity_ms_rep}m/s`:'',
-               u.substrate_rep||grainMain(u.substrate_pct)||''].filter(Boolean).join(' ／ '))}<br>
-        <a href="#" onclick="nav('unitEdit','${esc(JSON.stringify({sv, u:u.uuid}))}'); return false;">この記録を開く</a>`);
+    const col = envColorOf(u, envRange) || formColor(habitatList(u.habitat_type)[0]);
+    const d = unitDepth(u), v = unitVelocity(u);
+    const info = esc([d.rep!=='' ? `代表水深 ${fmtNum(d.rep,0)}cm` : '',
+                      v.rep!=='' ? `代表流速 ${fmtNum(v.rep,2)}m/s` : '',
+                      u.substrate1||''].filter(Boolean).join(' ／ '));
+    const go = isMesh(u) ? `nav('mesh','${u.uuid}')`
+             : `nav('envMap','${esc(JSON.stringify({sv, record:u.uuid}))}')`;
+    const popup = `<b>${esc(u.name||'')}</b>（${esc(envMethod(u))}${
+        u.habitat_type?'・'+esc(habitatShort(u.habitat_type)):''}）<br>
+      ${isMesh(u) ? `マス ${meshCurrentCells(u).length}` : `区間長 ${esc(fmtDist(unitLengths(u).used))}`}<br>
+      ${info}<br>
+      <a href="#" onclick="${go}; return false;">この記録を開く</a>`;
+    if(isMesh(u)){
+      const g = meshGeom(u);
+      if(!g) return;
+      L.polygon(g.corners, { color:col, weight:2, fillOpacity:.15 }).addTo(group).bindPopup(popup);
+    }else if(isLine(u)){
+      const path = linePath(u);
+      if(path.length < 2) return;
+      L.polyline(path, { color:col, weight:7, opacity:.75 }).addTo(group).bindPopup(popup);
+    }else{
+      const a = ptOf(u.latitude, u.longitude);
+      if(!a) return;
+      L.circleMarker(a, { radius:7, color:'#fff', weight:2, fillColor:col, fillOpacity:.95 })
+        .addTo(group).bindPopup(popup);
+    }
   });
 
   redds.forEach(r=>{
@@ -2954,10 +5516,13 @@ function renderLegend(sv){
   const age = OPT.age.map(a=>`<span class="badge">
       <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9aa8b4;opacity:${ageOpacity(a)};margin-right:6px"></span>${esc(a)}</span>`).join(' ');
   const kind = `<span class="badge">● 産卵床</span> <span class="badge">■ 親魚のみ</span> <span class="badge">✕ ホッチャレのみ</span>`;
-  const forms = OPT.riverForm.map(f=>`<span class="badge">
+  const forms = OPT.habitat.map(f=>`<span class="badge">
       <span style="display:inline-block;width:16px;height:5px;background:${formColor(f)};margin-right:6px;vertical-align:middle"></span>${esc(f)}</span>`).join(' ');
+  // 色分けの基準を選んでいるときは、そちらの凡例を出す（地図の色と食い違わないように）
+  const envLeg = envLegendHtml(sv);
   box.innerHTML = `<div class="small muted">記録の種類（形）</div><div style="margin:6px 0 10px">${kind}</div>
-    <div class="small muted">物理環境の区間（太い線の色）</div><div style="margin:6px 0 10px">${forms}</div>
+    <div class="small muted">物理環境（点＝丸／ライン＝太い線／メッシュ＝四角）</div>
+    <div style="margin:6px 0 10px">${envLeg || forms}</div>
     <div class="small muted">魚種（色）</div><div style="margin:6px 0 10px">${sp||'—'}</div>
     <div class="small muted">新旧（塗りの濃さ・産卵床のみ）</div><div style="margin-top:6px">${age}</div>`;
 }
@@ -3067,14 +5632,29 @@ function reachRows(surveys){
 }
 
 /* ---------- 物理環境（河川構造ごとの区間） ---------- */
+/* 物理環境の列。CSVとGeoJSONで同じものを見る（片方だけ直して食い違うのを防ぐ） */
 function unitCols(){
-  return ['survey_id','survey_name','survey_date','river_name','reach_name',
-    'reach_id','unit_id','unit_name','river_form','started_at','ended_at',
-    'start_lat','start_lon','end_lat','end_lon',
-    'length_m_straight','length_m_manual','length_m_used','river_width_m',
-    'depth_cm_rep','velocity_ms_rep','env_point_count',
-    'substrate_rep','substrate_main_pct','substrate_pct_total']
+  return ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
+    'unit_id','unit_name','env_method','habitat_type',
+    'started_at','ended_at','survey_time_start','survey_time_end',
+    'latitude','longitude','gps_accuracy','position_source',
+    'line_start_lat','line_start_lon','line_start_acc',
+    'line_end_lat','line_end_lon','line_end_acc',
+    'line_direction','line_via_count','chained_from',
+    'length_m_straight','length_m_line','length_m_manual','length_m_used',
+    'width_m','area_m2_calc','area_m2_manual','area_m2_used',
+    'env_point_count','env_point_with_pos_count',
+    'depth_cm_min','depth_cm_max','depth_cm_mean','depth_cm_manual','depth_cm_rep',
+    'velocity_ms_min','velocity_ms_max','velocity_ms_mean','velocity_ms_manual','velocity_ms_rep',
+    'water_temp_c','substrate1','substrate2','gravel_condition']
     .concat(OPT.substrate.map(g=>'pct_'+g))
+    .concat(['substrate_pct_total'])
+    .concat(['cover_left_1','cover_left_pct_1','cover_left_2','cover_left_pct_2',
+             'cover_left_3','cover_left_pct_3','cover_left_length_m','cover_left_present',
+             'cover_right_1','cover_right_pct_1','cover_right_2','cover_right_pct_2',
+             'cover_right_3','cover_right_pct_3','cover_right_length_m','cover_right_present'])
+    .concat(['mesh_row_m','mesh_col_m','mesh_rows','mesh_cols','mesh_length_m','mesh_width_m',
+             'mesh_cell_count','mesh_old_cell_count','mesh_grid_id'])
     .concat(['memo']);
 }
 function unitRows(surveys){
@@ -3083,21 +5663,90 @@ function unitRows(surveys){
     const reaches = DB.reachesOf(s.uuid);
     DB.unitsOf(s.uuid).forEach(u=>{
       const re = reaches.find(x=>x.uuid===u.reach_uuid);
-      const pct = u.substrate_pct||{};
+      const pct = substratePct(u);
+      const len = unitLengths(u), ar = unitAreas(u);
+      const d = unitDepth(u), v = unitVelocity(u);
+      const pts = envPoints(u);
+      const g = meshGeom(u);
+      const cells = isMesh(u) ? meshCellsOf(u.uuid) : [];
       const row = { survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
         river_name:s.river_name, reach_id:u.reach_uuid||'', reach_name:re?re.name:'',
-        unit_id:u.uuid, unit_name:u.name, river_form:u.river_form,
+        unit_id:u.uuid, unit_name:u.name||'', env_method:envMethod(u),
+        habitat_type:u.habitat_type||'',
         started_at:u.started_at||'', ended_at:u.ended_at||'',
-        start_lat:u.start_lat??'', start_lon:u.start_lon??'', end_lat:u.end_lat??'', end_lon:u.end_lon??'',
-        length_m_straight:u.length_m_auto??'', length_m_manual:u.length_m_manual??'',
-        length_m_used:unitLength(u), river_width_m:u.river_width_m??'',
-        depth_cm_rep:u.depth_cm_rep??'', velocity_ms_rep:u.velocity_ms_rep??'',
-        env_point_count:envPoints(u).length,
-        substrate_rep:u.substrate_rep||'', substrate_main_pct:grainMain(pct),
-        substrate_pct_total: Object.keys(pct).length ? grainTotal(pct) : '',
+        survey_time_start:u.survey_time_start||'', survey_time_end:u.survey_time_end||'',
+        latitude:fixCoord(u.latitude), longitude:fixCoord(u.longitude),
+        gps_accuracy:u.gps_accuracy??'', position_source:u.position_source||'',
+        line_start_lat:fixCoord(u.line_start_lat), line_start_lon:fixCoord(u.line_start_lon),
+        line_start_acc:u.line_start_acc??'',
+        line_end_lat:fixCoord(u.line_end_lat), line_end_lon:fixCoord(u.line_end_lon),
+        line_end_acc:u.line_end_acc??'',
+        line_direction:u.line_direction||'', line_via_count:lineVias(u).length,
+        chained_from:u.chained_from||'',
+        length_m_straight:lineStraight(u), length_m_line:len.line,
+        length_m_manual:len.manual, length_m_used:len.used,
+        width_m:u.width_m??'', area_m2_calc:ar.calc, area_m2_manual:ar.manual, area_m2_used:ar.used,
+        env_point_count:pts.length,
+        env_point_with_pos_count:pts.filter(p=>ptOf(p.latitude,p.longitude)).length,
+        depth_cm_min:d.min, depth_cm_max:d.max, depth_cm_mean:d.avg,
+        depth_cm_manual:d.manual, depth_cm_rep:d.rep,
+        velocity_ms_min:v.min, velocity_ms_max:v.max, velocity_ms_mean:v.avg,
+        velocity_ms_manual:v.manual, velocity_ms_rep:v.rep,
+        water_temp_c:u.water_temp_c??'',
+        substrate1:u.substrate1||'', substrate2:u.substrate2||'',
+        gravel_condition:u.gravel_condition||'',
+        substrate_pct_total: Object.keys(pct).some(k=>numOf(pct[k])!=='') ? substratePctSum(u) : '',
+        cover_left_length_m:u.cover_left_length_m??'', cover_left_present:coverPresent(u,'left'),
+        cover_right_length_m:u.cover_right_length_m??'', cover_right_present:coverPresent(u,'right'),
+        mesh_row_m:u.mesh_row_m??'', mesh_col_m:u.mesh_col_m??'',
+        mesh_rows:g?g.rows:'', mesh_cols:g?g.cols:'',
+        mesh_length_m:isMesh(u)?meshLength(u):'', mesh_width_m:isMesh(u)?meshWidth(u):'',
+        mesh_cell_count:isMesh(u)?meshCurrentCells(u,cells).length:'',
+        mesh_old_cell_count:isMesh(u)?meshOldCells(u,cells).length:'',
+        mesh_grid_id:u.mesh_grid_id||'',
         memo:u.memo||'' };
-      OPT.substrate.forEach(g=>{ row['pct_'+g] = pct[g]??''; });
+      OPT.substrate.forEach(g2=>{ row['pct_'+g2] = pct[g2]??''; });
+      ['left','right'].forEach(side=>{
+        const cl = coverList(u, side);
+        [0,1,2].forEach(i=>{
+          row['cover_'+side+'_'+(i+1)] = cl[i] ? cl[i].type : '';
+          row['cover_'+side+'_pct_'+(i+1)] = cl[i] && cl[i].pct!==undefined ? cl[i].pct : '';
+        });
+      });
       rows.push(row);
+    });
+  });
+  return rows;
+}
+
+/* ---------- メッシュのマスを1マス1行で ---------- */
+const MESH_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
+  'unit_id','unit_name','row','col','is_current_grid','grid_id',
+  'latitude','longitude','depth_cm','velocity_ms',
+  'substrate','habitat_type','gravel_condition','cover']
+  .concat(OPT.substrate.map(g=>'pct_'+g))
+  .concat(['note','measured_at','cell_id']);
+function meshRows(surveys){
+  const rows=[];
+  surveys.forEach(s=>{
+    const reaches = DB.reachesOf(s.uuid);
+    DB.unitsOf(s.uuid).filter(isMesh).forEach(u=>{
+      const re = reaches.find(x=>x.uuid===u.reach_uuid);
+      // 前の格子のマスも残す（一覧と集計には混ぜないが、記録としては消さない）
+      meshCellsOf(u.uuid).forEach(c=>{
+        const pct = (c.substrate_pct && typeof c.substrate_pct==='object') ? c.substrate_pct : {};
+        const row = { survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date),
+          river_name:s.river_name, reach_id:u.reach_uuid||'', reach_name:re?re.name:'',
+          unit_id:u.uuid, unit_name:u.name||'', row:c.row+1, col:c.col+1,
+          is_current_grid: meshIsCurrent(u, c) ? 'はい' : 'いいえ', grid_id:c.grid_id||'',
+          latitude:fixCoord(c.latitude), longitude:fixCoord(c.longitude),
+          depth_cm:c.depth_cm??'', velocity_ms:c.velocity_ms??'',
+          substrate:c.substrate||'', habitat_type:c.habitat_type||'',
+          gravel_condition:c.gravel_condition||'', cover:c.cover||'',
+          note:c.note||'', measured_at:c.measured_at||'', cell_id:c.uuid };
+        OPT.substrate.forEach(g=>{ row['pct_'+g] = pct[g]??''; });
+        rows.push(row);
+      });
     });
   });
   return rows;
@@ -3106,7 +5755,8 @@ function unitRows(surveys){
 /* ---------- 測点（水深・流速）を1点1行で ---------- */
 // 産卵床の記録にも物理環境にも測点が付くので、どちらのものかを parent_type で示す
 const ENVPOINT_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
-  'parent_type','parent_id','parent_name','river_form','point_no','point_note','depth_cm','velocity_ms'];
+  'parent_type','parent_id','parent_name','river_form','point_no','point_note',
+  'depth_cm','velocity_ms','substrate','latitude','longitude','gps_accuracy','position_source'];
 function envPointRows(surveys){
   const rows=[];
   surveys.forEach(s=>{
@@ -3115,7 +5765,9 @@ function envPointRows(surveys){
       list.forEach((p,i)=>rows.push({ survey_id:s.uuid, survey_name:s.name,
         survey_date:fmtDate(s.survey_date), river_name:s.river_name,
         reach_id:'', reach_name:'', parent_type, parent_id:id, parent_name:name, river_form:form||'',
-        point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'' }));
+        point_no:i+1, point_note:p.note||'', depth_cm:p.depth_cm??'', velocity_ms:p.velocity_ms??'',
+        substrate:p.substrate||'', latitude:fixCoord(p.latitude), longitude:fixCoord(p.longitude),
+        gps_accuracy:p.gps_accuracy??'', position_source:p.position_source||'' }));
     };
     DB.reddsOf(s.uuid).forEach(r=>{
       const re = reaches.find(x=>x.uuid===r.reach_uuid);
@@ -3126,7 +5778,7 @@ function envPointRows(surveys){
     DB.unitsOf(s.uuid).forEach(u=>{
       const re = reaches.find(x=>x.uuid===u.reach_uuid);
       const before = rows.length;
-      push('物理環境', u.uuid, u.name||'', u.river_form, envPoints(u));
+      push('物理環境', u.uuid, u.name||'', habitatList(u.habitat_type)[0]||'', envPoints(u));
       for(let i=before;i<rows.length;i++){ rows[i].reach_name = re?re.name:''; rows[i].reach_id = u.reach_uuid||''; }
     });
   });
@@ -3152,7 +5804,7 @@ function noteRows(surveys){
 function exportCSV(surveys){
   const base = exportBase(surveys);
   const rr = reddRows(surveys), er = reachRows(surveys), ep = envPointRows(surveys),
-        ur = unitRows(surveys), nr = noteRows(surveys);
+        ur = unitRows(surveys), nr = noteRows(surveys), mr = meshRows(surveys);
   if(!rr.length && !er.length && !ur.length){ toast('書き出すものがありません'); return; }
   // Excelで文字化けしないよう先頭にBOMを付ける
   if(rr.length) download(`${base}_redds.csv`, '﻿'+toCsv(REDD_COLS, rr), 'text/csv;charset=utf-8');
@@ -3161,6 +5813,8 @@ function exportCSV(surveys){
   if(nr.length) download(`${base}_notes.csv`, '﻿'+toCsv(NOTE_COLS, nr), 'text/csv;charset=utf-8');
   // 水深・流速は1つの記録に何点でも入るので、1点1行の表も別に出す
   if(ep.length) download(`${base}_env_points.csv`, '﻿'+toCsv(ENVPOINT_COLS, ep), 'text/csv;charset=utf-8');
+  // メッシュのマスも1マス1行で出す
+  if(mr.length) download(`${base}_mesh_cells.csv`, '﻿'+toCsv(MESH_COLS, mr), 'text/csv;charset=utf-8');
   toast('CSVを書き出しました');
 }
 
@@ -3186,19 +5840,51 @@ function exportGeoJSON(surveys){
     });
   });
 
-  // 物理環境は始点→終点の線として出す（QGISで河川構造ごとに見られる）
+  // 物理環境は取り方ごとに形が変わる。点＝Point、ライン＝曲がりを含む LineString、
+  // メッシュ＝範囲の四角。属性はCSVと同じ列定義を使う
   const units=[];
   surveys.forEach(s=>{
-    unitRows([s]).forEach(row=>{
-      const a=ptOf(row.start_lat, row.start_lon), b=ptOf(row.end_lat, row.end_lon);
-      if(!a || !b) return;
-      units.push({ type:'Feature',
-        geometry:{ type:'LineString', coordinates:[[a[1],a[0]],[b[1],b[0]]] },
+    const rowOf = {};
+    unitRows([s]).forEach(row=>{ rowOf[row.unit_id] = row; });
+    DB.unitsOf(s.uuid).forEach(u=>{
+      const row = rowOf[u.uuid]; if(!row) return;
+      let geom = null;
+      if(isMesh(u)){
+        const g = meshGeom(u);
+        if(g) geom = { type:'Polygon',
+          coordinates:[ g.corners.map(p=>[p[1],p[0]]).concat([[g.corners[0][1],g.corners[0][0]]]) ] };
+      }else if(isLine(u)){
+        const path = linePath(u);
+        if(path.length>=2) geom = { type:'LineString', coordinates: path.map(p=>[p[1],p[0]]) };
+      }else{
+        const a = ptOf(u.latitude, u.longitude);
+        if(a) geom = { type:'Point', coordinates:[a[1],a[0]] };
+      }
+      if(!geom) return;
+      units.push({ type:'Feature', geometry:geom,
         properties: unitCols().reduce((p,c)=>{ p[c]=row[c]; return p; }, {}) });
     });
   });
   if(units.length) download(`${base}_habitat_units.geojson`,
     JSON.stringify({type:'FeatureCollection', features:units}, null, 1), 'application/geo+json');
+
+  // メッシュのマスは、中心の点として出す
+  const meshFeats = meshRows(surveys)
+    .filter(c=>ptOf(c.latitude, c.longitude))
+    .map(c=>{ const p=ptOf(c.latitude, c.longitude);
+      return { type:'Feature', geometry:{ type:'Point', coordinates:[p[1],p[0]] },
+        properties: MESH_COLS.reduce((o,k)=>{ o[k]=c[k]; return o; }, {}) }; });
+  if(meshFeats.length) download(`${base}_mesh_cells.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:meshFeats}, null, 1), 'application/geo+json');
+
+  // 座標のついた測点も点として出す
+  const ptFeats = envPointRows(surveys)
+    .filter(p=>ptOf(p.latitude, p.longitude))
+    .map(p=>{ const q=ptOf(p.latitude, p.longitude);
+      return { type:'Feature', geometry:{ type:'Point', coordinates:[q[1],q[0]] },
+        properties: ENVPOINT_COLS.reduce((o,k)=>{ o[k]=p[k]; return o; }, {}) }; });
+  if(ptFeats.length) download(`${base}_env_points.geojson`,
+    JSON.stringify({type:'FeatureCollection', features:ptFeats}, null, 1), 'application/geo+json');
 
   // 位置のついたメモも点として出す
   const noteFeats = noteRows(surveys)
@@ -3272,7 +5958,7 @@ async function exportPhotoZip(surveys){
 }
 
 /* ---------- バックアップと復元 ---------- */
-const CORE_KEYS = ['sv','re','rd','nt','un'];
+const CORE_KEYS = ['sv','re','rd','nt','un','mc'];
 function buildBackup(){
   const data={};
   CORE_KEYS.forEach(k=>{ data[DB.key[k]] = DB.loadRaw(DB.key[k]); });   // 消したものも含めて丸ごと
@@ -3280,7 +5966,7 @@ function buildBackup(){
            species: speciesList(), data };
 }
 // バックアップの中身をユーザーに見せる文言（キーの並びに依存しないよう名前で作る）
-const CORE_LABEL = { sv:'調査', re:'区間', rd:'記録', nt:'メモ', un:'物理環境' };
+const CORE_LABEL = { sv:'調査', re:'区間', rd:'記録', nt:'メモ', un:'物理環境', mc:'メッシュのマス' };
 function backupCounts(b){
   return CORE_KEYS.map(k=>`${CORE_LABEL[k]} ${(b.data[DB.key[k]]||[]).length}`).join(' / ');
 }
@@ -3466,7 +6152,10 @@ const TRASH_GROUPS = [
   { key:'re', label:'区間',   name:x=>x.name||'(区間)' },
   { key:'rd', label:'産卵床', name:x=>`No.${x.redd_no||'—'} ${x.species||'種不明'}` },
   { key:'nt', label:'メモ',   name:x=>(x.content||'').slice(0,30)||'(メモ)' },
-  { key:'un', label:'物理環境', name:x=>`${x.name||'(区間)'} ${x.river_form||''}` },
+  // メッシュのマスはここに並べない（100マスの範囲を消すとゴミ箱が100行になる）。
+  // 親の物理環境を戻せば、中のマスもいっしょに戻る
+  { key:'un', label:'物理環境',
+    name:x=>`${x.name||'(記録)'} ${envMethod(x)}${x.habitat_type?' '+habitatShort(x.habitat_type):''}` },
 ];
 SCREENS.trash = ()=>{
   const blocks = TRASH_GROUPS.map(g=>{
@@ -3490,6 +6179,21 @@ SCREENS.trash = ()=>{
   };
 };
 function restoreItem(k, u){
+  // 調査がゴミ箱にあるうちは、中の記録だけを戻さない。
+  // 戻すと「調査から辿れない記録」ができ、ゴミ箱を空にしても消えずに残る
+  if(k!=='sv'){
+    const x = DB.get(DB.key[k], u);
+    // どの調査のものか分からない記録も、単独では戻さない（戻しても辿れない）
+    if(x && !x.survey_uuid){
+      alert('この記録がどの調査のものか分からないため、戻せません。'
+        + 'バックアップから戻すことをご検討ください。');
+      return;
+    }
+    if(x && !DB.survey(x.survey_uuid)){
+      alert('この記録が入っている調査も、ゴミ箱にあります。先に調査を戻してください。');
+      return;
+    }
+  }
   if(!DB.restore(DB.key[k], u)){ alert('戻せませんでした。端末の空き容量を確認してください。'); return; }
   // 調査を戻すときは、一緒に消えた記録もまとめて戻す（空の調査が復活しないように）
   if(k==='sv'){
@@ -3508,23 +6212,158 @@ function restoreItem(k, u){
   }else toast('戻しました');
   render();
 }
-function purgeAll(){
-  const total = TRASH_GROUPS.reduce((a,g)=>a+DB.deleted(DB.key[g.key]).length, 0);
-  if(!confirm(`ゴミ箱の ${total} 件を完全に消します。元に戻せません。よろしいですか？`)) return;
-  TRASH_GROUPS.forEach(g=>{
-    DB.deleted(DB.key[g.key]).forEach(x=>DB.hardDelete(DB.key[g.key], x.uuid));
+// 保存されている記録を全部読む。1つでも読めなければ null を返す
+// （DB.load は壊れていても空配列を返すので、ここでは loadRaw を使う）
+function readAllRaw(){
+  const raw = {};
+  try{ CORE_KEYS.forEach(k=>{ raw[k] = DB.loadRaw(DB.key[k]); }); }
+  catch(e){ return null; }
+  return raw;
+}
+function trashCountOf(raw){
+  return TRASH_GROUPS.reduce((a,g)=>
+    a + (raw[g.key]||[]).filter(x=>x && x.deleted_at).length, 0);
+}
+/* ゴミ箱を空にしたあとに残るもの＝「ゴミ箱に入っていない」かつ「親から辿れる」もの。
+   どの調査のものか分からない記録は、辿れないので残さない */
+function purgeKeep(raw){
+  const keep = {};
+  keep.sv = raw.sv.filter(x=>x && !x.deleted_at);
+  const svAlive = new Set(keep.sv.map(x=>x.uuid));
+  ['re','rd','nt','un'].forEach(k=>{
+    keep[k] = raw[k].filter(x=>x && !x.deleted_at && x.survey_uuid && svAlive.has(x.survey_uuid));
   });
+  const unAlive = new Set(keep.un.map(x=>x.uuid));
+  // マスはゴミ箱に並べていないので、親の物理環境から辿れるかどうかで決める
+  keep.mc = raw.mc.filter(x=>x && !x.deleted_at && x.unit_uuid && unAlive.has(x.unit_uuid));
+  return keep;
+}
+/* 実際に消えるものの一覧。件数だけを見ると、
+   確認しているあいだに「1件戻して別の1件を消す」が起きたときに見逃す。
+   UUIDで見比べると、保存データが壊れて同じUUIDが2つあるときや
+   UUIDの無いときに取りこぼすので、そのもの（同じ raw の中の参照）で見る */
+function purgeTargets(raw){
+  const keep = purgeKeep(raw);
+  const out = [];
+  CORE_KEYS.forEach(k=>{
+    const kept = new Set(keep[k]);
+    raw[k].forEach(x=>{
+      if(x && kept.has(x)) return;
+      // 区切り文字が中身とぶつからないように、JSONの形で並べる
+      out.push(JSON.stringify([k, (x && x.uuid!==undefined) ? x.uuid : null,
+                                  (x && x.deleted_at!==undefined) ? x.deleted_at : null]));
+    });
+  });
+  return out.sort();
+}
+function purgeAll(){
+  // 読めない保存データが1つでもあるうちは、何も消さない。
+  // 読み取りに失敗したものを「空」と見なすと、無事な記録まで道連れにしてしまう
+  const peek = readAllRaw();
+  if(!peek){
+    alert('保存された記録の一部を読み取れないため、ゴミ箱を空にしませんでした。\n'
+      + '先にバックアップを書き出して、中身をご確認ください。');
+    return;
+  }
+  const total = trashCountOf(peek);
+  const before = purgeTargets(peek);      // 消える予定のものを、UUIDまで控える
+  if(!confirm(`ゴミ箱の ${total} 件を完全に消します。元に戻せません。よろしいですか？`)) return;
+
+  // 確認しているあいだに、別のタブが記録を足したり戻したりしていることがある。
+  // 数えたときの写しで上書きすると、その分が消えてしまうので読み直す
+  const raw = readAllRaw();
+  if(!raw){
+    alert('保存された記録の一部を読み取れないため、ゴミ箱を空にしませんでした。');
+    return;
+  }
+  // 件数だけを見ると、「1件戻して別の1件を消す」で数が変わらないときに見逃す。
+  // 消える予定のものを1つずつ突き合わせる
+  const after = purgeTargets(raw);
+  if(before.length !== after.length || before.some((x,i)=>x!==after[i])){
+    alert('確認しているあいだに、ゴミ箱の中身が変わりました。\n'
+      + '何も消していません。もう一度お試しください。');
+    render();
+    return;
+  }
+
+  const keep = purgeKeep(raw);
+  let ok = true;
+  CORE_KEYS.forEach(k=>{ if(!DB.save(DB.key[k], keep[k])) ok = false; });
   try{ PhotoDB.gc(); }catch(e){}   // 参照されなくなった写真も片付ける
-  toast('ゴミ箱を空にしました');
+  toast(ok ? 'ゴミ箱を空にしました'
+           : '一部を消せませんでした（端末の空き容量をご確認ください）');
   render();
 }
 
 /* ============================================================
    更新・起動
    ============================================================ */
-// 「最新に更新」：このアプリのキャッシュだけ消して読み直す。他アプリのキャッシュは触らない
-async function forceUpdate(){
-  toast('最新版を確認しています…');
+/* いま配信されている版を見に行く（読むだけ。何も消さない） */
+function checkLatestVersion(){
+  return fetch('./redd_survey.html', {cache:'no-store'})
+    .then(r=>{
+      if(!r.ok) throw new Error('取りに行けませんでした（'+r.status+'）');
+      return r.text();
+    })
+    .then(t=>{
+      const m = t.match(/const APP_VERSION = '([^']*)'/);
+      if(!m) throw new Error('版が読み取れませんでした');
+      const d = t.match(/const APP_DATE = '([^']*)'/);
+      return {version:m[1], date: d ? d[1] : ''};
+    });
+}
+/* 「新しい版があるか見る」。何も消さずに、比べた結果だけを画面に出す */
+function checkUpdate(){
+  const box = $('#updInfo');
+  if(box) box.textContent = '調べています…';
+  checkLatestVersion().then(x=>{
+    const el = $('#updInfo'); if(!el) return;
+    el.textContent = x.version === APP_VERSION
+      ? `最新です（${APP_VERSION}）`
+      : `新しい版があります：${x.version}`
+        + (x.date ? `（${x.date}）` : '')
+        + `　いまは ${APP_VERSION}。下のボタンで取り込めます`;
+  }).catch(e=>{
+    const el = $('#updInfo'); if(!el) return;
+    el.textContent = '調べられませんでした：' + e.message
+      + '（電波の届くところでお試しください）';
+  });
+}
+
+// 「最新に更新」：このアプリのキャッシュだけ消して読み直す。他アプリのキャッシュは触らない。
+// 消してよい保管場所は、自分のものだけに絞る。
+// 圏外用に自分で囲って落とした地図（redd-map-pack-）は、更新と関係がないので消さない
+function cachesToClear(keys){
+  return (keys||[]).filter(k =>
+    k.startsWith('redd-survey-') || k.startsWith('redd-map-tiles-'));
+}
+function forceUpdate(){
+  // 圏外用の地図を出し入れしている最中なら、聞くまでもなく止める
+  if(typeof packLocked==='function' && packLocked()){
+    toast('圏外用の地図の出し入れが終わっていません。終わってからお試しください');
+    return;
+  }
+  if(!confirm('アプリのプログラムだけを最新に読み込み直します。\n\n'
+    + '・記録した調査・産卵床・物理環境はそのまま残ります\n'
+    + '・圏外用に落とした地図もそのまま残ります\n'
+    + '・電波の届くところで行ってください\n\nよろしいですか？')) return;
+
+  // 先に取れるか確かめる。取れないまま消すと、圏外では二度と開けなくなる
+  toast('新しい版があるか調べています…');
+  checkLatestVersion().then(x=>{
+    if(x.version === APP_VERSION
+       && !confirm(`いま入っている ${APP_VERSION} が最新です。\nそれでも読み込み直しますか？`)){
+      toast('やめました');
+      return;
+    }
+    doForceUpdate();
+  }).catch(e=>{
+    toast('新しい版を取りに行けませんでした：' + e.message
+      + '。電波の届くところでお試しください（何も消していません）');
+  });
+}
+async function doForceUpdate(){
+  toast('最新に読み込み直しています…');
   try{
     if('serviceWorker' in navigator){
       const regs = await navigator.serviceWorker.getRegistrations();
@@ -3532,8 +6371,7 @@ async function forceUpdate(){
     }
     if(window.caches){
       const keys = await caches.keys();
-      await Promise.all(keys.filter(k=>k.startsWith('redd-survey-')||k.startsWith('redd-map-tiles-'))
-        .map(k=>caches.delete(k)));
+      await Promise.all(cachesToClear(keys).map(k=>caches.delete(k)));
     }
   }catch(e){ console.error(e); }
   location.reload();

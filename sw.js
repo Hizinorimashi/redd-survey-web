@@ -1,12 +1,13 @@
-const CACHE = 'redd-survey-v14';
+const CACHE = 'redd-survey-v19';
 // 必須資産（これが揃わないとアプリが成立しない）。install時に全部揃わなければ失敗させ、不完全キャッシュで有効化しない
 const CORE = [
   './redd_survey.html',
   './manifest.json',
   './leaflet.css',
   './leaflet.js',
-  './icon-192.svg',
-  './icon-512.svg'
+  './vendor/leaflet-rotate.js',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 // 地図タイルのキャッシュは2種類。
@@ -61,7 +62,7 @@ function isTile(url){ return url.includes('cyberjapandata.gsi.go.jp'); }
 // 静的ベンダ資産（更新頻度が低い）はキャッシュ優先で、圏外でも即表示・毎回の再取得を避ける
 function isStaticVendor(url){
   return url.endsWith('/leaflet.js') || url.endsWith('/leaflet.css') ||
-         url.endsWith('/icon-192.svg') || url.endsWith('/icon-512.svg');
+         url.endsWith('/icon-192.png') || url.endsWith('/icon-512.png');
 }
 // アプリ本体(HTML/manifest)はネット優先で最新を取りに行く（ただしタイムアウト付き）
 function isHtmlShell(url){

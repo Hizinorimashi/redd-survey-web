@@ -1,14 +1,26 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>産卵床調査記録</title>
+<!-- トップページは、アプリ本体へ飛ばすだけの転送ページ。
+     ここにアプリの写しを置くと、片方だけ更新されて古い版が配られ続ける
+     （魚類調査アプリで実際に起きた。30版ぶん古いアプリが配られていた）。
+     同じ中身を2か所に置かなければ、ずれようがない。 -->
 <meta http-equiv="refresh" content="0; url=./redd_survey.html">
 <link rel="canonical" href="./redd_survey.html">
+<style>
+  body{background:#0a0e14;color:#e6edf3;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+       margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+  a{color:#7ec8ff}
+</style>
 </head>
-<body style="background:#0a0e14;color:#e6eef5;font-family:sans-serif;padding:24px">
-<p>産卵床調査記録アプリを開いています…</p>
-<p><a href="./redd_survey.html" style="color:#4aa3dd">切り替わらない場合はこちらをタップ</a></p>
+<body>
+  <div>
+    <p>産卵床調査記録アプリをひらいています…</p>
+    <p>切り替わらないときは <a href="./redd_survey.html">こちらを押してください</a>。</p>
+  </div>
+  <script>location.replace('./redd_survey.html');</script>
 </body>
 </html>
