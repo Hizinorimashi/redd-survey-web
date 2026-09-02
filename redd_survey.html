@@ -153,12 +153,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v21';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v22';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-02';
-const APP_NOTE = '産卵床も、物理環境と同じ地図の上で置いて、その場で入れられるようにしました'
-  + '（番号は S1・S2… の通し／区間をスタートしなくても記録できます）';
+const APP_NOTE = '記録は「地図で記録する」の画面ひとつで最後まで入れられるようにしました'
+  + '（産卵床も川の環境も同じ地図／細かい項目は「詳しく入れる」を開くと出ます）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -426,9 +426,10 @@ let ENV_PHOTO_PENDING = '';
 function envPhotoTouch(owner){
   const target = owner || (typeof ENV_FORM!=='undefined' ? ENV_FORM : '');
   if(!target) return true;
-  // 産卵床の入力欄には写真が無い。ここで抜けないと、物理環境の記録として
+  // 持ち主のいない画面（メモなど）では何もしない。抜けないと、他人の記録を
   // 探しに行って見つからず、画面から出られなくなる
-  if(!owner && typeof ENV_FORM_KIND!=='undefined' && ENV_FORM_KIND !== 'un') return true;
+  if(!owner && typeof ENV_FORM_KIND!=='undefined'
+     && ENV_FORM_KIND !== 'un' && ENV_FORM_KIND !== 'rd') return true;
   let ok = false;
   try{ ok = envSavePhotosNow(target); }catch(e){ ok = false; }
   if(ok){
@@ -536,7 +537,6 @@ function reset(name,arg){ if(!envFlushOk()) return; STACK=[{name:name||'home',ar
 function render(){
   SCREEN_SEQ++;
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
-  closePickMap();
   closeEnvMap();
   closeOfflineMap();
   revokePhotoUrls();     // 前の画面の写真の一時URLを解放する
@@ -687,36 +687,11 @@ function findNewDraft(kind, sv){
 }
 // 何か入力されているか。空なら控える意味がない
 function draftHasContent(kind, x){
-  const filled = v => v!=='' && v!=null;
   const arr = v => Array.isArray(v) && v.length>0;
-  if(kind==='redd') return !!(x.species || filled(x.length_cm) || filled(x.width_cm) ||
-    x.note || filled(x.latitude) || arr(x.env_points) || arr(x.photos) ||
-    filled(x.female_n) || filled(x.male_n) || filled(x.carcass_n) ||
-    filled(x.water_temp_c) || filled(x.intragravel_temp_c));
   return !!(x.content || arr(x.photos));
 }
-// 「区間なしでも記録の入口を開ける」価値のある書きかけか。
-// 記録画面は開くだけでGPSの位置や前の記録の魚種などが自動で入るため、
-// draftHasContent では「開いてすぐ戻っただけ」の書きかけも拾ってしまう。
-// ここでは、ユーザーが自分で入力した内容（計測値・メモ・写真・意図して置いた位置）だけを数える
-function draftUserContent(x){
-  const filled = v => v!=='' && v!=null;
-  const arr = v => Array.isArray(v) && v.length>0;
-  return !!(x.note || filled(x.length_cm) || filled(x.width_cm) ||
-    arr(x.env_points) || arr(x.photos) ||
-    filled(x.female_n) || filled(x.male_n) || filled(x.carcass_n) ||
-    filled(x.water_temp_c) || filled(x.intragravel_temp_c) ||
-    ((x.position_source==='地図' || x.position_source==='手入力') && filled(x.latitude)));
-}
-// 区間なしでも開ける書きかけを返す。自動入力だけの書きかけはここで片付ける
-// （残しておくと、次の記録に古い位置や区間が混ざるため）
-function reddDraftRescue(sv){
-  const pending = findNewDraft('redd', sv);
-  if(!pending) return null;
-  if(draftUserContent(pending.draft)) return pending;
-  editDraftClear(pending.uuid);
-  return null;
-}
+// 産卵床の書きかけは、もう控えない（v22）。
+// 地図に置いた時点で保存されるので、「まだ保存していない入力」が存在しない
 function editDraftClear(uuid){
   const d = editDrafts();
   if(uuid in d){ delete d[uuid]; try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){} }
@@ -726,13 +701,7 @@ function stashEditDraft(){
   const cur = STACK[STACK.length-1];
   if(!cur) return;
   try{
-    if(cur.name==='reddEdit' && SCREENS._reddUuid && $('#fNo')){
-      envSync();
-      editDraftSave(SCREENS._reddUuid, Object.assign(collectReddForm(), {
-        _kind:'redd', _sv:SCREENS._editSv, _new:!DB.get(DB.key.rd, SCREENS._reddUuid),
-        env_points:(SCREENS._env||[]).slice(), photos:(SCREENS._photos||[]).slice(),
-        gps_accuracy:SCREENS._acc, position_source:SCREENS._posSrc }));
-    }else if(cur.name==='noteEdit' && SCREENS._noteUuid && $('#fNText')){
+    if(cur.name==='noteEdit' && SCREENS._noteUuid && $('#fNText')){
       editDraftSave(SCREENS._noteUuid, { _kind:'note',
         _sv:SCREENS._editSv, _new:!DB.get(DB.key.nt, SCREENS._noteUuid),
         content:$('#fNText').value||'', category:segVal('noteCat'),
@@ -1054,7 +1023,9 @@ SCREENS.survey = (u)=>{
 
       ${ started ? `
         ${liveTallyHtml(u)}
-        <button class="btn primary big" onclick="nav('reddEdit','${esc(JSON.stringify({sv:u}))}')">＋ 記録する（産卵床・親魚・ホッチャレ）</button>
+        <button class="btn primary big" onclick="nav('envMap','${esc(JSON.stringify({sv:u}))}')">＋ 地図で記録する（産卵床・物理環境）</button>
+        <div class="tiny muted" style="margin-top:6px; text-align:center">
+          産卵床も、川の環境も、この地図の画面ひとつで最後まで入れられます。</div>
         <div class="sp"></div>
         ${ cur
           ? `<div class="card">
@@ -1064,8 +1035,6 @@ SCREENS.survey = (u)=>{
                <button class="btn" onclick="endReach('${u}')">この区間を終了</button>
              </div>`
           : `<button class="btn big" onclick="startReach('${u}')">区間をスタート</button><div class="sp"></div>` }
-        <button class="btn" onclick="nav('envMap','${esc(JSON.stringify({sv:u}))}')">物理環境を記録する（地図）</button>
-        <div class="sp"></div>
         <button class="btn" onclick="nav('noteEdit','${esc(JSON.stringify({sv:u}))}')">メモを追加</button>
       ` : '' }
 
@@ -1235,7 +1204,7 @@ SCREENS.redds = (sv)=>{
     const fish = hasTarget(r,'親魚') && (num(r.female_n)||num(r.male_n))
       ? `雌${num(r.female_n)||0}・雄${num(r.male_n)||0}` : '';
     const car = hasTarget(r,'ホッチャレ') && num(r.carcass_n) ? `ホッチャレ${r.carcass_n}` : '';
-    return `<div class="card tap" onclick="nav('reddEdit','${esc(JSON.stringify({sv, u:r.uuid}))}')">
+    return `<div class="card tap" onclick="nav('envMap','${esc(JSON.stringify({sv, redd:r.uuid}))}')">
       <div class="row">
         <div class="grow"><b>${esc(reddName(r))}</b>
           <span class="small muted">${esc(rc)}</span>
@@ -1509,75 +1478,63 @@ function reddName(r){
   return 'S' + n;
 }
 
-SCREENS.reddEdit = (argStr)=>{
-  const a = JSON.parse(argStr||'{}');
-  const sv = a.sv, editing = !!a.u;
-  const s = DB.survey(sv); if(!s) return SCREENS.home();
-  // 別の調査の引き継ぎは使わない（別河川の座標や区間が入ってしまうため）
-  const carry = (SCREENS._carry && SCREENS._carry.survey_uuid===sv) ? SCREENS._carry : {};
-  const cur = activeReach(sv);
-  const reaches = DB.reachesOf(sv);
-
-  // 区間をスタートしていなくても記録できる（v21）。
-  // 区間は「いま記録中のものがあれば付ける」だけにした
-
-  // 地図をタップして来たか（タップした場所は最後まで優先する）
-  const fromMap = validPt([a.lat, a.lon]);
-
-  let r;
-  if(editing){
-    r = DB.get(DB.key.rd, a.u);
-    if(!r || r.deleted_at) return SCREENS.home();
-  }else{
-    // 区間は「いま記録中のもの」だけを付ける。無ければ空のまま（v21）
-    r = newRedd(sv, {
-      reach_uuid: cur ? cur.uuid : '',
-      latitude:  fromMap ? (+a.lat).toFixed(6) : '',
-      longitude: fromMap ? (+a.lon).toFixed(6) : '',
-      position_source: fromMap ? '地図' : '',
-      carry,
-    });
-  }
-
-  // 書きかけがあれば重ねる（誤って戻った・アプリが閉じた場合の復帰）。
-  // 自動で入っただけの書きかけは、ここで片付ける
-  // （残しておくと、次の新しい記録に古い位置や区間が混ざる）
-  if(!editing){
-    const pending = reddDraftRescue(sv);
-    if(pending) r.uuid = pending.uuid;   // 同じ書きかけの続きとして開く
-  }
-  const draft = editDraftGet(r.uuid);
-  if(draft && draft._kind==='redd'){
-    r = Object.assign({}, r, draft);
-    if(Array.isArray(draft.env_points)) r.env_points = draft.env_points;
-    if(Array.isArray(draft.photos)) r.photos = draft.photos;
-  }
-  // 地図をタップして来たときは、タップした場所を最優先（書きかけの座標で上書きしない）
-  if(fromMap){
-    r.latitude = (+a.lat).toFixed(6); r.longitude = (+a.lon).toFixed(6);
-    r.position_source = '地図'; r.gps_accuracy = '';
-  }
-
-  // 区間の選択肢は、書きかけを重ねた「後」の値で作る（書きかけの区間を正しく選んでおくため）
-  const reachOpts = [`<option value="">区間なし</option>`].concat(
-    reaches.map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
+/* ---------- 産卵床の入力欄。地図の下でも、記録の画面でも、ここ1か所で作る ----------
+   2か所に持つと、欄を1つ足したとき片方だけ直す事故が起きる（v19で実際に起きた）。
+   opt.fold … よく使うもの以外を「詳しく入れる」の折りたたみに入れる（地図の下）
+   取り出しは collectReddForm() ひとつ。欄が1か所なので、取り出しも1か所で足りる */
+function reddFormHtml(r, sv, opt){
+  const o = opt || {};
+  const reachOpts = ['<option value="">区間なし</option>'].concat(
+    DB.reachesOf(sv).map(x=>`<option value="${x.uuid}" ${x.uuid===r.reach_uuid?'selected':''}>${esc(x.name)}${x.ended_at?'':'（記録中）'}</option>`)
   ).join('');
 
-  const targets = draft ? recordTargets(r) : (editing ? recordTargets(r) : ['産卵床']);
-
-  return {
-    title: editing ? '記録の編集' : '記録の追加',
-    sub:[{text:s.name}],
-    html:`
+  // よく使うもの。ここは折りたたまず、いつも出す
+  const head = `
       <div class="sect">この記録は何ですか（いくつでも選べます）</div>
-      ${segMultiHtml('target', OPT.target, targets, 'onTargetChange')}
+      ${segMultiHtml('target', OPT.target, recordTargets(r), 'onTargetChange')}
       <div class="tiny muted" style="margin-top:6px">
         例：産卵床だけ見つけた＝「産卵床」／産卵床の上に親魚がいた＝「産卵床」＋「親魚」／
         産卵床は無いが親魚だけ見えた＝「親魚」／ホッチャレだけ＝「ホッチャレ」。
         選んだものに合わせて、下の入力欄が切り替わります。
       </div>
-      <div class="sp"></div>
 
+      <div class="sect">魚種</div>
+      ${segHtml('species', speciesList(), r.species, true)}
+
+      <div data-part="産卵床">
+        <div class="sect">産卵床の状態</div>
+        <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
+        <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
+
+        <div class="sect">規模</div>
+        <div class="two">
+          <label class="field"><span class="lab">長さ（cm・流れの向き）</span>
+            <input id="fLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_cm??'')}" oninput="updateArea()"></label>
+          <label class="field"><span class="lab">幅（cm）</span>
+            <input id="fWid" type="number" step="1" inputmode="decimal" value="${esc(r.width_cm??'')}" oninput="updateArea()"></label>
+        </div>
+        <div class="card"><div class="row"><div class="grow small muted">面積（自動計算）</div>
+          <div style="font-weight:700" id="areaOut">—</div></div></div>
+      </div>
+
+      <div data-part="親魚">
+        <div class="sect">親魚</div>
+        <div class="two">
+          <label class="field"><span class="lab">雌の数</span>
+            <input id="fFem" type="number" step="1" inputmode="numeric" value="${esc(r.female_n??'')}"></label>
+          <label class="field"><span class="lab">雄の数</span>
+            <input id="fMal" type="number" step="1" inputmode="numeric" value="${esc(r.male_n??'')}"></label>
+        </div>
+      </div>
+
+      <div data-part="ホッチャレ">
+        <div class="sect">ホッチャレ（死骸）</div>
+        <label class="field"><span class="lab">ホッチャレの数</span>
+          <input id="fCar" type="number" step="1" inputmode="numeric" value="${esc(r.carcass_n??'')}"></label>
+      </div>`;
+
+  // それ以外。地図の下では「詳しく入れる」を開いたときに出す
+  const detail = `
       <div class="two">
         <label class="field"><span class="lab">区間</span>
           <select id="fReach">${reachOpts}</select></label>
@@ -1596,15 +1553,8 @@ SCREENS.reddEdit = (argStr)=>{
         <label class="field"><span class="lab">経度</span>
           <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}" oninput="markPosManual()"></label>
       </div>
-      ${baseMapButtonsHtml('pickBase')}
-      <div id="pickMap"></div>
-      <div class="tiny muted" style="margin-top:6px">
-        地図をタップすると、その場所に赤い点が置かれます。点は長押しして動かせます。
-        青い丸は今いる場所（GPS）、薄い灰色の点は記録済みの産卵床です。
-      </div>
-      <div class="sp"></div>
-      <button class="btn" onclick="grabGps()">現在地を取り込む</button>
       <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
+      <div class="tiny muted">位置は、地図をタップして直すか、上の「いまここ」で入れ直せます。</div>
 
       <div class="sect">河川形態</div>
       <label class="field"><span class="lab">どこか</span>
@@ -1614,70 +1564,41 @@ SCREENS.reddEdit = (argStr)=>{
         </span>
         ${segHtml('riverForm', OPT.riverForm, r.river_form, true)}</label>
 
-      <div class="sect">魚種</div>
-      <label class="field"><span class="lab">魚種</span>${segHtml('species', speciesList(), r.species, true)}</label>
       <label class="field"><span class="lab">種の判断根拠</span>${segHtml('basis', OPT.basis, r.species_basis, true)}</label>
 
       <div data-part="産卵床">
-      <div class="sect">産卵床の状態</div>
-      <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
-      <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
+        <div class="sect">まわりの環境</div>
+        <label class="field"><span class="lab">水深・流速（何点でも足せます）</span>
+          <span class="tiny muted" style="display:block; margin:-2px 0 6px">
+            1点だけでも、産卵床の上・掘った窪み・盛り上がりなど数点でも記録できます。
+            場所の名前は空欄でも構いません。
+          </span></label>
+        <div id="envList"></div>
+        <button class="btn" onclick="envAdd()">＋ 測点を追加</button>
+        <div class="sp"></div>
+        <label class="field"><span class="lab">底質（主）</span>${segHtml('subMain', OPT.substrate, r.substrate_main, true)}</label>
+        <label class="field"><span class="lab">底質（副）</span>${segHtml('subSub', OPT.substrate, r.substrate_sub, true)}</label>
+        <label class="field"><span class="lab">埋没度</span>
+          <span class="tiny muted" style="display:block; margin:-2px 0 6px">
+            石のすき間が砂や泥でどれくらい埋まっているか。
+            少＝石がごろごろしてすき間がある／中＝石の下半分ほどが埋まる／多＝砂泥に埋もれ川底が平ら
+          </span>
+          ${segHtml('embedded', OPT.embedded, r.embeddedness, true)}</label>
+        <label class="field"><span class="lab">被覆</span>${segHtml('cover', OPT.cover, r.cover, true)}</label>
 
-      <div class="sect">規模</div>
-      <div class="two">
-        <label class="field"><span class="lab">長さ（cm・流れの向き）</span>
-          <input id="fLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_cm??'')}" oninput="updateArea()"></label>
-        <label class="field"><span class="lab">幅（cm）</span>
-          <input id="fWid" type="number" step="1" inputmode="decimal" value="${esc(r.width_cm??'')}" oninput="updateArea()"></label>
-      </div>
-      <div class="card"><div class="row"><div class="grow small muted">面積（自動計算）</div>
-        <div style="font-weight:700" id="areaOut">—</div></div></div>
-
-      <div class="sect">まわりの環境</div>
-      <label class="field"><span class="lab">水深・流速（何点でも足せます）</span>
-        <span class="tiny muted" style="display:block; margin:-2px 0 6px">
-          1点だけでも、産卵床の上・掘った窪み・盛り上がりなど数点でも記録できます。
-          場所の名前は空欄でも構いません。
-        </span></label>
-      <div id="envList"></div>
-      <button class="btn" onclick="envAdd()">＋ 測点を追加</button>
-      <div class="sp"></div>
-      <label class="field"><span class="lab">底質（主）</span>${segHtml('subMain', OPT.substrate, r.substrate_main, true)}</label>
-      <label class="field"><span class="lab">底質（副）</span>${segHtml('subSub', OPT.substrate, r.substrate_sub, true)}</label>
-      <label class="field"><span class="lab">埋没度</span>
-        <span class="tiny muted" style="display:block; margin:-2px 0 6px">
-          石のすき間が砂や泥でどれくらい埋まっているか。
-          少＝石がごろごろしてすき間がある／中＝石の下半分ほどが埋まる／多＝砂泥に埋もれ川底が平ら
-        </span>
-        ${segHtml('embedded', OPT.embedded, r.embeddedness, true)}</label>
-      <label class="field"><span class="lab">被覆</span>${segHtml('cover', OPT.cover, r.cover, true)}</label>
-
-      <div class="sect">水温</div>
-      <div class="two">
-        <label class="field"><span class="lab">河川水温（℃）</span>
-          <input id="fWT" type="number" step="0.1" inputmode="decimal" value="${esc(r.water_temp_c??'')}"></label>
-        <label class="field"><span class="lab">河床内水温（℃）</span>
-          <input id="fIGT" type="number" step="0.1" inputmode="decimal" value="${esc(r.intragravel_temp_c??'')}"></label>
-      </div>
-      <label class="field"><span class="lab">河床内を測った深さ（cm）</span>
-        <input id="fTD" type="number" step="1" inputmode="decimal" value="${esc(r.temp_depth_cm??'')}"></label>
+        <div class="sect">水温</div>
+        <div class="two">
+          <label class="field"><span class="lab">河川水温（℃）</span>
+            <input id="fWT" type="number" step="0.1" inputmode="decimal" value="${esc(r.water_temp_c??'')}"></label>
+          <label class="field"><span class="lab">河床内水温（℃）</span>
+            <input id="fIGT" type="number" step="0.1" inputmode="decimal" value="${esc(r.intragravel_temp_c??'')}"></label>
+        </div>
+        <label class="field"><span class="lab">河床内を測った深さ（cm）</span>
+          <input id="fTD" type="number" step="1" inputmode="decimal" value="${esc(r.temp_depth_cm??'')}"></label>
       </div>
 
       <div data-part="親魚">
-      <div class="sect">親魚</div>
-      <div class="two">
-        <label class="field"><span class="lab">雌の数</span>
-          <input id="fFem" type="number" step="1" inputmode="numeric" value="${esc(r.female_n??'')}"></label>
-        <label class="field"><span class="lab">雄の数</span>
-          <input id="fMal" type="number" step="1" inputmode="numeric" value="${esc(r.male_n??'')}"></label>
-      </div>
-      <label class="field"><span class="lab">行動</span>${segHtml('behavior', OPT.behavior, r.behavior, true)}</label>
-      </div>
-
-      <div data-part="ホッチャレ">
-      <div class="sect">ホッチャレ（死骸）</div>
-      <label class="field"><span class="lab">ホッチャレの数</span>
-        <input id="fCar" type="number" step="1" inputmode="numeric" value="${esc(r.carcass_n??'')}"></label>
+        <label class="field"><span class="lab">行動</span>${segHtml('behavior', OPT.behavior, r.behavior, true)}</label>
       </div>
 
       <div class="sect">写真</div>
@@ -1688,31 +1609,13 @@ SCREENS.reddEdit = (argStr)=>{
         <textarea id="fNote">${esc(r.note||'')}</textarea></label>
       <label class="field"><span class="lab">あとで確認したい</span>
         <div class="row"><input type="checkbox" id="fReview" style="width:22px; height:22px" ${r.needs_review?'checked':''}>
-          <span class="small muted">チェックすると一覧で「要確認」と表示されます</span></div></label>
+          <span class="small muted">チェックすると一覧で「要確認」と表示されます</span></div></label>`;
 
-      <button class="btn primary big" onclick="saveRedd('${r.uuid}','${sv}',${editing},false)">保存する</button>
-      <div class="sp"></div>
-      ${ editing ? `<button class="btn danger" onclick="deleteRedd('${r.uuid}')">この記録を削除</button>`
-                 : `<button class="btn big" onclick="saveRedd('${r.uuid}','${sv}',false,true)">保存して次を記録</button>` }
-    `,
-    onMount:()=>{
-      SCREENS._reddUuid = r.uuid; SCREENS._editSv = sv;
-      if(draft) toast('書きかけを復元しました');
-      SCREENS._acc = (r.gps_accuracy!==''&&r.gps_accuracy!=null) ? r.gps_accuracy : null;
-      SCREENS._posSrc = r.position_source||'';
-      SCREENS._photos = (r.photos||[]).slice();
-      renderPhotoPanel();
-      SCREENS._env = envPoints(r);
-      renderEnvList();
-      updateArea();
-      onTargetChange();  // 選んでいる対象の欄だけ出す
-      initPickMap(sv);   // 位置の地図は常に出しておく
-      // 新規記録は開いた時点の位置をすぐ入れる（現場で1タップ減らすため）。
-      // ただし地図から追加した時は、せっかく指定した場所をGPSで上書きしない
-      if(!editing && !draft && !validPt([a.lat, a.lon])) grabGps(true);
-    }
-  };
-};
+  return o.fold
+    ? head + foldHtml('rddetail', '詳しく入れる',
+        '<span class="tiny muted">区間・位置・測点・底質・水温・写真・メモ</span>', detail)
+    : head + detail;
+}
 
 // 選んだ対象に関係する欄だけ出す。選んでいない欄は隠すが、値は消さない
 // （選び直せば元の入力がそのまま戻る）
@@ -1723,9 +1626,6 @@ function onTargetChange(){
   });
 }
 
-// 番号は調査ぜんたいの通しになったので、区間を変えても振り直さない（v21）。
-// 呼び出し口はもう無いが、古い書きかけや取り込んだデータ由来の呼び出しに備えて残す
-function onReachChange(){ /* 何もしない */ }
 /* ---------- 測点の入力欄（水深・流速） ---------- */
 // 入力欄（要素）から数を取り出す。値から取り出す numOf(v) とは別物
 function numOfEl(el){
@@ -1746,11 +1646,20 @@ function envAdd(){
   envSync();
   SCREENS._env = (SCREENS._env||[]).concat([{depth_cm:'', velocity_ms:'', note:''}]);
   renderEnvList();
+  envPointsTouched();
 }
 function envRemove(i){
   envSync();
   (SCREENS._env||[]).splice(i,1);
   renderEnvList();
+  envPointsTouched();
+}
+// 測点を足した・消したことは input も change も出さない。
+// 地図の下の入力欄では、拾わないと自動保存に乗らず、消したはずの測点が戻る
+function envPointsTouched(){
+  if(typeof ENV_FORM_KIND!=='undefined' && ENV_FORM_KIND === 'rd' && ENV_FORM){
+    envAutoSave(ENV_FORM);
+  }
 }
 function renderEnvList(){
   const box=$('#envList'); if(!box) return;
@@ -1793,101 +1702,7 @@ function markPosManual(){
   SCREENS._posSrc='手入力'; SCREENS._acc='';
   const out=$('#accOut'); if(out) out.textContent='手で入力した位置';
 }
-function grabGps(auto){
-  if(!navigator.geolocation){ toast('この端末では位置を取れません'); return; }
-  const gen = screenGen();
-  const out=$('#accOut'); if(out) out.textContent='位置を取得中…';
-  navigator.geolocation.getCurrentPosition(p=>{
-    lastFix={lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy, t:Date.now()};
-    if(screenStale(gen)) return;   // 待っている間に別の記録へ移っていたら書き込まない
-    // 自動取得（画面を開いた直後）で、すでに地図や手入力で位置が決まっているなら上書きしない
-    if(auto && (SCREENS._posSrc==='地図' || SCREENS._posSrc==='手入力')){
-      if(out) out.textContent = posLabel({position_source:SCREENS._posSrc, gps_accuracy:SCREENS._acc})
-        + '（現在地も取れています。使うなら「現在地を取り込む」）';
-      return;
-    }
-    fillGps();
-  }, ()=>{ if(screenStale(gen)) return;
-    if(out) out.textContent='位置を取れませんでした。地図で指定するか、空欄のままでも保存できます'; },
-  {enableHighAccuracy:true, timeout:15000, maximumAge:0});
-}
-function fillGps(){
-  if(!lastFix) return;
-  const la=$('#fLat'), lo=$('#fLon'), out=$('#accOut');
-  if(la) la.value = lastFix.lat.toFixed(6);
-  if(lo) lo.value = lastFix.lon.toFixed(6);
-  SCREENS._acc = Math.round(lastFix.acc);
-  SCREENS._posSrc = 'GPS';
-  if(out) out.textContent = 'GPSの位置（誤差 約'+SCREENS._acc+'m）';
-  // GPS由来だと明示する（既定の「地図」扱いにすると、位置の由来と誤差が消えてしまう）
-  if(PICKMAP) movePickMarker([lastFix.lat, lastFix.lon], true, 'GPS');
-}
-
-/* ---------- 入力画面に常に出しておく「位置を決める地図」 ---------- */
-let PICKMAP=null, PICKMARKER=null;
-function closePickMap(){
-  if(PICKMAP){ try{ PICKMAP.remove(); }catch(e){} }
-  PICKMAP=null; PICKMARKER=null;
-}
-function initPickMap(sv){
-  if(typeof L==='undefined' || !$('#pickMap')) return;
-  const lat=parseFloat($('#fLat').value), lon=parseFloat($('#fLon').value);
-  const here = validPt([lat,lon]) ? [lat,lon]
-             : (lastFix ? [lastFix.lat, lastFix.lon] : null);
-
-  PICKMAP = L.map('pickMap', { zoomControl:true });
-  applyBaseMap(PICKMAP, baseMapName());
-
-  // 目印として、同じ調査の区間の線と記録済みの産卵床を薄く出す
-  DB.reachesOf(sv).forEach(r=>{
-    const pts=(r.track||[]).filter(validPt);
-    if(pts.length>=2) L.polyline(pts, {color:'#4aa3dd', weight:3, opacity:.5}).addTo(PICKMAP);
-  });
-  const self = SCREENS._reddUuid;
-  DB.reddsOf(sv).forEach(r=>{
-    if(r.uuid===self) return;
-    const p=[parseFloat(r.latitude), parseFloat(r.longitude)];
-    if(!validPt(p)) return;
-    L.circleMarker(p, {radius:5, color:'#9aa8b4', weight:1, fillOpacity:.35})
-      .addTo(PICKMAP).bindTooltip(`No.${r.redd_no||'—'}`);
-  });
-  // 現在地（GPS）も薄く出す。ずれの大きさが目で見て分かるように精度の円つき
-  if(lastFix){
-    L.circle([lastFix.lat,lastFix.lon], {radius:Math.max(5,lastFix.acc), color:'#4aa3dd', weight:1, fillOpacity:.1}).addTo(PICKMAP);
-    L.circleMarker([lastFix.lat,lastFix.lon], {radius:5, color:'#fff', weight:2, fillColor:'#4aa3dd', fillOpacity:1})
-      .addTo(PICKMAP).bindTooltip('今いる場所（GPS）');
-  }
-
-  PICKMAP.setView(here || [43.5,142.5], here ? 18 : 9);
-  if(here) movePickMarker(here, false, '');   // 既にある位置を置き直しただけ。決め方は変えない
-  PICKMAP.on('click', e=>movePickMarker([e.latlng.lat, e.latlng.lng], false, '地図'));
-  // 画面に入れた直後は大きさが確定していないことがあるので測り直す
-  setTimeout(()=>{ if(PICKMAP) PICKMAP.invalidateSize(); }, 60);
-}
-// source: '地図'（タップ・ドラッグ）／'GPS'（現在地の取り込み）／''（表示だけ動かす）
-function movePickMarker(pt, recenter, source){
-  if(!PICKMAP) return;
-  if(!PICKMARKER){
-    PICKMARKER = L.marker(pt, {draggable:true, icon:reddPinIcon()}).addTo(PICKMAP);
-    PICKMARKER.on('dragend', ()=>{ const p=PICKMARKER.getLatLng(); applyPickPos([p.lat, p.lng], '地図'); });
-  }else{
-    PICKMARKER.setLatLng(pt);
-  }
-  if(recenter) PICKMAP.setView(pt, Math.max(PICKMAP.getZoom(), 18));
-  applyPickPos(pt, source);
-}
-function applyPickPos(pt, source){
-  if(source===undefined) source='地図';   // 既定は地図で置いた扱い
-  const la=$('#fLat'), lo=$('#fLon'), out=$('#accOut');
-  if(la) la.value = (+pt[0]).toFixed(6);
-  if(lo) lo.value = (+pt[1]).toFixed(6);
-  // GPSで入れた時は精度と表示を fillGps 側が持つので、ここで上書きしない
-  if(source==='地図'){
-    SCREENS._acc = '';        // 地図で置いた点にGPSの誤差という考えは当てはまらない
-    SCREENS._posSrc = '地図';
-    if(out) out.textContent = '地図で指定した位置';
-  }
-}
+// GPSで位置を入れるのは、地図の「いまここ」（reddGrabHere）にまとめた（v22）
 
 function collectReddForm(){
   const when = $('#fWhen').value;
@@ -1914,49 +1729,6 @@ function collectReddForm(){
     needs_review: !!($('#fReview')&&$('#fReview').checked),
   };
 }
-function saveRedd(u, sv, editing, cont){
-  const f = collectReddForm();
-  if(!f.record_targets.length){ toast('この記録が何かを選んでください（産卵床・親魚・ホッチャレ）'); return; }
-  envSync();
-  // 何も入っていない測点は保存しない
-  f.env_points = (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note);
-  f.depth_cm = ''; f.velocity_ms = '';   // 旧形式の値は残さない（測点が正本）
-  const pos = parsePos(f.latitude, f.longitude);
-  if(!pos.ok){ toast(pos.why); return; }
-  f.area_m2 = reddArea(f.length_cm, f.width_cm);
-  const prev = DB.get(DB.key.rd, u) || {};
-  const rec = Object.assign({ uuid:u, survey_uuid:sv }, f,
-    { gps_accuracy: SCREENS._acc!=null ? SCREENS._acc : (prev.gps_accuracy??''),
-      position_source: SCREENS._posSrc!=null ? SCREENS._posSrc : (prev.position_source??''),
-      photos: (SCREENS._photos||[]).slice() });
-  if(!DB.upsert(DB.key.rd, rec)) return;
-  editDraftClear(u);
-  SCREENS._reddUuid = null;   // 保存済みなので、この画面の書きかけはもう控えない
-  revokePhotoUrls();
-  SCREENS._photos = null;
-
-  // 次の記録に引き継ぐ値。同じ瀬では条件がほぼ同じなので入力を減らせる
-  // 次の記録に引き継ぐのは「場の条件」だけ。
-  // 水温のような実測値や、親魚を見たかどうかは引き継がない（測っていない値・
-  // 見ていない親魚がそのまま記録されてしまうため）
-  // 区間は引き継がない。「いま記録中の区間があれば付ける」だけにする（v21）
-  SCREENS._carry = { survey_uuid:sv, species:f.species,
-    river_form:f.river_form, species_basis:f.species_basis,
-    substrate_main:f.substrate_main, substrate_sub:f.substrate_sub,
-    embeddedness:f.embeddedness, cover:f.cover };
-  SCREENS._acc = null; SCREENS._posSrc = null;
-  toast('保存しました');
-  if(cont){ STACK.pop(); nav('reddEdit', JSON.stringify({sv})); }
-  else goBack();
-}
-function deleteRedd(u){
-  if(!confirm('この記録を削除しますか？')) return;
-  editDraftClear(u); SCREENS._reddUuid = null;
-  DB.softDelete(DB.key.rd, u);
-  toast('ゴミ箱へ入れました');
-  goBack();
-}
-
 /* ---------- 位置の読み取り ---------- */
 // 空欄を 0 と読み替えないための変換。空なら null を返す
 // （`+''` は 0 になるため、そのまま使うと未入力が「緯度0・経度0」として地図に出てしまう）
@@ -2597,6 +2369,7 @@ function envAddBend(svUuid, la, lo, acc, targetUuid){
     return null;
   }
   ENV_SEL = x.uuid;
+  envSetFocus('un');
   envHistPush({type:'曲がり', sv:svUuid, uuid:x.uuid, name:x.name});
   // 曲がりは「置いた」に数えない。数えると、ラインを選んで曲がりを1つ足しただけで、
   // つぎの曲がりが別のライン（引いている途中のもの）へ行ってしまう
@@ -2908,13 +2681,14 @@ function envItemFormWire(cur){
 }
 
 /* ---------- 産卵床（S）の入力欄。地図の下にそのまま出す ---------- */
-/* よく使うものだけを出す。写真・底質・測点・長さ・水温などは「詳しく」から記録画面で */
+/* 中身は記録の画面とまったく同じ（reddFormHtml が1か所で作る）。
+   よく使うものだけを開いておき、残りは「詳しく入れる」を開くと出る。
+   別の画面へ移らずに、この地図の上だけで最後まで入れられる */
 function reddItemFormHtml(cur, s){
   if(!cur) return '';
-  const g = k => (cur[k]!==undefined && cur[k]!==null ? cur[k] : '');
   const pt = ptOf(cur.latitude, cur.longitude);
   const re = cur.reach_uuid ? DB.get(DB.key.re, cur.reach_uuid) : null;
-  const 待ち = ENV_MOVE && ENV_MOVE.kind==='rd' && ENV_MOVE.uuid===cur.uuid;
+  const 待ち = reddMoveOn(cur.uuid);
   return `
     <div id="reddItemForm">
       <div class="card">
@@ -2928,64 +2702,60 @@ function reddItemFormHtml(cur, s){
           <button class="btn ghost small" style="width:auto;padding:4px 10px"
             onclick="reddItemDelete('${cur.uuid}')">消す</button>
         </div>
-
-        <div class="sect">魚種</div>
-        ${segHtml('rvsp', speciesList(), g('species'), true)}
-        <div class="sect">新旧</div>
-        ${segHtml('rvage', OPT.age, g('age_class'), true)}
-        <div class="sect">状態</div>
-        ${segHtml('rvstate', OPT.state, g('state'), true)}
-
-        <div class="sect">親魚・ホッチャレ（見たときだけ）</div>
-        <div class="row">
-          <label class="field grow"><span class="lab">雌（尾）</span>
-            <input id="rv_fem" inputmode="numeric" value="${esc(g('female_n'))}"></label>
-          <label class="field grow"><span class="lab">雄（尾）</span>
-            <input id="rv_mal" inputmode="numeric" value="${esc(g('male_n'))}"></label>
-          <label class="field grow"><span class="lab">ホッチャレ（尾）</span>
-            <input id="rv_car" inputmode="numeric" value="${esc(g('carcass_n'))}"></label>
-        </div>
-        <div class="tiny muted">数を入れると、記録の種類に「親魚」「ホッチャレ」が足されます。</div>
-
-        <div class="row" style="margin-top:10px">
+        <div class="row" style="margin-top:6px">
           <div class="grow tiny muted">位置を直すとき</div>
           <button class="btn ghost small" style="width:auto;padding:4px 10px"
             onclick="reddGrabHere('${cur.uuid}')">いまここ</button>
           <button class="btn ghost small" style="width:auto;padding:4px 10px"
             onclick="reddMoveStart('${cur.uuid}')">${待ち?'やめる':'地図で直す'}</button>
         </div>
+
+        ${reddFormHtml(cur, s.uuid, {fold:true})}
         <div id="rv_err"></div>
       </div>
     </div>
     <div class="tiny muted" id="rv_saved">入れたそばから、自動で保存されます。</div>
-    <button class="btn primary" onclick="saveReddItem('${cur.uuid}')">保存する</button>
-    <button class="btn" onclick="nav('reddEdit','${esc(JSON.stringify({sv:s.uuid, u:cur.uuid}))}')">
-      詳しく入れる（長さ・幅・水温・底質・写真など）</button>`;
+    <button class="btn primary" onclick="saveReddItem('${cur.uuid}')">保存する</button>`;
 }
 /* 入力欄のつなぎ込み。触るたびに、少し待ってから保存する */
 function reddItemFormWire(cur){
   ENV_FORM = cur ? cur.uuid : '';
   ENV_FORM_KIND = cur ? 'rd' : '';
   ENV_DIRTY = false;
-  if(!cur) return;
-  // 産卵床の欄には写真を出さない。持ち主を持たせると、他の画面の写真が混ざる
-  SCREENS._photos = null;
-  reddShowError(reddItemError());
+  if(!cur){ SCREENS._photos = null; SCREENS._env = null; return; }
+  // 位置の決め方は、この記録がすでに持っているものを引き継ぐ。
+  // null にしておくと、保存のときに元の値がそのまま残る
+  SCREENS._acc = null; SCREENS._posSrc = null;
+  SCREENS._photos = (cur.photos||[]).slice();
+  renderPhotoPanel();
+  SCREENS._env = envPoints(cur);
+  renderEnvList();
+  updateArea();
+  onTargetChange();           // 選んでいる対象の欄だけ出す
+  reddShowError('');
   const box = $('#reddItemForm');
   if(!box) return;
   box.addEventListener('input',  ()=>envAutoSave(cur.uuid));
   box.addEventListener('change', ()=>envAutoSave(cur.uuid));
   // 選ぶボタンは input も change も出さないので、押されたことを拾う
   box.addEventListener('click', e=>{
-    if(e.target && e.target.closest && e.target.closest('[data-seg] button')){
+    if(e.target && e.target.closest && e.target.closest('[data-seg] button, [data-segmulti] button')){
       envAutoSave(cur.uuid);
     }
   });
 }
-function reddItemError(){
-  const sv = sel => { const el=$(sel); return el ? String(el.value).trim() : ''; };
-  return rangeCheck([['雌', sv('#rv_fem'), 0, 9999], ['雄', sv('#rv_mal'), 0, 9999],
-                     ['ホッチャレ', sv('#rv_car'), 0, 9999]]);
+/* いま画面に入っている値が、おかしくないか。おかしければ理由を返す */
+function reddItemError(f){
+  if(!f) return '';
+  if(!f.record_targets.length) return 'この記録が何かを選んでください（産卵床・親魚・ホッチャレ）';
+  const pos = parsePos(f.latitude, f.longitude);
+  if(!pos.ok) return pos.why;
+  return rangeCheck([['長さ', f.length_cm, 0, 2000], ['幅', f.width_cm, 0, 2000],
+                     ['河川水温', f.water_temp_c, -5, 45],
+                     ['河床内水温', f.intragravel_temp_c, -5, 45],
+                     ['河床内を測った深さ', f.temp_depth_cm, 0, 500],
+                     ['雌', f.female_n, 0, 9999], ['雄', f.male_n, 0, 9999],
+                     ['ホッチャレ', f.carcass_n, 0, 9999]]);
 }
 function reddShowError(msg){
   const box = $('#rv_err'); if(!box) return;
@@ -2993,35 +2763,41 @@ function reddShowError(msg){
     ? `<div class="warnbox">${esc(msg)}<div class="tiny">直すまで、この記録は保存されません。打った内容は消えません。</div></div>`
     : '';
 }
-/* 産卵床の入力欄を書き戻す。物理環境の saveEnvItem と同じ作り */
+/* 産卵床の入力欄を書き戻す。物理環境の saveEnvItem と同じ作り。
+   取り出しは記録の画面と同じ collectReddForm()。欄が1か所なので、取り出しも1か所 */
 function saveReddItem(u, opt){
   const quiet = !!(opt && opt.quiet);
   const rec = DB.get(DB.key.rd, u);
   if(!rec || rec.deleted_at || !DB.survey(rec.survey_uuid)) return false;
-  const err = reddItemError();
+  if(!$('#fReach')) return false;          // その入力欄が画面に出ていない
+  const f = collectReddForm();
+  const err = reddItemError(f);
   if(err){ reddShowError(err); if(!quiet) toast(err); return false; }
 
-  rec.species   = segVal('rvsp');
-  rec.age_class = segVal('rvage');
-  rec.state     = segVal('rvstate');
-  rec.female_n  = numVal('#rv_fem');
-  rec.male_n    = numVal('#rv_mal');
-  rec.carcass_n = numVal('#rv_car');
-  // 記録の種類は「足すだけ」。外すのは記録画面の仕事
-  // （ここで外すと、記録画面で「親魚のみ」にしたものが、地図の欄を触っただけで戻ってしまう）
-  const t = recordTargets(rec);
-  const add = n => { if(t.indexOf(n) < 0) t.push(n); };
-  if(rec.female_n!=='' || rec.male_n!=='') add('親魚');
-  if(rec.carcass_n!=='') add('ホッチャレ');
-  rec.record_targets = t;
-
-  // 丸ごと置き換える（物理環境と同じ）。読み出した写しに書き足しているので、他の欄は消えない
-  if(!DB.put(DB.key.rd, rec)) return false;
+  envSync();
+  // 何も入っていない測点は保存しない
+  f.env_points = (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note);
+  f.depth_cm = ''; f.velocity_ms = '';     // 旧形式の値は残さない（測点が正本）
+  f.area_m2 = reddArea(f.length_cm, f.width_cm);
+  // 読み出した写しに書き足す（丸ごと置き換えても、ほかの欄は消えない）
+  const next = Object.assign({}, rec, f, {
+    gps_accuracy:     SCREENS._acc!=null    ? SCREENS._acc    : (rec.gps_accuracy??''),
+    position_source:  SCREENS._posSrc!=null ? SCREENS._posSrc : (rec.position_source??''),
+    photos: (SCREENS._photos||[]).slice(),
+  });
+  if(!DB.put(DB.key.rd, next)) return false;
+  // 次に置く産卵床へ引き継ぐのは「場の条件」だけ。
+  // 魚種は引き継がない。見ていない魚種が入ってしまううえ、
+  // 置いた瞬間から「まだ入れていない」の印が消えて、入れ残しに気づけなくなる
+  SCREENS._carry = { survey_uuid:next.survey_uuid, river_form:f.river_form,
+    species_basis:f.species_basis, substrate_main:f.substrate_main,
+    substrate_sub:f.substrate_sub, embeddedness:f.embeddedness, cover:f.cover };
   reddShowError('');
   ENV_DIRTY = false;
   if(quiet){
-    // 打っている最中なので、画面は作り直さない。地図の色だけ追いつかせる
-    reddDrawAll(rec.survey_uuid);
+    // 打っている最中なので、画面は作り直さない。地図と一覧だけ追いつかせる
+    reddDrawAll(next.survey_uuid);
+    reddChipSync(next.survey_uuid);
     const mark = $('#rv_saved');
     if(mark) mark.textContent = '保存しました（' + timeValue() + '）';
     return true;
@@ -3084,10 +2860,7 @@ function envAutoSaveNow(u){
   // 産卵床の入力欄なら、そちらへ書く。
   // ここで振り分けないと、産卵床の入力が黙って保存されない
   if(ENV_FORM_KIND === 'rd'){
-    if(!$('#rv_fem')) return false;         // その入力欄が画面に出ていない
-    const e2 = reddItemError();
-    reddShowError(e2);
-    if(e2) return false;
+    if(!$('#fReach')) return false;         // その入力欄が画面に出ていない
     return saveReddItem(u, {quiet:true});
   }
   if(!$('#ev_d')) return false;
@@ -3121,7 +2894,10 @@ function envFlushOk(){
 function envSavePhotosNow(owner){
   const target = owner || ENV_FORM;
   if(!target || target !== ENV_FORM) return false;
-  const u = DB.liveUnit(target); if(!u) return false;
+  // 産卵床の入力欄なら産卵床へ、物理環境なら物理環境へ書く
+  const isRedd = ENV_FORM_KIND === 'rd';
+  const u = isRedd ? DB.get(DB.key.rd, target) : DB.liveUnit(target);
+  if(!u || u.deleted_at) return false;
   const now = (SCREENS._photos||[]).slice();
   const before = Array.isArray(u.photos) ? u.photos : [];
   // すでに保存されているものと同じなら、書かなくてよい。
@@ -3130,7 +2906,7 @@ function envSavePhotosNow(owner){
   if(before.length === now.length
      && before.every((p,i)=> p && now[i] && p.id === now[i].id)) return true;
   u.photos = now;
-  return !!DB.put(DB.key.un, u);
+  return !!DB.put(isRedd ? DB.key.rd : DB.key.un, u);
 }
 
 function saveEnvItem(u, opt){
@@ -3195,17 +2971,16 @@ function saveEnvItem(u, opt){
   return true;
 }
 
-/* ---------- 地図の下に並べるもの（産卵床 と 物理環境 を混ぜない） ---------- */
-/* 混ぜると、産卵床が100件を超えたときに、どれが何なのか分からなくなる */
-function envTab(){ return prefs().env_tab === 'PLM' ? 'PLM' : 'S'; }
-function envSetTab(t){
-  const to = (t === 'PLM') ? 'PLM' : 'S';
-  if(envTab() === to) return;
-  if(!envFlushOk()) return;      // 打ちかけを先に書く。書けないなら切り替えない
-  prefSet('env_tab', to);
-  ENV_PICK = null;               // 「選んで消す」の途中で切り替えても取り残さない
-  render();
-}
+/* ---------- 地図の下に並べるもの ----------
+   産卵床（S）と物理環境（P・L・M）は、2段に分けて「いつも両方」出す。
+   混ぜて1列にすると、産卵床が100件を超えたときに物理環境が埋もれて探せない。
+   切り替えのボタンは置かない。置くと、産卵床を入れている最中に
+   ポイントを置いても出てこない（実際に不便だった）。
+   入力欄は画面に1つだけなので、いま入れているのがどちらかだけを覚えておく。
+   置いた・選んだときに、そのつど自動で切り替わる */
+let ENV_FOCUS = 'rd';
+function envFocus(){ return ENV_FOCUS === 'un' ? 'un' : 'rd'; }
+function envSetFocus(k){ ENV_FOCUS = (k === 'un') ? 'un' : 'rd'; }
 
 /* ---------- 地図（物理環境） ---------- */
 let ENVMAP = null, ENVLAYER = [];
@@ -3476,7 +3251,7 @@ function reddChipsHtml(svUuid){
   const list = reddListFor(svUuid);
   if(!list.length) return '<div class="tiny muted">この条件に合うものはありません。</div>';
   return list.map(r=>{
-    const on = r.uuid === REDD_SEL;
+    const on = envFocus()==='rd' && r.uuid === REDD_SEL;
     // まだ入れていないものには「…」を付ける（終わっていないラインと同じ印）
     return `<button type="button" data-u="${r.uuid}" class="${on?'on':''}"
       onclick="reddPick('${r.uuid}','${svUuid}')">${esc(reddName(r))}${reddEmpty(r)?'…':''}</button>`;
@@ -3615,6 +3390,7 @@ function envAddAt(svUuid, lat, lon, acc, source, targetUuid){
       more = `　つづけて ${nx.name} が始まりました`;
     }
     ENV_SEL = x.uuid;          // いま閉じたものを選ぶ（前の記録に書き込ませない）
+    envSetFocus('un');
     toast(`${x.name} の終わりを置きました（${fmtDist(lineDist(x))}）${more}`);
     return x;
   }
@@ -3635,6 +3411,7 @@ function envAddAt(svUuid, lat, lon, acc, source, targetUuid){
   // 置いたものをそのまま選ぶ。選ばないと、前の記録の入力欄が出たままになり、
   // 新しい点のつもりで前の記録に書き込んでしまう
   ENV_SEL = rec.uuid;
+  envSetFocus('un');
   toast(`${rec.name} を置きました`);
   return rec;
 }
@@ -3652,6 +3429,8 @@ function reddAddAt(svUuid, lat, lon, acc, source){
     latitude: la.toFixed(6), longitude: lo.toFixed(6),
     gps_accuracy: (acc===''||acc==null) ? '' : Math.round(acc),
     position_source: source || '地図',
+    // 直前の記録の「場の条件」を引き継ぐ（別の調査のものは使わない）
+    carry: (SCREENS._carry && SCREENS._carry.survey_uuid===svUuid) ? SCREENS._carry : {},
   });
   if(!DB.upsert(DB.key.rd, rec)){
     toast('置けませんでした（端末の空き容量をご確認ください）');
@@ -3661,7 +3440,7 @@ function reddAddAt(svUuid, lat, lon, acc, source){
   envMarkPlaced();
   // 置いたものをそのまま選ぶ（前の記録に書き込ませない）
   REDD_SEL = rec.uuid;
-  prefSet('env_tab', 'S');
+  envSetFocus('rd');
   toast(`${reddName(rec)} を置きました`);
   return rec;
 }
@@ -3684,9 +3463,10 @@ function envAddHere(svUuid){
   });
 }
 function envSelect(u){
-  if(ENV_SEL === u) return;
+  if(ENV_SEL === u && envFocus() === 'un') return;
   if(!envFlushOk()) return;   // 打ちかけを書けないなら、切り替えない
   ENV_SEL = u;
+  envSetFocus('un');
   envMarkSelected();     // 人が選んだ。曲がりの行き先は、これを先に見る
   render();
 }
@@ -3763,9 +3543,10 @@ function envGrabHere(u, which){
    （作り直すと、選ぶたびに地図がちらつき、100件を超えると目に見えて遅くなる）。
    書き替えられなければ false を返すので、呼んだ側が画面を作り直す */
 function reddSelect(u, svUuid){
-  if(REDD_SEL === u) return true;
+  if(REDD_SEL === u && envFocus() === 'rd') return true;
   if(!envFlushOk()) return false;   // 打ちかけを書けないなら、切り替えない
   REDD_SEL = u;
+  envSetFocus('rd');
   envMarkSelected();
   return reddSyncUI(svUuid);
 }
@@ -3852,7 +3633,7 @@ SCREENS.envMap = (argStr)=>{
   // 混ぜると、位置の無い点として並んでしまう
   const meshes = DB.unitsOf(svUuid).filter(isMesh);
   const list = DB.unitsOf(svUuid).filter(x=>!isMesh(x));
-  if(a.record && list.some(x=>x.uuid===a.record)){ ENV_SEL = a.record; prefSet('env_tab','PLM'); }
+  if(a.record && list.some(x=>x.uuid===a.record)){ ENV_SEL = a.record; envSetFocus('un'); }
   // 選んでいるものが消えていたら、いちばん新しいものにする
   if(ENV_SEL && !list.some(x=>x.uuid===ENV_SEL)) ENV_SEL = null;
   if(!ENV_SEL && list.length) ENV_SEL = list[list.length-1].uuid;
@@ -3860,10 +3641,13 @@ SCREENS.envMap = (argStr)=>{
 
   // 産卵床（S）。物理環境とは別に選ぶ
   const redds = DB.reddsOf(svUuid);
-  if(a.redd && redds.some(x=>x.uuid===a.redd)){ REDD_SEL = a.redd; prefSet('env_tab','S'); }
+  if(a.redd && redds.some(x=>x.uuid===a.redd)){ REDD_SEL = a.redd; envSetFocus('rd'); }
   if(REDD_SEL && !redds.some(x=>x.uuid===REDD_SEL)) REDD_SEL = null;
   if(!REDD_SEL && redds.length) REDD_SEL = redds[0].uuid;   // reddsOf は新しい順
   const curRedd = REDD_SEL ? redds.find(x=>x.uuid===REDD_SEL) : null;
+  // 入れるものが片方しか無ければ、そちらへ向ける（空の入力欄を出さない）
+  if(!curRedd && cur) envSetFocus('un');
+  if(!cur && curRedd) envSetFocus('rd');
   // 「これを見る」で渡された相手は、1回きり。使ったら履歴から外す。
   // 残しておくと、画面を作り直すたびに選び直しと切り替えの戻しが起き、
   // 産卵床と物理環境の切り替えボタンが効かなくなる
@@ -3871,12 +3655,13 @@ SCREENS.envMap = (argStr)=>{
     const here = STACK[STACK.length-1];
     if(here && here.name==='envMap') here.arg = JSON.stringify({sv:svUuid});
   }
-  const tab = envTab();
+  const focus = envFocus();
 
   const chip = (x)=>{
     const half = (isLine(x) && !linePt(x,'end'));
     const picking = envPickOn();
-    const on = picking ? ENV_PICK.set.has(x.uuid) : (x.uuid===ENV_SEL);
+    // 光らせるのは「いま入れているもの」だけ。両方光ると、どちらに打っているか分からない
+    const on = picking ? ENV_PICK.set.has(x.uuid) : (envFocus()==='un' && x.uuid===ENV_SEL);
     const act = picking ? `envPickToggle('${x.uuid}')` : `envSelect('${x.uuid}')`;
     return `<button type="button" data-u="${x.uuid}" class="${on?'on':''}"
       onclick="${act}">${picking && on ? '&check; ' : ''}${esc(x.name||'')}${half?'…':''}</button>`;
@@ -3914,32 +3699,30 @@ SCREENS.envMap = (argStr)=>{
       </div>
 
       <div class="card">
-        <div class="seg" style="margin-top:0">
-          <button type="button" class="${tab==='S'?'on':''}"
-            onclick="envSetTab('S')">産卵床（S）</button>
-          <button type="button" class="${tab==='PLM'?'on':''}"
-            onclick="envSetTab('PLM')">物理環境（P・L・M）</button>
-        </div>
-        ${tab==='S' ? `
-          <div id="reddHead" style="margin-top:8px">${reddHeadHtml(svUuid)}</div>
-          <div class="seg" id="reddChips">${reddChipsHtml(svUuid)}</div>
-          ${redds.length ? '' :
-            '<div class="tiny muted">まだありません。地図の左下の産卵床の印を押してから、地図をタップしてください。</div>'}`
-        : `
-          ${list.length
-            ? `<div class="seg" data-seg="envsel" style="margin-top:8px">${list.map(chip).join('')}</div>
-               ${envPickOn() ? `
-                 <button class="btn ghost small" id="envPickDel" style="margin-top:8px"
-                   onclick="envPickDelete('${svUuid}')">消すものを押してください</button>
-                 <button class="btn ghost small" onclick="envPickCancel()">やめる</button>
-                 <div class="tiny muted">消すものを押して選んでください。
-                   選んでいるあいだは、新しく置けません。</div>`
-               : `<button class="btn ghost small" style="width:auto;padding:4px 10px;margin-top:8px"
-                   onclick="envPickStart('${svUuid}')">選んで消す</button>`}`
-            : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}`}
+        <div id="reddHead">${reddHeadHtml(svUuid)}</div>
+        <div class="seg" id="reddChips">${reddChipsHtml(svUuid)}</div>
+        ${redds.length ? '' :
+          '<div class="tiny muted">まだありません。地図の左下の産卵床の印を押してから、地図をタップしてください。</div>'}
       </div>
 
-      ${tab==='S'
+      <div class="card">
+        <div class="row" style="margin-bottom:6px">
+          <div class="grow">物理環境 ${list.length}件</div>
+        </div>
+        ${list.length
+          ? `<div class="seg" data-seg="envsel">${list.map(chip).join('')}</div>
+             ${envPickOn() ? `
+               <button class="btn ghost small" id="envPickDel" style="margin-top:8px"
+                 onclick="envPickDelete('${svUuid}')">消すものを押してください</button>
+               <button class="btn ghost small" onclick="envPickCancel()">やめる</button>
+               <div class="tiny muted">消すものを押して選んでください。
+                 選んでいるあいだは、新しく置けません。</div>`
+             : `<button class="btn ghost small" style="width:auto;padding:4px 10px;margin-top:8px"
+                 onclick="envPickStart('${svUuid}')">選んで消す</button>`}`
+          : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}
+      </div>
+
+      ${focus==='rd'
         ? `<div id="reddFormBox">${reddItemFormHtml(curRedd, s)}</div>`
         : envItemFormHtml(cur, s)}
 
@@ -3976,7 +3759,7 @@ SCREENS.envMap = (argStr)=>{
       }
       envHistClear(svUuid);       // ほかの調査の分は持ち越さない
       // 入力欄の持ち主は、いま出ているほうだけ（画面に入力欄は1つしか出ない）
-      if(tab==='S') reddItemFormWire(curRedd); else envItemFormWire(cur);
+      if(focus==='rd') reddItemFormWire(curRedd); else envItemFormWire(cur);
       envSyncNextUI();            // 案内は、地図が出ていなくても書ける
 
       // 地図。前に見ていた場所があればそこへ戻す（勝手に動かさない）
@@ -4037,6 +3820,9 @@ SCREENS.envMap = (argStr)=>{
           return;
         }
         if(envPickOn()){ toast('消すものを選んでいます。先に「やめる」を押してください'); return; }
+        // 打ちかけを先に書く。書かずに次を置くと、画面を作り直したときに
+        // 直前に打った値（自動保存の待ち0.6秒ぶん）が黙って消える
+        if(!envFlushOk()) return;
         // 産卵床は、近くの印に重ねない。隣り合う産卵床は本当に別のものなので、
         // 重ねてしまうと2つを1つと数えることになる
         const snapping = !(ENV_NEXT.survey===svUuid && ENV_NEXT.kind==='S');
@@ -4045,9 +3831,10 @@ SCREENS.envMap = (argStr)=>{
         const added = envAddAt(svUuid, la, lo, '', '地図');
         if(!added) return;
         envSnapTell(sn);
-        // 産卵床は、地図を作り直さずに描き足すだけにする。
-        // 100個以上を続けて置くので、ここで作り直すと目に見えて遅くなる
-        if(!(envTab()==='S' && reddSyncUI(svUuid))) render();
+        // 産卵床は続けて100個以上置くので、作り直すと目に見えて遅くなる。
+        // 地図はそのままに、印と一覧と入力欄だけを書き替える。
+        // 物理環境は数が少ないので、そのまま作り直してよい
+        if(!(envFocus()==='rd' && reddSyncUI(svUuid))) render();
       });
       // はじめて開いたときだけ、置いてあるものが入るようにする
       if(!v){
@@ -4637,6 +4424,7 @@ function delMeshCell(uu){
 SCREENS.unitEnv = (u)=>{
   const rec = DB.liveUnit(u); if(!rec) return SCREENS.home();
   ENV_SEL = rec.uuid;
+  envSetFocus('un');
   const mesh = isMesh(rec);
   const pts = envPoints(rec);
   const d = unitDepth(rec), v = unitVelocity(rec);
@@ -5247,7 +5035,7 @@ function baseMapButtonsHtml(){
   ).join('') + `</div>`;
 }
 // 画面に出ている地図をまとめて返す。ここを経由しないと、地図を増やしたときに切替が効かなくなる
-function allMaps(){ return [MAP, PICKMAP, ENVMAP, OMAP].filter(Boolean); }
+function allMaps(){ return [MAP, ENVMAP, OMAP].filter(Boolean); }
 function applyBaseMap(map, name){
   if(!map) return;
   const b = BASEMAPS[name] || BASEMAPS['航空写真'];
@@ -5635,13 +5423,13 @@ SCREENS.map = (sv)=>{
       <div id="map"></div>
       <div class="sp"></div>
       <div class="btn-grid">
-        <button class="btn" id="mapAddBtn" onclick="toggleMapAdd('${sv}')">＋ 地図をタップして記録を追加</button>
+        <button class="btn" onclick="nav('envMap','${esc(JSON.stringify({sv}))}')">＋ 地図で記録する</button>
         <button class="btn" onclick="nav('offlineMap','${sv}')">オフライン地図を保存</button>
       </div>
       <div class="sp"></div>
       <div class="card" id="legend"><div class="small muted">凡例</div></div>
       <div class="tiny muted">丸＝産卵床（色＝魚種／濃さ＝新旧）、四角＝親魚のみ、✕＝ホッチャレのみ、線＝歩いた区間、オレンジの四角＝メモ。タップすると記録を開けます。</div>`,
-    onMount:()=>{ MAP_ADD_MODE=false; drawMap(sv); }
+    onMount:()=>{ drawMap(sv); }
   };
 };
 
@@ -5923,31 +5711,14 @@ function drawMap(sv){
   if(group.getLayers().length){
     try{ MAP.fitBounds(group.getBounds().pad(0.2), {maxZoom:17}); }catch(e){}
   }
-  // GPSがずれている時のために、地図をタップした場所で新しい記録を始められるようにする
-  MAP.on('click', e=>{
-    if(!MAP_ADD_MODE) return;
-    MAP_ADD_MODE=false;
-    nav('reddEdit', JSON.stringify({sv, lat:+e.latlng.lat.toFixed(6), lon:+e.latlng.lng.toFixed(6)}));
-  });
-
   addReddLocateControl();
   if(lastFix) showCurrentPos();
   renderLegend(sv);
 }
 
-let MAP_ADD_MODE=false;
-function toggleMapAdd(sv){
-  MAP_ADD_MODE = !MAP_ADD_MODE;
-  const b=$('#mapAddBtn');
-  if(b){
-    b.textContent = MAP_ADD_MODE ? '追加をやめる' : '＋ 地図をタップして記録を追加';
-    b.classList.toggle('primary', MAP_ADD_MODE);
-  }
-  if(MAP_ADD_MODE) toast('産卵床のある場所を地図でタップしてください');
-}
-
+// この地図は「見る」ための地図。記録を足すのは物理環境の地図にまとめた（v22）
 function closeMapPopupAndEdit(sv, u){
-  nav('reddEdit', JSON.stringify({sv, u}));
+  nav('envMap', JSON.stringify({sv, redd:u}));
 }
 
 function showCurrentPos(){
