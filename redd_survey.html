@@ -153,11 +153,11 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v19';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v20';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-01';
-const APP_NOTE = '物理環境の記録を、魚類調査アプリと同じ操作に作り直しました'
+const APP_DATE = '2026-09-02';
+const APP_NOTE = '物理環境とメッシュの地図が開けなくなっていたのを直しました（v19の不具合）'
   + '（地図の上のボタン・回転・現在地・まとめて消す）';
 
 /* ---------- 小道具 ---------- */
@@ -5451,7 +5451,7 @@ function drawMap(sv){
     nav('reddEdit', JSON.stringify({sv, lat:+e.latlng.lat.toFixed(6), lon:+e.latlng.lng.toFixed(6)}));
   });
 
-  addLocateControl();
+  addReddLocateControl();
   if(lastFix) showCurrentPos();
   renderLegend(sv);
 }
@@ -5484,7 +5484,11 @@ function showCurrentPos(){
     L.circleMarker([lastFix.lat,lastFix.lon], { radius:6, color:'#fff', weight:2, fillColor:'#4aa3dd', fillOpacity:1 })
   ]).addTo(MAP);
 }
-function addLocateControl(){
+/* 産卵床の地図だけが使う「現在地」ボタン（文字のボタン）。
+   物理環境・メッシュの地図が使う addLocateControl とは別物。
+   同じ名前にすると、あとに書いたほうだけが生き残り、
+   先に書いたほうを呼んでいる画面が動かなくなる（v19でこれが起きた） */
+function addReddLocateControl(){
   const target = MAP;   // 画面を切り替えた後に古い地図を触らないよう、この時点の地図を覚えておく
   const C = L.Control.extend({
     options:{ position:'topleft' },
