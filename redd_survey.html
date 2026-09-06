@@ -153,12 +153,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v22';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v24';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-02';
-const APP_NOTE = '記録は「地図で記録する」の画面ひとつで最後まで入れられるようにしました'
-  + '（産卵床も川の環境も同じ地図／細かい項目は「詳しく入れる」を開くと出ます）';
+const APP_DATE = '2026-09-06';
+const APP_NOTE = '記録は「地図で記録する」の画面ひとつで完結します'
+  + '（おかしい値も保存して「要確認」で分かるようにしました／声で入力はやめました）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -207,16 +207,35 @@ function countOf(v){
 function nums(arr){ return (arr||[]).map(numOf).filter(v=>v!==''); }
 /* 数の範囲を見る。おかしいものがあれば、その説明を返す。無ければ空文字。
    負の距離や100を超える割合が入ると、面積や河床材料の割合が静かに壊れる */
-function rangeCheck(list){
+function rangeCheck(list){ return rangeCheckAll(list)[0] || ''; }
+/* 同じ検査で、おかしいものを全部並べて返す（要確認の理由に使う）。
+   最初の1件だけだと、直したらまた別の理由が出て、何度も往復させてしまう */
+function rangeCheckAll(list){
+  const out=[];
   for(const it of list){
-    const label=it[0], v=it[1], lo=it[2], hi=it[3];
-    if(v==='' || v===null || v===undefined) continue;
+    const label=it[0], v=it[1], lo=it[2], hi=it[3], whole=it[4];   // whole: 整数だけ（個体数）
+    if(v===null || v===undefined || String(v).trim()==='') continue;   // 空白だけも空欄
     const n=numOf(v);
-    if(n==='' || !isFinite(n)) return `${label}は数で入れてください`;
-    if(n<lo || n>hi) return `${label}は ${lo}〜${hi} の間で入れてください（いま ${n}）`;
+    if(n==='' || !isFinite(n)) out.push(`${label}は数で入れてください`);
+    else if(n<lo || n>hi) out.push(`${label}は ${lo}〜${hi} の間で入れてください（いま ${n}）`);
+    else if(whole && !Number.isInteger(n)) out.push(`${label}は整数で入れてください（いま ${n}）`);
   }
-  return '';
+  return out;
 }
+/* 産卵床の数の欄の、受け入れる範囲。検査と集計で同じ表を見る。
+   ここを2か所に持つと「検査は通るのに集計から外れる」ちぐはぐが起きる */
+const REDD_RANGE = {
+  length_cm:[0,2000], width_cm:[0,2000], area_m2:[0,400],
+  water_temp_c:[-5,45], intragravel_temp_c:[-5,45], temp_depth_cm:[0,500],
+  female_n:[0,9999], male_n:[0,9999], carcass_n:[0,9999] };
+const ENV_RANGE = { depth_cm:[0,2000], velocity_ms:[0,10] };
+// 個体数は整数だけ。1.5尾を「要確認」にし、集計にも入れない
+const REDD_WHOLE = { female_n:true, male_n:true, carcass_n:true };
+function reddRangeItem(k, v){ return [REDD_LABEL[k], v, REDD_RANGE[k][0], REDD_RANGE[k][1], !!REDD_WHOLE[k]]; }
+const REDD_LABEL = {
+  length_cm:'長さ', width_cm:'幅', area_m2:'面積', water_temp_c:'河川水温', intragravel_temp_c:'河床内水温',
+  temp_depth_cm:'河床内を測った深さ', female_n:'雌', male_n:'雄', carcass_n:'ホッチャレ' };
+function inRange(n, rg){ return !rg || (n>=rg[0] && n<=rg[1]); }
 /* 画面ごとの覚えごと（色分けの基準・折りたたみの開閉など） */
 function prefs(){ try{ return JSON.parse(localStorage.getItem('rd_prefs')||'{}')||{}; }catch(e){ return {}; } }
 function prefSet(k,v){ const p=prefs(); p[k]=v; try{ localStorage.setItem('rd_prefs', JSON.stringify(p)); }catch(e){} }
@@ -349,6 +368,15 @@ const PhotoDB = {
       Object.keys(DB.key).forEach(kk=>{
         DB.loadRaw(DB.key[kk]).forEach(x=>(x.photos||[]).forEach(p=>p&&p.id&&refs.add(p.id)));
       });
+      // メモの控えから使っている写真も、使用中とみなす。
+      // 数えないと、開き直したときに写真の実体だけ消えて戻せなくなる。
+      // ここは読めなかったら例外にする。読めないのを「参照なし」と取り違えると、
+      // 使っている写真を消してしまう（消したものは戻せない）
+      const d = editDraftsStrict();
+      Object.keys(d).forEach(k=>{
+        const x = d[k]; if(!x) return;
+        (x.photos||[]).forEach(pp=>pp&&pp.id&&refs.add(pp.id));
+      });
     }catch(e){ return; }
     const ids = await this.allIds();
     for(const id of ids){ if(!refs.has(id)) await this.del(id); }
@@ -376,24 +404,36 @@ async function pickPhotos(input){
   const files = Array.from(input.files||[]);
   input.value='';
   if(!files.length) return;
-  const gen = screenGen();          // 取り込み中に別の記録へ移ったら、そちらには足さない
-  const owner = (typeof ENV_FORM!=='undefined') ? ENV_FORM : '';
+  // 縮小には時間がかかる。始めたときの持ち主を覚えておき、
+  // 戻ってきたときに別の記録へ移っていたら、そちらの写真の並びには触らない
+  // （触ると、Aで撮った写真がBに付いてしまう）
+  const mark = envFormMark();
+  const owner = mark.uuid;
   toast('写真を取り込んでいます…');
+  // 途中で画面に足すと、2枚目の縮小中に切り替えたとき
+  // 1枚目だけがどこにも付かず迷子になる。全部そろってから一度に足す
+  const done = [];
   let ok=0, ng=0;
+  const moved = ()=>{ toast('別の記録へ移ったので、写真は付けませんでした'); };
   for(const f of files){
     try{
       const blob = await shrinkImage(f);
+      // もう別の記録へ移っていれば、書き込みもしない
+      if(!envFormSame(mark)){ moved(); return; }
       const ext = blobExt(blob);
       const id = uuid();
       await PhotoDB.put({ id, blob, ext, size:blob.size, added_at:nowISO() });
-      if(screenStale(gen)) return;   // 実体は残るが参照は付けない。使われなければ gc が片付ける
-      SCREENS._photos = (SCREENS._photos||[]).concat([{ id, ext, size:blob.size }]);
+      // 実体は残るが参照は付けない。使われなければ gc が片付ける
+      if(!envFormSame(mark)){ moved(); return; }
+      done.push({ id, ext, size:blob.size });
       ok++;
     }catch(e){ console.error(e); ng++; }
   }
-  if(screenStale(gen)) return;
+  if(!envFormSame(mark)){ moved(); return; }
+  if(!done.length){ if(ng) alert('写真を保存できませんでした（端末の空き容量を確認してください）'); return; }
+  SCREENS._photos = (SCREENS._photos||[]).concat(done);
   renderPhotoPanel();
-  // 物理環境では、縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける
+  // 縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける
   envPhotoTouch(owner);
   if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（端末の空き容量を確認してください）`);
   else toast(ok+'枚を追加しました');
@@ -662,25 +702,40 @@ const DRAFT_KEY = 'rd_draft_survey';
    画面を離れるときに書きかけを保存し、次に同じ画面を開いたら戻す。
    保存した時点で下書きは消す。 */
 const EDIT_DRAFT_KEY = 'rd_draft_edit';
-function editDrafts(){ try{ return JSON.parse(localStorage.getItem(EDIT_DRAFT_KEY)||'{}'); }catch(e){ return {}; } }
+function editDrafts(){ try{ return editDraftsStrict(); }catch(e){ return {}; } }
+/* 控えを読む。壊れていたら例外にする。「読めない」を「無い」と取り違えてはいけない
+   場面（写真の掃除・起動時の取り込み）で使う */
+function editDraftsStrict(){
+  const raw = localStorage.getItem(EDIT_DRAFT_KEY);
+  if(raw == null) return {};
+  const d = JSON.parse(raw);
+  if(!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('draft broken');
+  return d;
+}
+/* 控えを書く。書けたら true。メモの画面だけが使う
+   （産卵床は打つそばから記録そのものに書くので、控えを持たない）。
+   書きっぱなしにせず読み戻して確かめる。
+   ほかの控えを捨てて書き直すようなことはしない（他人の入力を消してしまう） */
 function editDraftSave(uuid, obj){
-  if(!uuid) return;
-  if(obj && obj._new && !draftHasContent(obj._kind, obj)){ editDraftClear(uuid); return; }
+  if(!uuid) return false;
+  if(obj && obj._new && !draftHasContent(obj._kind, obj)){ editDraftClear(uuid); return true; }
   const d = editDrafts(); d[uuid] = obj;
   const keys = Object.keys(d);
   if(keys.length > 20) delete d[keys[0]];   // 溜め込みすぎない
-  try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){}
+  try{
+    localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d));
+    return !!editDrafts()[uuid];
+  }catch(e){ return false; }
 }
 function editDraftGet(uuid){ return editDrafts()[uuid] || null; }
-// まだ一度も保存していない書きかけを探す。
+// まだ一度も保存していない書きかけを探す（いまはメモの画面だけが使う）。
 // 新規作成のたびに新しいIDが振られるため、IDでは見つけられない
 function findNewDraft(kind, sv){
   const d = editDrafts();
-  const dbKey = kind==='redd' ? DB.key.rd : DB.key.nt;
   const id = Object.keys(d).find(k=>{
     const x=d[k];
     if(!x || x._kind!==kind || !x._new || x._sv!==sv) return false;
-    if(DB.get(dbKey, k)) return false;        // その後に保存されていたら書きかけではない
+    if(DB.get(DB.key.nt, k)) return false;    // その後に保存されていたら書きかけではない
     return draftHasContent(kind, x);          // 空の書きかけで新規入力を邪魔しない
   });
   return id ? {uuid:id, draft:d[id]} : null;
@@ -690,11 +745,31 @@ function draftHasContent(kind, x){
   const arr = v => Array.isArray(v) && v.length>0;
   return !!(x.content || arr(x.photos));
 }
-// 産卵床の書きかけは、もう控えない（v22）。
-// 地図に置いた時点で保存されるので、「まだ保存していない入力」が存在しない
+/* 控えを消す。消えたら true（消せたか確かめる）。
+   消せていないのに消えたことにすると、取り込み済みの記録に
+   古い控えが重なって、あとで直した内容が巻き戻る */
 function editDraftClear(uuid){
   const d = editDrafts();
-  if(uuid in d){ delete d[uuid]; try{ localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d)); }catch(e){} }
+  if(!(uuid in d)) return true;
+  delete d[uuid];
+  try{
+    localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d));
+    return !(uuid in editDrafts());
+  }catch(e){ return false; }
+}
+/* 取り込んだ控えを消す。消す直前に読み直し、取り込んだときと同じ中身（sig）のときだけ消す。
+   取り込みの途中で（旧版の画面が）控えを書き換えていたら消さない（次の起動で重ね直す）。
+   読めなければ消さない */
+function editDraftClearIfSig(uuid, sig){
+  let d;
+  try{ d = editDraftsStrict(); }catch(e){ return false; }
+  if(!(uuid in d)) return true;
+  if(draftSig(d[uuid]) !== sig) return false;
+  delete d[uuid];
+  try{
+    localStorage.setItem(EDIT_DRAFT_KEY, JSON.stringify(d));
+    return !(uuid in editDrafts());
+  }catch(e){ return false; }
 }
 // 画面を離れる直前に呼ぶ。いま開いている入力画面の書きかけを控える
 function stashEditDraft(){
@@ -961,9 +1036,9 @@ function liveTally(sv){
   const all = DB.reddsOf(sv);
   const redds = all.filter(r=>hasTarget(r,'産卵床'));
   const withFish = all.filter(r=>hasTarget(r,'親魚'));
-  const female = withFish.reduce((a,r)=>a+(num(r.female_n)||0),0);
-  const male   = withFish.reduce((a,r)=>a+(num(r.male_n)||0),0);
-  const carcass= all.filter(r=>hasTarget(r,'ホッチャレ')).reduce((a,r)=>a+(num(r.carcass_n)||0),0);
+  const female = sumOf(withFish,'female_n');
+  const male   = sumOf(withFish,'male_n');
+  const carcass= sumOf(all.filter(r=>hasTarget(r,'ホッチャレ')),'carcass_n');
   // 魚種別の産卵床数（多い順・上位のみ文字で）
   const bySp = countBy(redds,'species','種不明');
   return { redd:redds.length, female, male, carcass, review:all.filter(r=>r.needs_review).length, bySp };
@@ -1228,164 +1303,11 @@ SCREENS.redds = (sv)=>{
   };
 };
 
-/* ============================================================
-   声で入力
-   「水深25 流速0.4 中礫 サケ 新しい」のように話すと、対応する欄へ入れる。
-   手が濡れる・寒い現場でキーボードを叩かずに済ませるための補助で、
-   聞き取れなかった分は最後にメモへ回す（取りこぼしを黙って捨てない）。
-   ============================================================ */
-const VOICE_NUM_FIELDS = [
-  { sel:'#fLen', label:'長さ',       words:['長さ','ながさ','たて','縦'] },
-  { sel:'#fWid', label:'幅',         words:['幅','はば','よこ','横'] },
-  { env:'depth_cm',    label:'水深', words:['水深','すいしん','深さ','ふかさ'] },
-  { env:'velocity_ms', label:'流速', words:['流速','りゅうそく','速さ','はやさ'] },
-  { sel:'#fIGT', label:'河床内水温', words:['河床内水温','河床内','かしょうない','床内','間隙水温'] },
-  { sel:'#fWT',  label:'河川水温',   words:['河川水温','水温','すいおん'] },
-  { sel:'#fTD',  label:'測った深さ', words:['測定深さ','埋設深さ','深度'] },
-  { sel:'#fFem', label:'雌',         words:['雌','メス','めす'] },
-  { sel:'#fMal', label:'雄',         words:['雄','オス','おす'] },
-  { sel:'#fCar', label:'ホッチャレ', words:['ホッチャレ','ほっちゃれ','死骸','しがい'] },
-  { sel:'#fNo',  label:'番号',       words:['番号','ナンバー'] },
-];
-const VOICE_SEG_FIELDS = [
-  { field:'species', options:()=>speciesList(),
-    aliases:{'鮭':'サケ','しろざけ':'サケ','シロザケ':'サケ','白鮭':'サケ',
-             'からふとます':'カラフトマス','ピンクサーモン':'カラフトマス',
-             'さくらます':'サクラマス','やまめ':'ヤマメ',
-             'おしょろこま':'オショロコマ','いわな':'イワナ','にじます':'ニジマス'} },
-  { field:'age', options:()=>OPT.age,
-    aliases:{'あたらしい':'新しい','新規':'新しい','ややふるい':'やや古い','ふるい':'古い'} },
-  { field:'state', options:()=>OPT.state,
-    aliases:{'くっさくちゅう':'掘削中','掘ってる':'掘削中','かんせい':'完成','産卵済み':'産卵後'} },
-  { field:'riverForm', options:()=>OPT.riverForm,
-    aliases:{'はやせ':'早瀬','ひらせ':'平瀬','ふち':'淵','せがしら':'瀬頭','瀬の頭':'瀬頭'} },
-  { field:'subMain', options:()=>OPT.substrate,
-    aliases:{'すな':'砂','さいれき':'細礫','ちゅうれき':'中礫','たいれき':'大礫',
-             'きょれき':'巨礫','がんばん':'岩盤'} },
-  { field:'cover', options:()=>OPT.cover,
-    aliases:{'しょくせい':'植生','とうぼく':'倒木','ふち':'淵','きしぎわ':'岸際'} },
-  { field:'fish', options:()=>['いる','いない'],
-    aliases:{'親魚あり':'いる','親魚なし':'いない'} },
-];
-
-// 声で言われた水深・流速を測点へ入れる。
-// いまの最後の測点がその項目を空けていればそこへ、埋まっていれば新しい測点を足す
-function envVoiceApply(hit){
-  envSync();
-  const list = SCREENS._env || [];
-  let last = list[list.length-1];
-  const busy = last && Object.keys(hit).some(k=>last[k]!=='' && last[k]!=null);
-  if(!last || busy){
-    last = {depth_cm:'', velocity_ms:'', note:''};
-    list.push(last);
-  }
-  Object.keys(hit).forEach(k=>{ last[k] = parseFloat(hit[k]); });
-  SCREENS._env = list;
-  renderEnvList();
-}
-
 function setSegValue(field, value){
   const btns = $$(`[data-seg="${field}"] button`);
   const b = btns.find(x=>x.textContent===value);
   if(b){ pickSeg(b); return true; }
   return false;
-}
-
-function parseVoice(text){
-  let t = String(text||'')
-    .replace(/[０-９]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
-    .replace(/[．。]/g,'.').replace(/[、，]/g,' ').replace(/　/g,' ');
-  const hits=[];
-
-  // 数値つきの項目。「河床内水温」を「水温」より先に見るため、長い言葉から順に照合する
-  const entries=[];
-  VOICE_NUM_FIELDS.forEach(f=>f.words.forEach(w=>entries.push({f,w})));
-  entries.sort((a,b)=>b.w.length-a.w.length);
-  const filled=new Set();
-  const envHit={};
-  entries.forEach(({f,w})=>{
-    const key = f.env || f.sel;
-    if(filled.has(key)) return;
-    const m = new RegExp(w+'\\s*[はがのをが]?\\s*(-?\\d+(?:\\.\\d+)?)').exec(t);
-    if(!m) return;
-    if(f.env){ envHit[f.env] = m[1]; }
-    else { const el=$(f.sel); if(!el) return; el.value = m[1]; }
-    filled.add(key);
-    hits.push(`${f.label} ${m[1]}`);
-    t = t.replace(m[0], ' ');
-  });
-  if(Object.keys(envHit).length) envVoiceApply(envHit);
-
-  // 選択肢の項目
-  VOICE_SEG_FIELDS.forEach(f=>{
-    const pairs = f.options().map(o=>[o,o]).concat(Object.entries(f.aliases||{}));
-    pairs.sort((a,b)=>b[0].length-a[0].length);
-    for(const [key,val] of pairs){
-      if(!t.includes(key)) continue;
-      if(setSegValue(f.field, val)){ hits.push(val); t = t.replace(key,' '); }
-      break;
-    }
-  });
-
-  updateArea();
-  // 拾えなかった言葉はメモへ回す（聞き取った内容を黙って捨てない）
-  const rest = t.replace(/\s+/g,' ').trim();
-  if(rest){
-    const n=$('#fNote');
-    if(n){ n.value = (n.value ? n.value+' ' : '') + rest; hits.push('メモ「'+rest+'」'); }
-  }
-  return hits;
-}
-
-let RECOG=null, LISTENING=false;
-function voiceSupported(){ return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
-function voiceStatus(msg){ const el=$('#voiceStatus'); if(el) el.textContent=msg; }
-function toggleMic(){
-  if(!voiceSupported()){ toast('この端末では声で入力できません'); return; }
-  if(LISTENING){ try{ RECOG.stop(); }catch(e){} return; }
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  RECOG = new SR();
-  RECOG.lang='ja-JP'; RECOG.interimResults=true; RECOG.continuous=false;
-  const gen = screenGen();
-  RECOG.onresult = e=>{
-    if(screenStale(gen)){ try{ RECOG.abort(); }catch(err){} return; }
-    let fin='', mid='';
-    for(let i=e.resultIndex; i<e.results.length; i++){
-      const tr=e.results[i][0].transcript;
-      if(e.results[i].isFinal) fin+=tr; else mid+=tr;
-    }
-    const pv=$('#voicePreview');
-    if(pv) pv.innerHTML = esc(fin) + (mid?`<span class="muted"> ${esc(mid)}</span>`:'');
-    if(fin){
-      const hits = parseVoice(fin);
-      voiceStatus(hits.length ? '入れました：'+hits.join(' ／ ') : '当てはまる項目がありませんでした');
-    }
-  };
-  RECOG.onerror = e=>{
-    voiceStatus(e.error==='no-speech' ? '声が聞き取れませんでした。もう一度どうぞ'
-      : e.error==='network' ? 'ネットにつながっていないと使えません（端末による）'
-      : '聞き取れませんでした（'+e.error+'）');
-    stopMic();
-  };
-  RECOG.onend = stopMic;
-  LISTENING=true;
-  const b=$('#micBtn'); if(b) b.textContent='■ 停止';
-  voiceStatus('聞いています…');
-  try{ RECOG.start(); }catch(e){ stopMic(); }
-}
-function stopMic(){
-  LISTENING=false;
-  const b=$('#micBtn'); if(b) b.textContent='🎤 声で入力';
-  if($('#voiceStatus') && $('#voiceStatus').textContent==='聞いています…') voiceStatus('');
-}
-function voicePanelHtml(){
-  return `<div class="card">
-    <div class="row">
-      <button class="btn" id="micBtn" style="width:auto" onclick="toggleMic()">🎤 声で入力</button>
-      <div class="grow tiny muted" id="voiceStatus">例：「水深25 流速0.4 中礫 サケ 新しい 長さ150 幅80」</div>
-    </div>
-    <div class="small" id="voicePreview" style="margin-top:8px"></div>
-  </div>`;
 }
 
 /* ============================================================
@@ -1401,8 +1323,9 @@ function envPoints(r){
     return [{ depth_cm:r.depth_cm??'', velocity_ms:r.velocity_ms??'', note:'' }];
   return [];
 }
+// 範囲外の値（水深-10cm など）は集計に入れない。記録には残っていて「要確認」が付いている
 function envValues(r, field){
-  return envPoints(r).map(p=>num(p[field])).filter(v=>v!=null);
+  return envPoints(r).map(p=>numOf(p[field])).filter(v=>v!=='' && inRange(v, ENV_RANGE[field]));
 }
 function envMean(r, field){
   const v = envValues(r, field);
@@ -1443,10 +1366,40 @@ function nextReddNo(sv){
   const list = DB.load(DB.key.rd).filter(x=>x.survey_uuid===sv);
   return list.reduce((m,x)=>Math.max(m, parseInt(x.redd_no,10)||0), 0) + 1;
 }
+/* 面積。長さ・幅がどちらも範囲内のときだけ出す。
+   範囲外（負の長さなど）から面積を作ると、総面積が静かに狂う */
 function reddArea(lenCm, widCm){
-  if(lenCm===''||lenCm==null||widCm===''||widCm==null) return '';
-  return +((lenCm*widCm)/10000).toFixed(3);
+  const L=numOf(lenCm), W=numOf(widCm);
+  if(L==='' || W==='') return '';
+  if(!inRange(L, REDD_RANGE.length_cm) || !inRange(W, REDD_RANGE.width_cm)) return '';
+  return +((L*W)/10000).toFixed(3);
 }
+/* 集計に使う面積。古い版は範囲外の長さ（3000cm など）からも面積を作っていたので、
+   保存してある値を信じず、いまの長さ・幅から作り直す。
+   長さ・幅がどちらも無い古い記録だけ、保存してある面積をそのまま使う */
+// 長さ・幅がどちらも空欄か。「無い」は空欄のことで、数にならない文字（'abc'）は「ある」
+function reddSizeBlank(r){
+  const blank = v => v==null || String(v).trim()==='';
+  return blank(r.length_cm) && blank(r.width_cm);
+}
+function reddAreaOf(r){
+  // 長さ・幅に文字が残っていれば作り直せないので面積なし（保存値は使わない）
+  return reddSizeBlank(r) ? r.area_m2 : reddArea(r.length_cm, r.width_cm);
+}
+/* 保存するときの面積。長さ・幅から作る。
+   前も今も長さ・幅が空欄なら、保存してある面積（古い版で入れたもの）を引き継ぐ。
+   ここで作り直すと、メモを直しただけで古い面積が消える */
+function reddAreaNext(f, prev){
+  if(reddSizeBlank(f) && reddSizeBlank(prev||{})) return (prev && prev.area_m2!=null) ? prev.area_m2 : '';
+  return reddArea(f.length_cm, f.width_cm);
+}
+/* 要確認の理由のうち、入力の状況から付ける断り（値の範囲の理由とは別） */
+const TARGET_NOTE = '記録の種類（産卵床・親魚・ホッチャレ）が選ばれていません';
+const POS_NOTE = '（前の位置のままにしました）';
+/* 要確認の印。人が付けた印（review_manual）と、自動で見つけた理由（review_reasons）を
+   分けて持ち、needs_review はその合わせ。古い記録は needs_review しか無いので人の印とみなす */
+function reviewManual(r){ return r.review_manual!==undefined ? !!r.review_manual : !!r.needs_review; }
+function reviewReasons(r){ return Array.isArray(r.review_reasons) ? r.review_reasons.slice() : []; }
 /* 産卵床の記録のひな形。ここ1か所に決める。
    記録画面から作るときも、地図で置くときも、同じものを作る。
    2か所に持つと、あとで欄を1つ足したとき片方だけ直す事故が起きる（v19で実際に起きた） */
@@ -1462,7 +1415,9 @@ function newRedd(sv, opt){
     // 置いた時点では「産卵床」。親魚だけ・ホッチャレだけに変えるのは入力画面の仕事
     record_targets: ['産卵床'],
     river_form: carry.river_form||'',
-    species: carry.species||'', species_basis: carry.species_basis||'', age_class:'', state:'',
+    // 魚種と判断根拠は引き継がない（見ていない魚種が入り、
+    // 「まだ入れていない」の印も最初から消えてしまうため）
+    species:'', species_basis:'', age_class:'', state:'',
     length_cm:'', width_cm:'', area_m2:'', env_points:[],
     substrate_main: carry.substrate_main||'', substrate_sub: carry.substrate_sub||'',
     embeddedness: carry.embeddedness||'', cover: carry.cover||'',
@@ -1505,16 +1460,6 @@ function reddFormHtml(r, sv, opt){
         <div class="sect">産卵床の状態</div>
         <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
         <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
-
-        <div class="sect">規模</div>
-        <div class="two">
-          <label class="field"><span class="lab">長さ（cm・流れの向き）</span>
-            <input id="fLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_cm??'')}" oninput="updateArea()"></label>
-          <label class="field"><span class="lab">幅（cm）</span>
-            <input id="fWid" type="number" step="1" inputmode="decimal" value="${esc(r.width_cm??'')}" oninput="updateArea()"></label>
-        </div>
-        <div class="card"><div class="row"><div class="grow small muted">面積（自動計算）</div>
-          <div style="font-weight:700" id="areaOut">—</div></div></div>
       </div>
 
       <div data-part="親魚">
@@ -1544,14 +1489,12 @@ function reddFormHtml(r, sv, opt){
       <label class="field"><span class="lab">記録日時</span>
         <input id="fWhen" type="datetime-local" value="${localDatetimeValue(new Date(r.observed_at||nowISO()))}"></label>
 
-      ${voicePanelHtml()}
-
       <div class="sect">位置</div>
       <div class="two">
         <label class="field"><span class="lab">緯度</span>
-          <input id="fLat" inputmode="decimal" value="${esc(r.latitude??'')}" oninput="markPosManual()"></label>
+          <input id="fLat" inputmode="decimal" value="${esc(fixCoord(r.latitude))}" oninput="markPosManual()"></label>
         <label class="field"><span class="lab">経度</span>
-          <input id="fLon" inputmode="decimal" value="${esc(r.longitude??'')}" oninput="markPosManual()"></label>
+          <input id="fLon" inputmode="decimal" value="${esc(fixCoord(r.longitude))}" oninput="markPosManual()"></label>
       </div>
       <div class="small muted" style="margin-top:6px" id="accOut">${posLabel(r)}</div>
       <div class="tiny muted">位置は、地図をタップして直すか、上の「いまここ」で入れ直せます。</div>
@@ -1567,6 +1510,16 @@ function reddFormHtml(r, sv, opt){
       <label class="field"><span class="lab">種の判断根拠</span>${segHtml('basis', OPT.basis, r.species_basis, true)}</label>
 
       <div data-part="産卵床">
+        <div class="sect">規模</div>
+        <div class="two">
+          <label class="field"><span class="lab">長さ（cm・流れの向き）</span>
+            <input id="fLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_cm??'')}" oninput="updateArea()"></label>
+          <label class="field"><span class="lab">幅（cm）</span>
+            <input id="fWid" type="number" step="1" inputmode="decimal" value="${esc(r.width_cm??'')}" oninput="updateArea()"></label>
+        </div>
+        <div class="card"><div class="row"><div class="grow small muted">面積（自動計算）</div>
+          <div style="font-weight:700" id="areaOut">—</div></div></div>
+
         <div class="sect">まわりの環境</div>
         <label class="field"><span class="lab">水深・流速（何点でも足せます）</span>
           <span class="tiny muted" style="display:block; margin:-2px 0 6px">
@@ -1608,18 +1561,19 @@ function reddFormHtml(r, sv, opt){
       <label class="field"><span class="lab">メモ</span>
         <textarea id="fNote">${esc(r.note||'')}</textarea></label>
       <label class="field"><span class="lab">あとで確認したい</span>
-        <div class="row"><input type="checkbox" id="fReview" style="width:22px; height:22px" ${r.needs_review?'checked':''}>
-          <span class="small muted">チェックすると一覧で「要確認」と表示されます</span></div></label>`;
+        <div class="row"><input type="checkbox" id="fReview" style="width:22px; height:22px" ${reviewManual(r)?'checked':''}>
+          <span class="small muted">チェックすると一覧で「要確認」と表示されます（おかしい値があるときは自動でも付きます）</span></div></label>`;
 
   return o.fold
     ? head + foldHtml('rddetail', '詳しく入れる',
-        '<span class="tiny muted">区間・位置・測点・底質・水温・写真・メモ</span>', detail)
+        '<span class="tiny muted">規模・区間・位置・測点・底質・水温・写真・メモ</span>', detail)
     : head + detail;
 }
 
 // 選んだ対象に関係する欄だけ出す。選んでいない欄は隠すが、値は消さない
 // （選び直せば元の入力がそのまま戻る）
 function onTargetChange(){
+  SCREENS._targetsTouched = true;     // 種類の欄を触った印（保存のとき、種類の断りを消してよい）
   const sel = segMultiVal('target');
   $$('[data-part]').forEach(el=>{
     el.style.display = sel.indexOf(el.getAttribute('data-part'))>=0 ? '' : 'none';
@@ -1712,8 +1666,8 @@ function collectReddForm(){
     reach_uuid: $('#fReach').value||'',
     redd_no: numVal('#fNo'),
     observed_at: isNaN(d) ? nowISO() : d.toISOString(),
-    latitude: ($('#fLat').value||'').trim(),
-    longitude: ($('#fLon').value||'').trim(),
+    latitude: String($('#fLat').value??'').trim(),
+    longitude: String($('#fLon').value??'').trim(),
     river_form: segVal('riverForm'),
     species: segVal('species'),
     species_basis: segVal('basis'),
@@ -1726,25 +1680,27 @@ function collectReddForm(){
     female_n: numVal('#fFem'), male_n: numVal('#fMal'),
     behavior: segVal('behavior'), carcass_n: numVal('#fCar'),
     note: $('#fNote').value||'',
-    needs_review: !!($('#fReview')&&$('#fReview').checked),
+    review_manual: !!($('#fReview')&&$('#fReview').checked),
   };
 }
 /* ---------- 位置の読み取り ---------- */
 // 空欄を 0 と読み替えないための変換。空なら null を返す
 // （`+''` は 0 になるため、そのまま使うと未入力が「緯度0・経度0」として地図に出てしまう）
 // 位置の入力チェック。ok=false なら why に理由が入る
+// 全体が数のときだけ受ける（parseFloat は '43abc' を 43 にしてしまう）。
+// 片方だけ入っているのは位置にならないので受けない
 function parsePos(lat, lon){
   const sl=String(lat??'').trim(), so=String(lon??'').trim();
   if(sl==='' && so==='') return {ok:true, empty:true, lat:'', lon:''};
-  const a=parseFloat(sl), b=parseFloat(so);
-  if(sl!=='' && (isNaN(a)||Math.abs(a)>90))  return {ok:false, why:'緯度の値を確かめてください'};
-  if(so!=='' && (isNaN(b)||Math.abs(b)>180)) return {ok:false, why:'経度の値を確かめてください'};
-  return {ok:true, empty:false, lat:sl===''?'':a, lon:so===''?'':b};
+  if(sl==='' || so==='') return {ok:false, why:'緯度と経度は両方入れてください'};
+  const a=numOf(sl), b=numOf(so);
+  if(a==='' || Math.abs(a)>90)  return {ok:false, why:'緯度の値を確かめてください'};
+  if(b==='' || Math.abs(b)>180) return {ok:false, why:'経度の値を確かめてください'};
+  return {ok:true, empty:false, lat:a, lon:b};
 }
 function ptOf(lat, lon){
-  if(lat===''||lat==null||lon===''||lon==null) return null;
-  const p=[parseFloat(lat), parseFloat(lon)];
-  return validPt(p) ? p : null;
+  const pos = parsePos(lat, lon);
+  return (pos.ok && !pos.empty) ? [pos.lat, pos.lon] : null;
 }
 
 /* ============================================================
@@ -2490,6 +2446,18 @@ let ENV_FORM = '';          // いま画面に出ている入力欄の持ち主
 // その持ち主が、物理環境（'un'）か産卵床（'rd'）か。
 // 持ち主は常に1人（入力欄は画面に1つだけ）。2人にすると「両方に打ちかけ」が生まれる
 let ENV_FORM_KIND = '';
+/* 入力欄そのものの世代。持ち主を付け替えるたびに1つ進める。
+   画面の世代（SCREEN_SEQ）は、地図はそのままで下の入力欄だけを差し替えるときは
+   変わらない。写真の縮小や声の聞き取りのように時間のかかる処理は、
+   始めたときの持ち主・種類・世代を覚えておき、戻ってきたときに違っていたら捨てる */
+let ENV_FORM_SEQ = 0;
+function envFormMark(){
+  return { uuid: ENV_FORM, kind: ENV_FORM_KIND, seq: ENV_FORM_SEQ, screen: screenGen() };
+}
+function envFormSame(m){
+  return !!m && m.uuid === ENV_FORM && m.kind === ENV_FORM_KIND
+      && m.seq === ENV_FORM_SEQ && !screenStale(m.screen);
+}
 let ENV_DIRTY = false;      // その入力欄を、人が触ったか
 let ENV_AUTO_TIMER = null;
 let ENV_GPS_TIMER = null;
@@ -2662,6 +2630,7 @@ function envItemFormHtml(cur, sv, opt){
 function envItemFormWire(cur){
   ENV_FORM = cur ? cur.uuid : '';
   ENV_FORM_KIND = cur ? 'un' : '';
+  ENV_FORM_SEQ++;              // 持ち主が変わった。前の非同期処理の結果は受け取らない
   ENV_DIRTY = false;
   if(!cur) return;
   SCREENS._photos = (cur.photos||[]).slice();
@@ -2721,6 +2690,7 @@ function reddItemFormHtml(cur, s){
 function reddItemFormWire(cur){
   ENV_FORM = cur ? cur.uuid : '';
   ENV_FORM_KIND = cur ? 'rd' : '';
+  ENV_FORM_SEQ++;              // 持ち主が変わった。前の非同期処理の結果は受け取らない
   ENV_DIRTY = false;
   if(!cur){ SCREENS._photos = null; SCREENS._env = null; return; }
   // 位置の決め方は、この記録がすでに持っているものを引き継ぐ。
@@ -2732,7 +2702,9 @@ function reddItemFormWire(cur){
   renderEnvList();
   updateArea();
   onTargetChange();           // 選んでいる対象の欄だけ出す
-  reddShowError('');
+  SCREENS._targetsTouched = false;   // 出しただけ。まだ触っていない
+  // 自動で「要確認」が付いている記録は、なぜ付いたかを画面にも出す
+  reddShowError(reviewReasons(cur).join(' ／ '));
   const box = $('#reddItemForm');
   if(!box) return;
   box.addEventListener('input',  ()=>envAutoSave(cur.uuid));
@@ -2745,22 +2717,41 @@ function reddItemFormWire(cur){
   });
 }
 /* いま画面に入っている値が、おかしくないか。おかしければ理由を返す */
-function reddItemError(f){
-  if(!f) return '';
-  if(!f.record_targets.length) return 'この記録が何かを選んでください（産卵床・親魚・ホッチャレ）';
-  const pos = parsePos(f.latitude, f.longitude);
-  if(!pos.ok) return pos.why;
-  return rangeCheck([['長さ', f.length_cm, 0, 2000], ['幅', f.width_cm, 0, 2000],
-                     ['河川水温', f.water_temp_c, -5, 45],
-                     ['河床内水温', f.intragravel_temp_c, -5, 45],
-                     ['河床内を測った深さ', f.temp_depth_cm, 0, 500],
-                     ['雌', f.female_n, 0, 9999], ['雄', f.male_n, 0, 9999],
-                     ['ホッチャレ', f.carcass_n, 0, 9999]]);
+/* 値がおかしくないかを見る。おかしくても保存は止めない（v24）。
+   止めると「まだ保存されていない入力」が生まれ、それを守るための控えが要り、
+   控えを守るしかけが要り…と積み上がる。現場では
+   「入れたのに残っていない」がいちばん困るので、まず残す。
+   おかしい値には「要確認」の印を付けて、あとで見直せるようにする。
+   測点（水深・流速）も見る。ここを見ないと 水深-10cm がそのまま通る */
+function reddOddValues(f, points){
+  const odd = rangeCheckAll(Object.keys(REDD_LABEL).map(k=>reddRangeItem(k, f[k])));
+  (points||[]).forEach((pt,i)=>{
+    rangeCheckAll([[`測点${i+1}の水深`, pt.depth_cm, ENV_RANGE.depth_cm[0], ENV_RANGE.depth_cm[1]],
+                   [`測点${i+1}の流速`, pt.velocity_ms, ENV_RANGE.velocity_ms[0], ENV_RANGE.velocity_ms[1]]])
+      .forEach(e=>odd.push(e));
+  });
+  return odd;
 }
+/* 要確認の理由を付け直して needs_review を出す。
+   keep は入力の状況から分かる断り（種類が空・位置が読めない）。
+   値の範囲は記録の中身から毎回計算し直す（直せば消える） */
+function reddReviewApply(rec, keep){
+  rec.review_reasons = (keep||[]).concat(reddOddValues(rec, envPoints(rec)));
+  rec.needs_review = reviewManual(rec) || rec.review_reasons.length>0;
+  return rec;
+}
+/* 位置や値の理由（毎回作り直すもの）を除いた、残す断り。
+   値の理由は「〜入れてください」、位置の理由は「（前の位置のままにしました）」で終わる */
+function reddReviewKeep(rec){
+  return reviewReasons(rec).filter(x=>!/入れてください/.test(x) && !x.endsWith(POS_NOTE));
+}
+/* 画面に出す断り。「保存はした。ただし見直してほしい」と伝える */
 function reddShowError(msg){
   const box = $('#rv_err'); if(!box) return;
   box.innerHTML = msg
-    ? `<div class="warnbox">${esc(msg)}<div class="tiny">直すまで、この記録は保存されません。打った内容は消えません。</div></div>`
+    ? `<div class="warnbox">${esc(msg)}
+        <div class="tiny">この記録は保存してありますが、「要確認」の印を付けました。
+          打ち間違いなら直してください。</div></div>`
     : '';
 }
 /* 産卵床の入力欄を書き戻す。物理環境の saveEnvItem と同じ作り。
@@ -2771,28 +2762,58 @@ function saveReddItem(u, opt){
   if(!rec || rec.deleted_at || !DB.survey(rec.survey_uuid)) return false;
   if(!$('#fReach')) return false;          // その入力欄が画面に出ていない
   const f = collectReddForm();
-  const err = reddItemError(f);
-  if(err){ reddShowError(err); if(!quiet) toast(err); return false; }
-
   envSync();
   // 何も入っていない測点は保存しない
   f.env_points = (SCREENS._env||[]).filter(p=>p.depth_cm!=='' || p.velocity_ms!=='' || p.note);
   f.depth_cm = ''; f.velocity_ms = '';     // 旧形式の値は残さない（測点が正本）
-  f.area_m2 = reddArea(f.length_cm, f.width_cm);
+  f.area_m2 = reddAreaNext(f, rec);
+
+  // 差し戻しの断り（種類が空・位置が読めない）は、その欄を触るまで残す。
+  // 消してしまうと、メモを直しただけで「位置を確かめて」が消える
+  const prev = reviewReasons(rec);
+  const notes = [];
+  // 記録の種類が空になったら、前のものを残す（種類の無い記録にはしない）
+  if(!f.record_targets.length){
+    f.record_targets = recordTargets(rec);
+    notes.push(TARGET_NOTE);
+  }else if(!SCREENS._targetsTouched && prev.indexOf(TARGET_NOTE)>=0){
+    notes.push(TARGET_NOTE);
+  }
+  // 位置が読めない文字なら、前の位置を残す（座標にならないものは入れられない）。
+  // そのときは位置の決め方と誤差も前のまま。座標だけ戻して由来を「手入力」にすると、
+  // GPSで測った位置が手入力だったことになる
+  let acc = SCREENS._acc!=null    ? SCREENS._acc    : (rec.gps_accuracy??'');
+  let src = SCREENS._posSrc!=null ? SCREENS._posSrc : (rec.position_source??'');
+  const pos = parsePos(f.latitude, f.longitude);
+  if(pos.ok){
+    f.latitude = pos.lat; f.longitude = pos.lon;      // 文字ではなく数で持つ
+    if(pos.empty){ acc = ''; src = ''; }              // 位置が無いなら、由来も誤差も無い
+    // 座標の欄を触っていなければ（_posSrc が null）、前の差し戻しの断りは残す
+    if(SCREENS._posSrc==null) prev.filter(x=>x.endsWith(POS_NOTE)).forEach(x=>notes.push(x));
+  }else{
+    f.latitude = rec.latitude; f.longitude = rec.longitude;
+    acc = rec.gps_accuracy??''; src = rec.position_source??'';
+    notes.push(pos.why + POS_NOTE);
+  }
+  // おかしい値は、そのまま保存して「要確認」を立てる。
+  // 理由は毎回すべて出し直す（直せば消える）。人が付けた印とは別に持つ
+  reddReviewApply(f, notes);
+  const odd = f.review_reasons;
   // 読み出した写しに書き足す（丸ごと置き換えても、ほかの欄は消えない）
   const next = Object.assign({}, rec, f, {
-    gps_accuracy:     SCREENS._acc!=null    ? SCREENS._acc    : (rec.gps_accuracy??''),
-    position_source:  SCREENS._posSrc!=null ? SCREENS._posSrc : (rec.position_source??''),
+    gps_accuracy: acc, position_source: src,
     photos: (SCREENS._photos||[]).slice(),
   });
-  if(!DB.put(DB.key.rd, next)) return false;
+  if(!DB.put(DB.key.rd, next)){ tellSaveFailed(); return false; }
   // 次に置く産卵床へ引き継ぐのは「場の条件」だけ。
   // 魚種は引き継がない。見ていない魚種が入ってしまううえ、
   // 置いた瞬間から「まだ入れていない」の印が消えて、入れ残しに気づけなくなる
+  // 魚種と、その判断根拠は引き継がない。
+  // 魚種が空なのに「親魚確認」だけ入った、ちぐはぐな記録ができてしまう
   SCREENS._carry = { survey_uuid:next.survey_uuid, river_form:f.river_form,
-    species_basis:f.species_basis, substrate_main:f.substrate_main,
-    substrate_sub:f.substrate_sub, embeddedness:f.embeddedness, cover:f.cover };
-  reddShowError('');
+    substrate_main:f.substrate_main, substrate_sub:f.substrate_sub,
+    embeddedness:f.embeddedness, cover:f.cover };
+  reddShowError(odd.join(' ／ '));
   ENV_DIRTY = false;
   if(quiet){
     // 打っている最中なので、画面は作り直さない。地図と一覧だけ追いつかせる
@@ -2861,6 +2882,7 @@ function envAutoSaveNow(u){
   // ここで振り分けないと、産卵床の入力が黙って保存されない
   if(ENV_FORM_KIND === 'rd'){
     if(!$('#fReach')) return false;         // その入力欄が画面に出ていない
+    // 産卵床は必ず保存する（おかしい値は「要確認」で分かるようにしてある）
     return saveReddItem(u, {quiet:true});
   }
   if(!$('#ev_d')) return false;
@@ -2996,13 +3018,32 @@ function envRememberView(svUuid){
 }
 /* 地図の大きさ（小さいまま入力欄も見るか、大きくして地図に集中するか） */
 function envMapBig(){ return !!prefs().env_map_big; }
-function envToggleBig(){ prefSet('env_map_big', !envMapBig()); render(); }
+// 描き直す前に打ちかけを書く。書かずに描き直すと、入力の直後に押した0.6秒ぶんが消える
+function envToggleBig(){ if(!envFlushOk()) return; prefSet('env_map_big', !envMapBig()); render(); }
+/* 地図を大きくしていると、入力欄は画面の外に出る。
+   小さくし直さなくても行き来できるようにする（大きい地図のまま記入したい場面がある） */
+function envScrollTo(sel){
+  const el = $(sel); if(!el || !el.scrollIntoView) return false;
+  try{ el.scrollIntoView({block:'start', behavior:'smooth'}); }
+  catch(e){ try{ el.scrollIntoView(); }catch(e2){ return false; } }
+  return true;
+}
+function envJumpToForm(){ return envScrollTo('#envFormTop'); }
+function envJumpToMap(){ return envScrollTo('#envmap'); }
 
 /* まとめて消すために選んでいる最中。{sv, set} を持つ */
 let ENV_PICK = null;
 function envPickOn(){ return !!(ENV_PICK && ENV_PICK.set); }
-function envPickStart(svUuid){ ENV_PICK = {sv: svUuid, set: new Set()}; render(); }
-function envPickCancel(){ ENV_PICK = null; render(); }
+// 産卵床の入力欄を出したままでも押せる場所にあるので、
+// 打ちかけを書いてから画面を作り直す（書かずに作り直すと、打った値が消える）
+function envPickStart(svUuid){
+  if(!envFlushOk()) return;
+  ENV_PICK = {sv: svUuid, set: new Set()}; render();
+}
+function envPickCancel(){
+  if(!envFlushOk()) return;
+  ENV_PICK = null; render();
+}
 function envPickToggle(u){
   if(!envPickOn()) return;
   if(ENV_PICK.set.has(u)) ENV_PICK.set.delete(u); else ENV_PICK.set.add(u);
@@ -3129,7 +3170,7 @@ function closeEnvMap(){
   // 入力欄の持ち主を手放す。手放さないと、産卵床やメモの画面で足した写真が
   // 直前に開いていた物理環境の記録へ書き込まれてしまう。
   // 画面を作り直したあと、物理環境の画面なら onMount で付け直される
-  ENV_FORM = ''; ENV_FORM_KIND = ''; ENV_DIRTY = false;
+  ENV_FORM = ''; ENV_FORM_KIND = ''; ENV_FORM_SEQ++; ENV_DIRTY = false;
   REDDGROUP = null;
 }
 // 地図に置く印。文字を入れた丸（画像を使わないので同梱ファイルが増えない）
@@ -3222,7 +3263,11 @@ function reddDrawAll(svUuid){
       fillColor: speciesColor(r.species),
       fillOpacity: reddEmpty(r) ? .25 : ageOpacity(r.age_class),
       bubblingMouseEvents:false,
-    }).on('click', e=>{ L.DomEvent.stop(e); if(!reddSelect(r.uuid, svUuid)) render(); }));
+    }).on('click', e=>{ L.DomEvent.stop(e);
+      // 打ちかけを書けないなら、選び替えない（作り直すと打った内容が消える）
+      if(!envFlushOk()) return;
+      if(!reddSelect(r.uuid, svUuid)) render();
+    }));
     // 番号は、選んでいる1つだけに出す。全部に出すと重なって読めない
     if(on) REDDGROUP.addLayer(L.marker(pt, {
       icon: envBadge(reddName(r), speciesColor(r.species), 30, true), zIndexOffset:1200,
@@ -3425,8 +3470,8 @@ function reddAddAt(svUuid, lat, lon, acc, source){
   const rec = newRedd(svUuid, {
     // 区間中なら自動で付く。始めていなければ空のまま
     reach_uuid: envReachOf(svUuid),
-    // 緯度経度は文字列。すでに保存されている産卵床と型をそろえる
-    latitude: la.toFixed(6), longitude: lo.toFixed(6),
+    // 緯度経度は数で持つ（保存のときも parsePos で数に直す。物理環境と同じ）
+    latitude: la, longitude: lo,
     gps_accuracy: (acc===''||acc==null) ? '' : Math.round(acc),
     position_source: source || '地図',
     // 直前の記録の「場の条件」を引き継ぐ（別の調査のものは使わない）
@@ -3579,6 +3624,10 @@ function reddChipSync(svUuid){
 }
 /* 一覧から選ぶ。地図もそこへ寄せる（ズームは変えない。寄って作業しているのを崩さない） */
 function reddPick(u, svUuid){
+  // 打ちかけを書けないなら、ここで止める。
+  // 先に進むと、下の render() が画面を作り直して、
+  // 「直してください」と出したそばから打った内容を消してしまう
+  if(!envFlushOk()) return;
   if(!reddSelect(u, svUuid)){ render(); return; }
   const r = DB.get(DB.key.rd, u);
   const pt = r ? ptOf(r.latitude, r.longitude) : null;
@@ -3597,10 +3646,12 @@ function reddMoveTo(u, la, lo, acc, source){
   if(!envFlushOk()) return false;
   const rec = DB.get(DB.key.rd, u);
   if(!rec || rec.deleted_at) return false;
-  rec.latitude = (+la).toFixed(6); rec.longitude = (+lo).toFixed(6);
+  rec.latitude = +(+la).toFixed(6); rec.longitude = +(+lo).toFixed(6);
   rec.gps_accuracy = (acc===''||acc==null) ? '' : Math.round(acc);
   // 位置の決め方は、呼んだ側が渡したものだけ書く（中で推測しない）
   if(source) rec.position_source = source;
+  // 位置が直ったので「位置が読めない」の理由は消す。ほかの理由と人の印は残る
+  reddReviewApply(rec, reddReviewKeep(rec));
   if(!DB.put(DB.key.rd, rec)){
     toast('直せませんでした（端末の空き容量をご確認ください）');
     return false;
@@ -3676,6 +3727,8 @@ SCREENS.envMap = (argStr)=>{
       ${baseMapButtonsHtml()}
       <div id="envmap" class="map"
         style="height:${envMapBig()?'80vh':'46vh'};min-height:260px"></div>
+      ${envMapBig() ? `<button class="btn" style="margin-top:6px"
+        onclick="envJumpToForm()">▼ 入力欄へ</button>` : ''}
 
       ${foldHtml('envcolorfold', '色分け',
         `<span class="tiny muted">${esc(envColorBy())}</span>`, `
@@ -3687,16 +3740,6 @@ SCREENS.envMap = (argStr)=>{
       <div class="tiny muted" id="envHint"></div>
       <div class="tiny muted" id="envGps"></div>
       <div id="envPending"></div>
-
-      <div class="card">
-        <div class="sect" style="margin-top:0">メッシュの範囲</div>
-        ${meshes.map(x=>`<button class="btn ghost small"
-          style="width:auto;padding:4px 10px;margin:0 6px 6px 0"
-          onclick="nav('mesh','${x.uuid}')">${esc(x.name||'')}（${meshCellsOf(x.uuid).length}マス）</button>`).join('')}
-        <div><button class="btn ghost small" style="width:auto;padding:4px 10px"
-          onclick="meshCreate('${svUuid}')">メッシュの範囲を作る</button></div>
-        <div class="tiny muted">メッシュは別の画面で記録します。マスごとに水深・流速・河床材料を入れられます。</div>
-      </div>
 
       <div class="card">
         <div id="reddHead">${reddHeadHtml(svUuid)}</div>
@@ -3722,6 +3765,19 @@ SCREENS.envMap = (argStr)=>{
           : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}
       </div>
 
+      <div class="card">
+        <div class="sect" style="margin-top:0">メッシュの範囲</div>
+        ${meshes.map(x=>`<button class="btn ghost small"
+          style="width:auto;padding:4px 10px;margin:0 6px 6px 0"
+          onclick="nav('mesh','${x.uuid}')">${esc(x.name||'')}（${meshCellsOf(x.uuid).length}マス）</button>`).join('')}
+        <div><button class="btn ghost small" style="width:auto;padding:4px 10px"
+          onclick="meshCreate('${svUuid}')">メッシュの範囲を作る</button></div>
+        <div class="tiny muted">メッシュは別の画面で記録します。マスごとに水深・流速・河床材料を入れられます。</div>
+      </div>
+
+      <div id="envFormTop"></div>
+      ${envMapBig() ? `<button class="btn ghost small" id="envToMap"
+        style="width:auto;padding:4px 10px" onclick="envJumpToMap()">▲ 地図へ戻る</button>` : ''}
       ${focus==='rd'
         ? `<div id="reddFormBox">${reddItemFormHtml(curRedd, s)}</div>`
         : envItemFormHtml(cur, s)}
@@ -4739,16 +4795,28 @@ function deleteNote(u){
 /* ============================================================
    集計
    ============================================================ */
-function num(v){ return (v===''||v==null||isNaN(+v)) ? null : +v; }
+// 空欄（空白だけも含む）と数でないものは null。空白を 0 にしない
+function num(v){
+  if(v==null) return null;
+  const t=String(v).trim();
+  return (t===''||isNaN(+t)) ? null : +t;
+}
+// 産卵床の欄は、範囲内の値だけを数える（範囲外は「要確認」で記録に残っている）
+function saneNum(x, field){
+  // 検査（rangeCheckAll）と同じ厳しい読み方（numOf）。'12abc' や空白は数にしない
+  const n=numOf(field==='area_m2' ? reddAreaOf(x) : x[field]);
+  if(n==='' || !inRange(n, REDD_RANGE[field])) return null;
+  return (REDD_WHOLE[field] && !Number.isInteger(n)) ? null : n;   // 個体数の小数は数えない
+}
 function sumOf(list, field){
-  return list.reduce((a,x)=>{ const v=num(x[field]); return v==null?a:a+v; }, 0);
+  return list.reduce((a,x)=>{ const v=saneNum(x,field); return v==null?a:a+v; }, 0);
 }
 function avgOf(list, field){
-  const vs=list.map(x=>num(x[field])).filter(v=>v!=null);
+  const vs=list.map(x=>saneNum(x,field)).filter(v=>v!=null);
   return vs.length ? vs.reduce((a,b)=>a+b,0)/vs.length : null;
 }
 function rangeOf(list, field){
-  const vs=list.map(x=>num(x[field])).filter(v=>v!=null);
+  const vs=list.map(x=>saneNum(x,field)).filter(v=>v!=null);
   return vs.length ? {min:Math.min(...vs), max:Math.max(...vs), n:vs.length} : null;
 }
 function countBy(list, field, fallback){
@@ -4783,6 +4851,26 @@ function reachStats(sv){
   return rows;
 }
 
+/* 集計画面が実際に使っている項目のうち、範囲外で外した値。
+   産卵床の長さ・幅、親魚の雌雄、ホッチャレの数、全記録の水温と測点。
+   （reddOddValues は全項目を見るので、集計に出していない項目まで数えてしまう） */
+function summaryOddValues(r){
+  const keys = ['water_temp_c','intragravel_temp_c'];
+  if(hasTarget(r,'産卵床')){
+    keys.push('length_cm','width_cm');
+    // 長さ・幅が無く保存面積をそのまま使う古い記録は、面積そのものを検査する
+    if(reddSizeBlank(r)) keys.push('area_m2');
+  }
+  if(hasTarget(r,'親魚')) keys.push('female_n','male_n');
+  if(hasTarget(r,'ホッチャレ')) keys.push('carcass_n');
+  const odd = rangeCheckAll(keys.map(k=>reddRangeItem(k, r[k])));
+  envPoints(r).forEach((pt,i)=>{
+    rangeCheckAll([[`測点${i+1}の水深`, pt.depth_cm, ENV_RANGE.depth_cm[0], ENV_RANGE.depth_cm[1]],
+                   [`測点${i+1}の流速`, pt.velocity_ms, ENV_RANGE.velocity_ms[0], ENV_RANGE.velocity_ms[1]]])
+      .forEach(e=>odd.push(e));
+  });
+  return odd;
+}
 SCREENS.summary = (sv)=>{
   const s = DB.survey(sv); if(!s) return SCREENS.home();
   const all = DB.reddsOf(sv);
@@ -4795,6 +4883,10 @@ SCREENS.summary = (sv)=>{
   const totalLen = DB.reachesOf(sv).reduce((a,r)=>a+reachLength(r),0);
 
   const wt = rangeOf(all,'water_temp_c'), igt = rangeOf(all,'intragravel_temp_c');
+  // 集計から外した値。記録の数と値の数は別に数える（1件に外した値が2つあることがある）
+  const oddPer = all.map(r=>summaryOddValues(r).length);
+  const oddN = oddPer.filter(k=>k>0).length, oddValN = oddPer.reduce((a,b)=>a+b,0);
+  const areaN = redds.filter(r=>saneNum(r,'area_m2')!=null).length;              // 面積のある産卵床
   const tempLine = (r,label)=> r ? `${label} ${fmtNum(r.min)}〜${fmtNum(r.max)}℃（${r.n}件）` : `${label} —`;
 
   const reachTable = rows.length ? `
@@ -4834,7 +4926,7 @@ SCREENS.summary = (sv)=>{
           ${ totalLen>0 ? `／ 全体の密度 ${fmtNum(redds.length/totalLen*100)} 件/100m` : '' }
         </div>
         <div class="small muted" style="margin-top:4px">
-          総面積 ${fmtNum(sumOf(redds,'area_m2'),2)} m² ／ 平均 ${redds.length?fmtNum(sumOf(redds,'area_m2')/redds.length,2):'—'} m²
+          総面積 ${areaN?fmtNum(sumOf(redds,'area_m2'),2):'—'} m² ／ 平均 ${fmtNum(avgOf(redds,'area_m2'),2)} m²（面積のある ${areaN} 件）
         </div>
         <div class="small muted" style="margin-top:4px">
           平均の大きさ 長さ ${fmtNum(avgOf(redds,'length_cm'),0)} cm ／ 幅 ${fmtNum(avgOf(redds,'width_cm'),0)} cm
@@ -4899,7 +4991,9 @@ SCREENS.summary = (sv)=>{
       </div>
 
       <div class="sect">確認が必要な記録</div>
-      <div class="card"><div class="small">要確認 ${all.filter(r=>r.needs_review).length} 件 ／ 魚種が未記入 ${all.filter(r=>!r.species).length} 件</div></div>
+      <div class="card"><div class="small">要確認 ${all.filter(r=>r.needs_review).length} 件 ／ 魚種が未記入 ${all.filter(r=>!r.species).length} 件</div>
+        ${ oddN ? `<div class="small" style="margin-top:6px">集計から外した値がある記録 ${oddN} 件（外した値 ${oddValN} 個）
+          <span class="tiny muted">（その値は上の集計に入れていません。記録を開いて直してください）</span></div>` : '' }</div>
 
       <div class="tiny muted" style="margin-top:14px">
         同じ産卵床を重ねて数えている可能性があります。合計の床数がそのまま産卵尾数を表すわけではありません。
@@ -5815,7 +5909,7 @@ const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_s
   'substrate_main','substrate_sub','embeddedness','cover',
   'water_temp_c','intragravel_temp_c','temp_depth_cm',
   'female_n','male_n','behavior','carcass_n',
-  'needs_review','note','photo_files'];
+  'needs_review','review_manual','review_reasons','note','photo_files'];
 function reddRows(surveys){
   const rows=[];
   surveys.forEach(s=>{
@@ -5845,7 +5939,8 @@ function reddRows(surveys){
         water_temp_c:r.water_temp_c, intragravel_temp_c:r.intragravel_temp_c, temp_depth_cm:r.temp_depth_cm,
         female_n:r.female_n, male_n:r.male_n,
         behavior:r.behavior, carcass_n:r.carcass_n,
-        needs_review:r.needs_review?1:0, note:r.note,
+        needs_review:r.needs_review?1:0, review_manual:reviewManual(r)?1:0,
+        review_reasons:reviewReasons(r).join(';'), note:r.note,
         photo_files:(r.photos||[]).map((p,i)=>photoFilename(r,i,p)).join(';'),
       });
     });
@@ -6069,10 +6164,12 @@ function exportCSV(surveys){
 
 function exportGeoJSON(surveys){
   const base = exportBase(surveys);
+  // 座標は地図と同じ判定（ptOf）。parseFloat だと '43abc' が緯度43の点になってしまう
   const pts = reddRows(surveys)
-    .filter(r=>validPt([parseFloat(r.latitude), parseFloat(r.longitude)]))
-    .map(r=>({ type:'Feature',
-      geometry:{ type:'Point', coordinates:[parseFloat(r.longitude), parseFloat(r.latitude)] },
+    .map(r=>({ r, a: ptOf(r.latitude, r.longitude) }))
+    .filter(x=>x.a && validPt(x.a))
+    .map(({r,a})=>({ type:'Feature',
+      geometry:{ type:'Point', coordinates:[a[1], a[0]] },
       properties: REDD_COLS.reduce((p,c)=>{ p[c]=r[c]; return p; }, {}) }));
 
   const lines=[];
@@ -6627,14 +6724,145 @@ async function doForceUpdate(){
 }
 
 // アプリが裏に回る・閉じられるときにも、書きかけと軌跡を控えておく
-window.addEventListener('pagehide', ()=>{ stashEditDraft(); trackSave(); });
+// 閉じる・裏へ回るときは、自動保存の待ち0.6秒ぶんを先に書いてしまう。
+// 書かないと、打った直後にアプリを閉じただけで消える
+// 閉じる・裏へ回るときは、自動保存の待ち0.6秒ぶんを先に書いてしまう。
+// 書けなかったぶん（値がおかしい・端末がいっぱい）は控えを残す
+function onLeaveApp(){
+  envFlush();          // 自動保存の待ち0.6秒ぶんを、先に書いてしまう
+  stashEditDraft(); trackSave();
+}
+/* 保存できなかったことを、その場で伝える。
+   閉じるときには何も出せないので、失敗した時点で気づいてもらうしかない */
+function tellSaveFailed(){
+  toast('保存できませんでした。端末の空き容量をご確認ください'
+    + '（空きを作ってから、もう一度この記録を触ると保存されます）');
+}
+window.addEventListener('pagehide', onLeaveApp);
 document.addEventListener && document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState==='hidden'){ stashEditDraft(); trackSave(); }
+  if(document.visibilityState==='hidden') onLeaveApp();
 });
 
+/* v21 までは、産卵床の記録画面に「書きかけ」を控える仕組みがあった。
+   v22 で記録画面をやめたので、そのままだと控えが開けないまま取り残される。
+   一度だけ、まだ保存されていない書きかけを本物の記録に起こす */
+/* v21 の書きかけに、人が打った中身があるか。
+   自動で入るだけの位置（GPS）は数えない。数えると、開いてすぐ戻っただけの
+   空の書きかけが記録になってしまう。
+   記録の種類は、既定の「産卵床」から変えてあれば人が触った印（空にしたのも含む） */
+function oldReddDraftHasContent(x){
+  const f = v => v!=='' && v!=null;
+  const arr = v => Array.isArray(v) && v.length>0;
+  const t = x.record_targets;
+  const targetsTouched = Array.isArray(t) && !(t.length===1 && t[0]==='産卵床');
+  return !!(targetsTouched ||
+    x.species || x.species_basis || x.age_class || x.state || x.river_form ||
+    x.substrate_main || x.substrate_sub || x.embeddedness || x.cover || x.behavior ||
+    x.note || x.needs_review ||
+    f(x.length_cm) || f(x.width_cm) ||
+    f(x.female_n) || f(x.male_n) || f(x.carcass_n) ||
+    f(x.water_temp_c) || f(x.intragravel_temp_c) || f(x.temp_depth_cm) ||
+    arr(x.env_points) || arr(x.photos) ||
+    // 片方だけでも人が打った印。取り込み側で「前の位置のまま」にして理由を残す
+    ((x.position_source==='地図' || x.position_source==='手入力') && (f(x.latitude) || f(x.longitude))));
+}
+/* v21 の控えを、記録の形に整える。base は「新しいひな形」か「すでにある記録」。
+   保存のときと同じ考え方: 値がおかしくても残し、理由を付けて「要確認」にする */
+function oldReddDraftToRecord(x, base){
+  const rec = Object.assign({}, base, x, {
+    uuid: base.uuid, survey_uuid: base.survey_uuid, redd_no: base.redd_no,
+    created_at: base.created_at });
+  delete rec._kind; delete rec._sv; delete rec._new;
+  const reasons = [];
+  if(!Array.isArray(rec.record_targets) || !rec.record_targets.length){
+    rec.record_targets = recordTargets(base);
+    reasons.push(TARGET_NOTE);
+  }
+  // 座標にならない文字は入れられない。位置は base のまま（由来・誤差も一緒に）
+  const pos = parsePos(rec.latitude, rec.longitude);
+  if(pos.ok){
+    rec.latitude = pos.lat; rec.longitude = pos.lon;
+    if(pos.empty){ rec.gps_accuracy = ''; rec.position_source = ''; }   // 位置が無いなら由来も誤差も無い
+  }else{
+    rec.latitude = base.latitude??''; rec.longitude = base.longitude??'';
+    rec.gps_accuracy = base.gps_accuracy??''; rec.position_source = base.position_source??'';
+    reasons.push(pos.why + POS_NOTE);
+  }
+  rec.env_points = envPoints(rec);
+  rec.area_m2 = reddAreaNext(rec, base);
+  rec.review_manual = !!x.needs_review;
+  rec.review_reasons = reasons.concat(reddOddValues(rec, rec.env_points));
+  rec.needs_review = rec.review_manual || rec.review_reasons.length>0;
+  return rec;
+}
+/* v21 までは、産卵床の記録画面に「書きかけ」を控える仕組みがあった。
+   v22 で記録画面をやめたので、そのままだと控えが開けないまま取り残される。
+   新しい書きかけは記録に起こし、既存の記録の編集途中は記録に重ねる。
+   取り込めなかったものは控えを消さず、次に開いたときもう一度試す */
+/* 控えの中身の印。並びをそろえて文字にする。
+   取り込んだ記録にこの印を残し、控えを片付けるときに「同じ中身か」を見る。
+   片付けに失敗したあと（旧版の画面などで）控えが変わっていれば、変わった中身を重ね直す */
+function draftSig(x){
+  const norm = v => (v && typeof v==='object' && !Array.isArray(v))
+    ? Object.keys(v).sort().reduce((o,k)=>{ o[k]=norm(v[k]); return o; }, {})
+    : (Array.isArray(v) ? v.map(norm) : v);
+  return JSON.stringify(norm(x));
+}
+function migrateOldReddDrafts(){
+  // 「済み」の印で飛ばさない。印を付けたあとに控えが増える（旧版の画面が残っていた）と届かなくなる。
+  // 控えが無ければ何もしないので、毎回見ても軽い
+  // 書く前に、読めることを厳しく確かめる。壊れたデータを「空」と読み違えると、
+  // 取り込んだ1件で既存の記録を丸ごと上書きしてしまう。読めなければ何もしない
+  let d;
+  try{ d = editDraftsStrict(); DB.loadRaw(DB.key.rd); DB.loadRaw(DB.key.sv); }
+  catch(e){ console.error(e); return 0; }          // 「済み」にもしない
+  let n = 0, left = 0;
+  Object.keys(d).forEach(u=>{
+    try{
+      const x = d[u];
+      if(!x || x._kind !== 'redd') return;
+      const cur = DB.get(DB.key.rd, u);
+      const sig = draftSig(x);
+      if(cur){
+        // すでに記録がある。
+        //  - 取り込んだ印（draft_merged_sig）がこの控えと同じ → 取り込み済み。片付けるだけ
+        //    （控えを消せずに残ったとき、次回の起動であとの直しを巻き戻さないため）
+        //  - 印が違う → 片付けに失敗したあとで控えが変わった。変わった中身を重ね直す
+        //  - 印が無い: 編集途中の控え（_new でない）なら重ねる。
+        //    新しい控え（_new）なら v21 で保存し終えた記録の残りなので、記録のほうが新しい。重ねない
+        const merged = cur.draft_merged_sig === sig;
+        const apply = !merged && (cur.draft_merged_sig!=null || !x._new);
+        if(apply){
+          const rec = oldReddDraftToRecord(x, cur);
+          rec.draft_merged_sig = sig; rec.draft_merged_at = nowISO();
+          if(!DB.put(DB.key.rd, rec)){ left++; return; }
+        }
+        if(!editDraftClearIfSig(u, sig)){ left++; return; }   // 途中で変わっていたら消さない
+        if(apply) n++;                                        // 片付くまでは「取り込んだ」と数えない
+        return;
+      }
+      if(!DB.survey(x._sv)){ left++; return; }          // 調査が見つからない。消さずに残す
+      if(!oldReddDraftHasContent(x)){                   // 中身が無いものだけ片付ける
+        if(!editDraftClearIfSig(u, sig)) left++;
+        return;
+      }
+      // 番号は必ず取り直す（newRedd が振る）。控えを作ったあとに同じ番号が
+      // 使われていることがあり、そのまま持ち込むと同じ調査に S1 が2つできる
+      const rec = oldReddDraftToRecord(x, Object.assign(newRedd(x._sv, {}), { uuid:u }));
+      rec.draft_merged_sig = sig; rec.draft_merged_at = nowISO();   // どの控えから起こしたか
+      if(!DB.put(DB.key.rd, rec)){ left++; return; }    // 書けなかった。控えは残す
+      if(!editDraftClearIfSig(u, sig)){ left++; return; }   // 消せなかった・途中で変わった。次回もう一度
+      n++;
+    }catch(e){ console.error(e); left++; }
+  });
+  return n;
+}
+
 (function boot(){
+  const moved = migrateOldReddDrafts();
   resumeTracking();   // 記録中の区間があれば、開き直しても軌跡の記録を続ける
   render();   // 先に画面を出す。この後の準備を待つと起動時に一瞬何も映らないため
+  if(moved) setTimeout(()=>toast(`前の版の書きかけ ${moved}件を、記録として取り込みました`), 300);
   try{ PhotoDB.gc(); }catch(e){}   // どこからも使われなくなった写真を片付ける
   // 保存領域を消されにくくする（写真やタイルを抱えるため）
   try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{}); }catch(e){}
