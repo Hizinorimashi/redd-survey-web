@@ -107,6 +107,11 @@
     border-radius:10px; cursor:pointer; box-shadow:0 1px 5px rgba(0,0,0,.4);}
   .locate-btn:active{background:var(--panel2);}
   .leaflet-popup-content{color:#111;}
+  .chooser-pop .leaflet-popup-content{margin:10px 12px;}
+  .chooser{display:flex; flex-direction:column; gap:6px; min-width:180px;}
+  .chooser button{padding:10px 12px; font-size:15px; font-weight:700; text-align:left;
+    background:#f2f4f6; color:#111; border:1px solid #c8ced4; border-radius:8px; cursor:pointer;}
+  .chooser button.on{background:#e0a030; border-color:#e0a030; color:#fff;}
 
   /* 写真 */
   .mediagrid{margin-top:10px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px;}
@@ -153,12 +158,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v24';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v25';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-06';
-const APP_NOTE = '記録は「地図で記録する」の画面ひとつで完結します'
-  + '（おかしい値も保存して「要確認」で分かるようにしました／声で入力はやめました）';
+const APP_NOTE = '地図で印が重なっているところを押すと、そこにあるものの一覧が出て選べます'
+  + '（下に隠れた産卵床やポイントも開けます）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -3194,7 +3199,7 @@ function envDrawAll(svUuid){
     const put = (pt, txt)=>{
       ENVLAYER.push(L.marker(pt, {icon:envBadge(txt, col, on?30:24, on),
         zIndexOffset: on ? 1000 : 0})
-        .on('click', e=>{ L.DomEvent.stop(e); envSelect(x.uuid); }).addTo(ENVMAP));
+        .on('click', e=>{ L.DomEvent.stop(e); envTapAt(svUuid, 'un', x.uuid, pt[0], pt[1]); }).addTo(ENVMAP));
     };
     if(isLine(x)){
       const a = linePt(x,'start'), b = linePt(x,'end');
@@ -3264,14 +3269,14 @@ function reddDrawAll(svUuid){
       fillOpacity: reddEmpty(r) ? .25 : ageOpacity(r.age_class),
       bubblingMouseEvents:false,
     }).on('click', e=>{ L.DomEvent.stop(e);
-      // 打ちかけを書けないなら、選び替えない（作り直すと打った内容が消える）
-      if(!envFlushOk()) return;
-      if(!reddSelect(r.uuid, svUuid)) render();
+      // 同じ場所に重なっていれば小窓で選ぶ（打ちかけを書けないときは中で止まる）
+      envTapAt(svUuid, 'rd', r.uuid, pt[0], pt[1]);
     }));
-    // 番号は、選んでいる1つだけに出す。全部に出すと重なって読めない
+    // 番号は、選んでいる1つだけに出す。全部に出すと重なって読めない。
+    // 番号の印を押しても、下に重なったものを選べるようにする
     if(on) REDDGROUP.addLayer(L.marker(pt, {
       icon: envBadge(reddName(r), speciesColor(r.species), 30, true), zIndexOffset:1200,
-    }).on('click', e=>{ L.DomEvent.stop(e); }));
+    }).on('click', e=>{ L.DomEvent.stop(e); envTapAt(svUuid, 'rd', r.uuid, pt[0], pt[1]); }));
   });
 }
 
@@ -3364,6 +3369,87 @@ function envSnapTo(svUuid, lat, lon, except){
 function envSnapTell(sn){
   if(!sn) return;
   toast(`${sn.name}${sn.w ? 'の'+sn.w : ''} に重ねました`);
+}
+
+/* ---------- 重なった印から1つ選ぶ ---------- */
+/* 押した場所（lat, lon）の指1本ぶん（px）に置いてあるものを全部集める。
+   産卵床・ポイント・ラインの始点と終点が対象。曲がりは選ぶ対象ではないので入れない。
+   toPx は [lat,lon] → {x,y} の関数。地図が無くても確かめられるよう、外から渡す */
+function envOverlapAt(svUuid, lat, lon, toPx, px){
+  const lim = px==null ? ENV_SNAP_PX : px;
+  let here; try{ here = toPx([lat, lon]); }catch(e){ return []; }
+  if(!here) return [];
+  const out = [];
+  const near = pt=>{
+    let q; try{ q = toPx(pt); }catch(e){ return false; }
+    if(!q) return false;
+    return Math.hypot(q.x-here.x, q.y-here.y) <= lim;
+  };
+  reddsSorted(svUuid).forEach(r=>{
+    const pt = ptOf(r.latitude, r.longitude);
+    if(pt && near(pt)) out.push({kind:'rd', uuid:r.uuid, w:'', label:reddName(r) + (r.species ? '　'+r.species : '')});
+  });
+  DB.unitsOf(svUuid).filter(x=>!isMesh(x)).forEach(x=>{
+    if(isLine(x)){
+      const a = linePt(x,'start'), b = linePt(x,'end');
+      if(a && near(a)) out.push({kind:'un', uuid:x.uuid, w:'始点', label:(x.name||'')+'の始点'});
+      if(b && near(b)) out.push({kind:'un', uuid:x.uuid, w:'終点', label:(x.name||'')+'の終点'});
+    }else{
+      const pt = ptOf(x.latitude, x.longitude);
+      if(pt && near(pt)) out.push({kind:'un', uuid:x.uuid, w:'', label:x.name||''});
+    }
+  });
+  return out;
+}
+/* 地図の印を押したとき。同じ場所に2つ以上あれば、小窓を出して選んでもらう。
+   1つだけなら、押したものをそのまま選ぶ。
+   出しておかないと、上に乗った印しか押せず、下に隠れたものを永久に選べない */
+let ENV_CHOOSER = null;    // 開いている小窓
+/* 小窓を閉じた直後か。地図の空いた所を押すと Leaflet が先に小窓を閉じ、そのあとで
+   地図の「押した」処理が走る。そこで「開いていない」と見て点を置いてしまわないための印 */
+let ENV_CHOOSER_JUST = false;
+function envChooserJustClosed(){ return ENV_CHOOSER_JUST; }
+function envTapAt(svUuid, kind, uuid, lat, lon){
+  if(!envFlushOk()) return;   // 打ちかけを書けないなら、選び替えない
+  let list = [];
+  if(ENVMAP && typeof ENVMAP.latLngToContainerPoint === 'function'){
+    list = envOverlapAt(svUuid, lat, lon, pt=>ENVMAP.latLngToContainerPoint(pt));
+  }
+  // 押したものが1つだけ（または重なりを調べられない）→ そのまま選ぶ
+  if(list.length <= 1 || !list.some(o=>o.kind===kind && o.uuid===uuid)){
+    envTapPick(svUuid, kind, uuid); return;
+  }
+  envChooserOpen(svUuid, list, [lat, lon], kind, uuid);
+}
+function envChooserOpen(svUuid, list, pt, kind, uuid){
+  if(!ENVMAP || typeof L==='undefined' || !L.popup) { envTapPick(svUuid, kind, uuid); return; }
+  const sel = o => (o.kind==='rd' ? (envFocus()==='rd' && o.uuid===REDD_SEL)
+                                  : (envFocus()==='un' && o.uuid===ENV_SEL));
+  const html = `<div class="chooser">
+    <div class="tiny muted">同じ場所に ${list.length}つあります。どれを開きますか？</div>
+    ${list.map(o=>`<button type="button" class="${sel(o)?'on':''}"
+      onclick="envTapPick('${svUuid}','${o.kind}','${o.uuid}')">${esc(o.label)}${sel(o)?'（いま開いている）':''}</button>`).join('')}
+  </div>`;
+  try{
+    envChooserClose();
+    ENV_CHOOSER = L.popup({closeButton:true, autoPan:true, className:'chooser-pop', maxWidth:260})
+      .setLatLng(pt).setContent(html).openOn(ENVMAP);
+    ENVMAP.once('popupclose', ()=>{
+      ENV_CHOOSER = null;
+      ENV_CHOOSER_JUST = true; setTimeout(()=>{ ENV_CHOOSER_JUST = false; }, 0);
+    });
+  }catch(e){ ENV_CHOOSER = null; envTapPick(svUuid, kind, uuid); }
+}
+function envChooserClose(){
+  if(!ENV_CHOOSER) return;
+  try{ ENVMAP.closePopup(ENV_CHOOSER); }catch(e){}
+  ENV_CHOOSER = null;
+}
+/* 小窓の中で1つ選んだ（または1つしか無かった） */
+function envTapPick(svUuid, kind, uuid){
+  envChooserClose();
+  if(kind==='rd'){ if(!reddSelect(uuid, svUuid)) render(); }
+  else envSelect(uuid);
 }
 
 /* いまの種類（点／ラインの始まり・終わり／曲がり）で1件足す。
@@ -3862,6 +3948,9 @@ SCREENS.envMap = (argStr)=>{
         });
       }
       map.on('click', e=>{
+        // 選ぶ小窓が開いているときは、閉じるだけ。ここで置いてしまうと
+        // 小窓を閉じたつもりの1押しで産卵床が1つ増える
+        if(ENV_CHOOSER || envChooserJustClosed()){ envChooserClose(); return; }
         // 直す待ちのときは、新しく置かずに動かす
         if(ENV_MOVE && ENV_MOVE.kind==='rd'){
           if(reddMoveTo(ENV_MOVE.uuid, e.latlng.lat, e.latlng.lng, '', '地図')) render();
