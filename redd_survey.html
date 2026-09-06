@@ -112,6 +112,7 @@
   .chooser button{padding:10px 12px; font-size:15px; font-weight:700; text-align:left;
     background:#f2f4f6; color:#111; border:1px solid #c8ced4; border-radius:8px; cursor:pointer;}
   .chooser button.on{background:#e0a030; border-color:#e0a030; color:#fff;}
+  .chooser button.put{background:#2a6fbf; border-color:#2a6fbf; color:#fff;}
 
   /* 写真 */
   .mediagrid{margin-top:10px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px;}
@@ -158,12 +159,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v26';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v27';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-06';
-const APP_NOTE = '地図で印が重なっているところを押すと、そこにあるものの一覧が出て選べます'
-  + '（下に隠れた産卵床やポイントも開けます）';
+const APP_NOTE = 'つぎが物理環境（ポイント・ライン）のとき、産卵床などの印を押すと'
+  + '「ここに置く」か「開く」かを選べます（産卵床の上にラインの始点・終点を重ねられます）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -3439,16 +3440,61 @@ function envTapAt(svUuid, kind, uuid, lat, lon){
     return;
   }
   if(!envFlushOk()) return;   // 打ちかけを書けないなら、選び替えない
+  // つぎに置くのが物理環境なら、印の上にも置けるようにする（産卵床の上にラインの
+  // 始点を重ねる等）。印を押すと地図の「押した」処理には届かないので、ここで
+  // 「ここに置く」も選べる小窓を出す。つぎが産卵床のときは、印に重ねない決まり
+  // なので今まで通り「開く」だけ
+  const nk = envNextKindLabel(svUuid);
+  if(nk && envChooserCan()){
+    const items = list || [{kind, uuid, w:'', label:envTapLabel(kind, uuid)}];
+    const put = {kind:'put', uuid:'', w:'', label:`ここに${nk}を置く`};
+    envChooserOpen([put, ...items], [lat, lon], o=>{
+      if(o.kind==='put'){ envChooserClose(); envPlaceAt(svUuid, lat, lon, false); }
+      else envTapPick(svUuid, o.kind, o.uuid);
+    }, items.length > 1 ? `同じ場所に ${items.length}つあります。置きますか、開きますか？`
+                        : '置きますか、開きますか？');
+    return;
+  }
   // 押したものが1つだけ（または重なりを調べられない）→ そのまま選ぶ
   if(!list || list.length <= 1){ envTapPick(svUuid, kind, uuid); return; }
   envChooserOpen(list, [lat, lon], o=>envTapPick(svUuid, o.kind, o.uuid),
                  `同じ場所に ${list.length}つあります。どれを開きますか？`);
 }
+/* 小窓を出せる作りか（地図が無い確かめ用の環境では出せない） */
+function envChooserCan(){ return !!(ENVMAP && typeof L!=='undefined' && L.popup); }
+/* つぎに置くものの名前。産卵床なら ''（印の上には置かない） */
+function envNextKindLabel(svUuid){
+  const k = ENV_NEXT.survey===svUuid ? ENV_NEXT.kind : 'P';
+  return {P:'ポイント', LS:'ラインの始まり', LE:'ラインの終わり', V:'ラインの曲がり'}[k] || '';
+}
+/* 押した印の名前（重なりを調べられなかったときの小窓用） */
+function envTapLabel(kind, uuid){
+  if(kind==='rd'){ const r = DB.get(DB.key.rd, uuid); return r ? reddName(r) + (r.species ? '　'+r.species : '') : ''; }
+  return (DB.liveUnit(uuid)||{}).name||'';
+}
+/* つぎのものを、この場所に置く。地図の空いた所を押したときと、印の上に置くときの共通の道。
+   snap: 近くの印に重ねるか（印の上に置くときは、その印の場所そのものなので重ねない） */
+function envPlaceAt(svUuid, lat, lon, snap){
+  if(!envFlushOk()) return false;
+  // 産卵床は、近くの印に重ねない。隣り合う産卵床は本当に別のものなので、
+  // 重ねてしまうと2つを1つと数えることになる
+  const snapping = snap && !(ENV_NEXT.survey===svUuid && ENV_NEXT.kind==='S');
+  const sn = snapping ? envSnapTo(svUuid, lat, lon, null) : null;
+  const la = sn ? sn.lat : lat, lo = sn ? sn.lon : lon;
+  const added = envAddAt(svUuid, la, lo, '', '地図');
+  if(!added) return false;
+  envSnapTell(sn);
+  // 産卵床は続けて100個以上置くので、作り直すと目に見えて遅くなる。
+  // 地図はそのままに、印と一覧と入力欄だけを書き替える。
+  // 物理環境は数が少ないので、そのまま作り直してよい
+  if(!(envFocus()==='rd' && reddSyncUI(svUuid))) render();
+  return true;
+}
 /* 小窓を出す。list の1つを押したら onPick(o) を呼ぶ。小窓を出せない作りなら、先頭を選んだことにする */
 function envChooserOpen(list, pt, onPick, title){
-  if(!ENVMAP || typeof L==='undefined' || !L.popup){ onPick(list[0]); return; }
+  if(!envChooserCan()){ onPick(list[0]); return; }
   const sel = o => (o.kind==='rd' ? (envFocus()==='rd' && o.uuid===REDD_SEL)
-                                  : (envFocus()==='un' && o.uuid===ENV_SEL));
+                  : o.kind==='un' ? (envFocus()==='un' && o.uuid===ENV_SEL) : false);
   // ボタンは DOM で組む。ID を文字列に埋め込むと、バックアップから来た
   // 変な ID（引用符入りなど）で壊れたり、余計なものが動いたりする
   const box = document.createElement('div'); box.className = 'chooser';
@@ -3458,6 +3504,7 @@ function envChooserOpen(list, pt, onPick, title){
   list.forEach(o=>{
     const b = document.createElement('button'); b.type = 'button';
     if(sel(o)) b.className = 'on';
+    else if(o.kind==='put') b.className = 'put';
     b.textContent = o.label + (sel(o) ? '（いま開いている）' : '');
     b.addEventListener('click', ()=>onPick(o));
     box.appendChild(b);
@@ -4001,21 +4048,9 @@ SCREENS.envMap = (argStr)=>{
         // 直す待ちのときは、新しく置かずに動かす
         if(ENV_MOVE){ envMoveByTap(svUuid, e.latlng.lat, e.latlng.lng); return; }
         if(envPickOn()){ toast('消すものを選んでいます。先に「やめる」を押してください'); return; }
-        // 打ちかけを先に書く。書かずに次を置くと、画面を作り直したときに
-        // 直前に打った値（自動保存の待ち0.6秒ぶん）が黙って消える
-        if(!envFlushOk()) return;
-        // 産卵床は、近くの印に重ねない。隣り合う産卵床は本当に別のものなので、
-        // 重ねてしまうと2つを1つと数えることになる
-        const snapping = !(ENV_NEXT.survey===svUuid && ENV_NEXT.kind==='S');
-        const sn = snapping ? envSnapTo(svUuid, e.latlng.lat, e.latlng.lng, null) : null;
-        const la = sn ? sn.lat : e.latlng.lat, lo = sn ? sn.lon : e.latlng.lng;
-        const added = envAddAt(svUuid, la, lo, '', '地図');
-        if(!added) return;
-        envSnapTell(sn);
-        // 産卵床は続けて100個以上置くので、作り直すと目に見えて遅くなる。
-        // 地図はそのままに、印と一覧と入力欄だけを書き替える。
-        // 物理環境は数が少ないので、そのまま作り直してよい
-        if(!(envFocus()==='rd' && reddSyncUI(svUuid))) render();
+        // 打ちかけを先に書いてから置く（書かずに次を置くと、画面を作り直したときに
+        // 直前に打った値（自動保存の待ち0.6秒ぶん）が黙って消える）。近くの印には重ねる
+        envPlaceAt(svUuid, e.latlng.lat, e.latlng.lng, true);
       });
       // はじめて開いたときだけ、置いてあるものが入るようにする
       if(!v){
