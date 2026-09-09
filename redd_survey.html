@@ -56,6 +56,7 @@
   .badge.status-調査中{color:var(--accent); border-color:var(--accent2);}
   .badge.status-終了{color:var(--muted);}
   .badge.warn{color:var(--warn);}
+  .pctwarn{color:var(--danger); font-weight:700;}
   .sp{height:8px;}
   .empty{text-align:center; color:var(--muted); padding:34px 10px; font-size:15px;}
 
@@ -159,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v28';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v29';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-06';
-const APP_NOTE = 'つぎが物理環境（ポイント・ライン）のとき、産卵床などの印を押すと'
-  + '「ここに置く」か「開く」かを選べます（産卵床の上にラインの始点・終点を重ねられます）';
+const APP_DATE = '2026-09-09';
+const APP_NOTE = '産卵床の入力中に魚種などを押しても、上へ引き戻されなくなりました。'
+  + '河床材料の割合は、合計が100%を超える・足りないと、打つたびに赤字で知らせます（保存はできます）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -1798,6 +1799,44 @@ function substrateRank(u){
     .filter(x=>x.pct>0)
     .sort((a,b)=>b.pct-a.pct);
 }
+/* 割合の合計。100%からずれていたら、打つたびに赤字で知らせる（保存は止めない）。
+   空欄は数えない（空欄と0は別）。全部空なら「まだ入れていない」なので知らせない。
+   3つの画面（物理環境・川の環境・メッシュ）で同じ文言を出すため、ここ1か所で作る */
+function substrateSumNote(vals){
+  let sum = 0, any = false;
+  (vals||[]).forEach(v=>{ const n = numOf(v); if(n==='') return; any = true; sum += n; });
+  if(!any) return {sum:0, any:false, state:'none'};
+  sum = Math.round(sum*100)/100;          // 33.3+33.3+33.4 のような小数のごみを落とす
+  // ちょうど 100 のときだけ正常。99.6 や 100.4 も「100%でない」ので知らせる
+  const state = sum === 100 ? 'ok' : (sum > 100 ? 'over' : 'under');
+  return {sum, any:true, state};
+}
+function substrateSumText(note){
+  if(note.state==='none') return '合計100%が目安です（合わなくても保存できます）。';
+  // 判定に使った値をそのまま出す（丸めると「100.0% なのに足りません」が起きる）
+  const s = 'いまの合計 ' + String(note.sum) + '%';
+  if(note.state==='ok') return s;
+  return s + '　100%' + (note.state==='over' ? 'を超えています' : 'に足りません')
+    + '（このままでも保存できます）';
+}
+function substrateSumClass(note){
+  return (note.state==='over' || note.state==='under') ? 'tiny pctwarn' : 'tiny muted';
+}
+/* 合計の行。prefix は入力欄の id の頭（evp / sp / mxp） */
+function substrateSumHtml(prefix, vals){
+  const note = substrateSumNote(vals);
+  return `<div id="${prefix}_sum" class="${substrateSumClass(note)}" style="margin-top:6px">${esc(substrateSumText(note))}</div>`;
+}
+/* 画面の入力欄（#prefix_1〜7）を読み直して、合計の行だけ書き替える（画面は作り直さない） */
+function substrateSumVals(prefix){
+  return OPT.substrate.map(k=>{ const el = $('#'+prefix+'_'+SUBSTRATE_NO[k]); return el ? el.value : ''; });
+}
+function substrateSumLive(prefix){
+  const el = $('#'+prefix+'_sum'); if(!el) return;
+  const note = substrateSumNote(substrateSumVals(prefix));
+  el.className = substrateSumClass(note);
+  el.textContent = substrateSumText(note);
+}
 
 /* ---------- 岸のカバー。side は 'left' か 'right' ---------- */
 function coverList(u, side){
@@ -2589,10 +2628,10 @@ function envItemFormHtml(cur, sv, opt){
               <div class="grow small">${esc(k)}
                 <span class="tiny muted">${esc(SUBSTRATE_NOTE[k]||'')}</span></div>
               <div style="width:92px">
-                <input id="evp_${SUBSTRATE_NO[k]}" inputmode="decimal"
+                <input id="evp_${SUBSTRATE_NO[k]}" inputmode="decimal" oninput="substrateSumLive('evp')"
                   value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
             </div>`).join('')}
-          <div class="tiny muted" style="margin-top:6px">合計100％が目安です（合わなくても保存できます）。</div>`)}
+          ${substrateSumHtml('evp', OPT.substrate.map(k=>pct[k]!==undefined?pct[k]:''))}`)}
 
         ${foldHtml('envcov', 'カバー（左右岸）', '', ['left','right'].map(side=>{
           const label = side==='left' ? '左岸' : '右岸';
@@ -3809,17 +3848,36 @@ function reddSyncUI(svUuid){
   reddDrawAll(sv);
   return true;
 }
-/* 一覧の見た目だけを書き替える（画面は作り直さない） */
+/* 一覧の見た目だけを書き替える（画面は作り直さない）。
+   一覧は折り返して並ぶ（横にはスクロールしない）ので、選んだものを scrollIntoView で
+   見せる必要はない。以前はそれが縦に効いて、自動保存のたびに（魚種を押すたびに）
+   入力欄の上へ引き戻していた。
+   代わりに、上の部分の高さが変わったぶんだけ画面をずらして、入力欄を同じ場所に留める */
 function reddChipSync(svUuid){
+  const top = reddFormTopY();
   const list = $('#reddChips');
   if(list) list.innerHTML = reddChipsHtml(svUuid);
   const head = $('#reddHead');
   if(head) head.innerHTML = reddHeadHtml(svUuid);
-  // 選んだものが見える位置まで、横にずらす
+  reddKeepFormPlace(top);
+}
+/* 入力欄の先頭が画面のどこにあるか（測れなければ null） */
+function reddFormTopY(){
   try{
-    const on = document.querySelector('#reddChips button.on');
-    if(on && on.scrollIntoView) on.scrollIntoView({inline:'center', block:'nearest'});
-  }catch(e){}
+    const el = $('#envFormTop');
+    if(!el || typeof el.getBoundingClientRect !== 'function') return null;
+    return el.getBoundingClientRect().top;
+  }catch(e){ return null; }
+}
+/* 入力欄の先頭が画面の上に隠れているとき（＝入力欄の中で作業しているとき）だけ、
+   上の部分の伸び縮みを打ち消す。見えているときは、そのまま見せる */
+function reddKeepFormPlace(before){
+  if(before === null || before >= 0) return;
+  const after = reddFormTopY();
+  if(after === null) return;
+  const d = after - before;
+  if(Math.abs(d) < 1 || typeof window.scrollBy !== 'function') return;
+  try{ window.scrollBy(0, d); }catch(e){}
 }
 /* 一覧から選ぶ。地図もそこへ寄せる（ズームは変えない。寄って作業しているのを崩さない） */
 function reddPick(u, svUuid){
@@ -4536,15 +4594,16 @@ SCREENS.meshCell = (argStr)=>{
         ${segHtml('mx_cov', OPT.bankCover, gv('cover'))}
         <div class="tiny muted">「なし」は選択肢のひとつです（岸にカバーが無い、という記録）。</div>
         <div class="sect">河床材料の割合（％）</div>
-        <div class="tiny muted">分かるときだけ。合計100％が目安です。</div>
+        <div class="tiny muted">分かるときだけ。</div>
         ${OPT.substrate.map(k=>`
           <div class="row" style="margin-top:6px">
             <div class="grow small">${esc(k)}
               <span class="tiny muted">${esc(SUBSTRATE_NOTE[k]||'')}</span></div>
             <div style="width:92px">
-              <input id="mxp_${SUBSTRATE_NO[k]}" inputmode="decimal"
+              <input id="mxp_${SUBSTRATE_NO[k]}" inputmode="decimal" oninput="substrateSumLive('mxp')"
                 value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
           </div>`).join('')}
+        ${substrateSumHtml('mxp', OPT.substrate.map(k=>pct[k]!==undefined?pct[k]:''))}
         <label class="field" style="margin-top:8px"><span class="lab">備考</span>
           <input id="mx_note" value="${esc(gv('note'))}"></label>`)}
 
@@ -4654,7 +4713,6 @@ SCREENS.unitEnv = (u)=>{
   const pts = envPoints(rec);
   const d = unitDepth(rec), v = unitVelocity(rec);
   const pct = substratePct(rec);
-  const sum = substratePctSum(rec);
   const rank = substrateRank(rec);
 
   const ptRows = pts.map((pt,i)=>`<tr>
@@ -4763,12 +4821,10 @@ SCREENS.unitEnv = (u)=>{
           <div class="grow small">${esc(k)}${SUBSTRATE_NOTE[k]
             ?` <span class="tiny muted">${esc(SUBSTRATE_NOTE[k])}</span>`:''}</div>
           <div style="width:90px"><input id="sp_${SUBSTRATE_NO[k]}" inputmode="decimal"
-            placeholder="%" value="${esc(pct[k]!==undefined?pct[k]:'')}"></div>
+            placeholder="%" value="${esc(pct[k]!==undefined?pct[k]:'')}"
+            oninput="substrateSumLive('sp')"></div>
         </div>`).join('')}
-        <div class="${Math.abs(sum-100)>0.5 && sum>0 ? 'warnbox':'tiny muted'}" style="margin-top:8px">
-          いまの合計 ${fmtNum(sum,0)}%${Math.abs(sum-100)>0.5 && sum>0
-            ? '　100%になっていません（このままでも保存はできます）' : ''}
-        </div>
+        ${substrateSumHtml('sp', OPT.substrate.map(k=>pct[k]!==undefined?pct[k]:''))}
         <div class="tiny muted">いちばん多い：${rank[0]?esc(rank[0].name):'—'}
           　次に多い：${rank[1]?esc(rank[1].name):'—'}</div>
         <div class="tiny muted">保存すると、この2つが「河床材料」「次に多い河床材料」に入ります。</div>
