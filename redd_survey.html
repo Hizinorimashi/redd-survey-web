@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v31';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v32';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-10';
-const APP_NOTE = 'ドローン写真を何組でもまとめて取り込めます（画像と .jgw を全部選ぶ）。'
-  + '地図には、見えている範囲の写真だけ（6枚まで）重ねます。引きすぎた地図では出ません';
+const APP_NOTE = 'ドローン写真は WebP（外側が透明）も取り込めます。'
+  + '地理院の地図を写真や航空写真の上に「乗算」で重ねられます（ドローン写真の画面の「上に重ねる地図」）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -642,7 +642,7 @@ function orthoBoundsCheck(b){
   if(km > ORTHO_MAX_KM) return `1枚が ${ORTHO_MAX_KM}km 四方を超えています。座標系を確かめてください`;
   return '';
 }
-function orthoIsImage(f){ return /^image\//.test((f && f.type)||'') || /\.(png|jpe?g)$/i.test((f && f.name)||''); }
+function orthoIsImage(f){ return /^image\//.test((f && f.type)||'') || /\.(png|jpe?g|webp)$/i.test((f && f.name)||''); }
 function orthoBaseName(name){ return String(name||'').replace(/^.*[\\/]/,'').replace(/\.[^.]+$/,'').toLowerCase(); }
 /* PNG／JPEG の先頭から幅と高さを読む（展開しない。大きな画像を丸ごと展開するとメモリで落ちる） */
 function orthoHeaderSize(u8){
@@ -655,6 +655,28 @@ function orthoHeaderSize(u8){
     if(!ihdr || be32(8) !== 13) return null;
     const w = be32(16), h = be32(20);
     return (w>0 && h>0) ? {w, h, type:'png'} : null;
+  }
+  // WebP（v32。透明が使えて軽い）: RIFF....WEBP のあと、最初の区画が VP8X（拡張）／VP8（不可逆）／VP8L（可逆）
+  if(u8[0]===0x52 && u8[1]===0x49 && u8[2]===0x46 && u8[3]===0x46 && u8[8]===0x57 && u8[9]===0x45 && u8[10]===0x42 && u8[11]===0x50){
+    const le32 = i => (u8[i] | (u8[i+1]<<8) | (u8[i+2]<<16) | (u8[i+3]<<24)) >>> 0;
+    const tag = String.fromCharCode(u8[12], u8[13], u8[14], u8[15]);
+    const need = tag === 'VP8X' ? 10 : tag === 'VP8 ' ? 10 : tag === 'VP8L' ? 5 : 0;
+    if(!need) return null;
+    // 大きさの欄が筋の通った値であること（RIFF 全体 ≥ 4+8+区画、区画 ≥ 必要な長さ、入力がそこまである）
+    const riffLen = le32(4), chunkLen = le32(16);
+    if(chunkLen < need || riffLen < 4 + 8 + chunkLen || u8.length < 20 + need) return null;
+    let w = 0, h = 0;
+    if(tag === 'VP8X'){
+      w = (u8[24] | (u8[25]<<8) | (u8[26]<<16)) + 1; h = (u8[27] | (u8[28]<<8) | (u8[29]<<16)) + 1;
+    }else if(tag === 'VP8 '){
+      if(!(u8[23]===0x9D && u8[24]===0x01 && u8[25]===0x2A)) return null;   // キーフレームの印
+      w = (u8[26] | (u8[27]<<8)) & 0x3FFF; h = (u8[28] | (u8[29]<<8)) & 0x3FFF;
+    }else{
+      if(u8[20] !== 0x2F) return null;
+      const b = le32(21);
+      w = (b & 0x3FFF) + 1; h = ((b >>> 14) & 0x3FFF) + 1;
+    }
+    return (w>0 && h>0) ? {w, h, type:'webp'} : null;
   }
   // JPEG: FFD8 のあと、区画をたどって SOF（FFC0〜FFCF。C4・C8・CC は除く）を探す
   if(u8[0]===0xFF && u8[1]===0xD8){
@@ -698,7 +720,7 @@ function orthoLoadImage(file){
 async function orthoPrepare(file){
   const head = new Uint8Array(await file.slice(0, 1024*1024).arrayBuffer());
   const dim = orthoHeaderSize(head);
-  if(!dim) throw new Error('画像の大きさを読めませんでした（PNG か JPEG を選んでください）');
+  if(!dim) throw new Error('画像の大きさを読めませんでした（PNG・JPEG・WebP を選んでください）');
   const w = dim.w, h = dim.h;
   if(Math.max(w,h) <= ORTHO_MAX_PX){
     // そのまま保存する前に、展開できる画像であることを確かめる（先頭だけ残った壊れた画像を弾く）。
@@ -708,7 +730,7 @@ async function orthoPrepare(file){
   }
   const k = ORTHO_MAX_PX / Math.max(w,h);
   const tw = Math.max(1, Math.round(w*k)), th = Math.max(1, Math.round(h*k));
-  const type = dim.type === 'png' ? 'image/png' : 'image/jpeg';
+  const type = dim.type === 'jpg' ? 'image/jpeg' : 'image/png';   // 透明を持てる形式（PNG・WebP）は PNG に（WebP は書けない端末がある）
   const tooBig = new Error(`この端末では縮小できませんでした。PC で長辺 ${ORTHO_MAX_PX}px 以下にして書き出してください`);
   let srcImg = null;
   if(typeof createImageBitmap === 'function'){
@@ -785,7 +807,10 @@ async function orthoImportOne(img, wfile){
   const why = orthoBoundsCheck(bounds);
   if(why) return { ok:false, why };
   const id = uuid();
-  const ext = prep.blob.type === 'image/png' || /\.png$/i.test(img.name||'') ? 'png' : 'jpg';
+  // 種類は実体の type で決める（縮めたときは canvas が付ける）。無ければ名前の拡張子で
+  const nm = img.name||'', t = prep.blob.type||'';
+  const ext = t === 'image/webp' ? 'webp' : t === 'image/png' ? 'png' : t === 'image/jpeg' ? 'jpg'
+            : /\.webp$/i.test(nm) ? 'webp' : /\.png$/i.test(nm) ? 'png' : 'jpg';
   const rec = { id, kind:'ortho', blob:prep.blob, ext, size:prep.blob.size, type:prep.blob.type||'',
                 name:String(img.name||'').replace(/\.[^.]+$/,''), bounds, w:prep.w, h:prep.h,
                 shrunk:!!prep.shrunk, added_at:nowISO() };
@@ -5835,21 +5860,59 @@ function baseMapButtonsHtml(){
 }
 // 画面に出ている地図をまとめて返す。ここを経由しないと、地図を増やしたときに切替が効かなくなる
 function allMaps(){ return [MAP, ENVMAP, OMAP].filter(Boolean); }
+/* 地理院タイルはここでだけ作る（基図も、上に重ねる地図も）。
+   crossOrigin を付けないと画像が「中身を見ない」応答になり、Service Worker が
+   タイルをキャッシュできず、圏外で背景地図が出なくなる（地理院タイルはCORS対応済み）。
+   地理院タイルは18までしか無い。そこから先は引き伸ばして寄れるようにする */
+function gsiTileLayer(b, extra){
+  return L.tileLayer(b.url, Object.assign({maxZoom:MAP_MAX_ZOOM, maxNativeZoom:b.max, crossOrigin:'anonymous'}, extra||{}));
+}
 function applyBaseMap(map, name){
   if(!map) return;
   const b = BASEMAPS[name] || BASEMAPS['航空写真'];
   if(map._baseLayer){ try{ map.removeLayer(map._baseLayer); }catch(e){} }
-  // crossOrigin を付けないと画像が「中身を見ない」応答になり、Service Worker が
-  // タイルをキャッシュできず、圏外で背景地図が出なくなる（地理院タイルはCORS対応済み）
-  // 地理院タイルは18までしか無い。そこから先は引き伸ばして寄れるようにする
-  map._baseLayer = L.tileLayer(b.url, {maxZoom:MAP_MAX_ZOOM, maxNativeZoom:b.max,
-    crossOrigin:'anonymous', attribution:GSI_ATTR}).addTo(map);
+  map._baseLayer = gsiTileLayer(b, {attribution:GSI_ATTR}).addTo(map);
   // タイルが無かったら、上の段のタイルを切り出して埋める
   map._baseLayer.on('tileerror', ev=>{
     try{ tileErrorFill(ev.tile, ev.coords, b.url, 1); }catch(e){}
   });
   if(map._baseLayer.bringToBack) map._baseLayer.bringToBack();
   applyOrthos(map);   // ドローン写真も重ねる（地図を作る場所はすべてここを通る）
+  applyMapOver(map);  // 上に重ねる地図（線と文字だけ透ける）も
+}
+/* 上に重ねる地図（v32）。地理院の地形図（または淡色地図）を、ドローン写真や航空写真の上に
+   「乗算」で重ねる（QGIS の混合モードと同じ）。白い地は透けて、線と文字だけが見える。
+   ドローン写真(250) の上、線や印(400) の下の専用パネルに置く */
+function mapOverName(){ const n = prefs().map_over; return (n && BASEMAPS[n]) ? n : 'なし'; }
+function applyMapOver(map){
+  if(!map || typeof L === 'undefined' || !L.tileLayer) return;
+  if(map._overLayer){ try{ map.removeLayer(map._overLayer); }catch(e){} map._overLayer = null; }
+  const name = mapOverName();
+  if(name === 'なし' || name === baseMapName()) return;   // 基図と同じものを重ねても意味がない
+  let pane = null;
+  try{ pane = map.getPane('mapover'); }catch(e){ pane = null; }
+  if(!pane){
+    const tiles = map.getPane('tilePane');
+    pane = map.createPane('mapover', tiles && tiles.parentNode ? tiles.parentNode : undefined);
+    pane.style.zIndex = '300';
+    pane.style.pointerEvents = 'none';
+    pane.style.mixBlendMode = 'multiply';
+  }
+  const b = BASEMAPS[name];
+  try{
+    map._overLayer = gsiTileLayer(b, {pane:'mapover'}).addTo(map);
+    // 基図と同じく、タイルが無ければ（圏外で保存していない段など）上の段のタイルを切り出して埋める
+    map._overLayer.on('tileerror', ev=>{
+      try{ tileErrorFill(ev.tile, ev.coords, b.url, 1); }catch(e){}
+    });
+  }catch(e){ console.error(e); map._overLayer = null; }
+}
+function setMapOver(name){
+  if(!name) name = 'なし';   // segVal は「なし」を '' で返す
+  if(!(name === 'なし' || BASEMAPS[name])) return;
+  prefSet('map_over', name);
+  allMaps().forEach(applyMapOver);
+  if(name !== 'なし' && name === baseMapName()) toast(`基図が「${name}」のときは重ねません（航空写真などに切り替えると出ます）`);
 }
 function switchBaseMap(btn, name){
   if(!BASEMAPS[name]) return;
@@ -6317,11 +6380,11 @@ SCREENS.orthos = ()=>{
     html:`
       <div class="card"><div class="small">
         PC（QGIS）で位置合わせした写真を、地図に重ねます。<br>
-        画像（PNG/JPG）と一緒に書き出されるワールドファイル（.pgw / .jgw / .wld）を、
+        画像（PNG/JPG/WebP）と一緒に書き出されるワールドファイル（.pgw / .jgw / .wld）を、
         <b>画像と2つ同時に選んで</b>ください（a.png と a.pgw のように同じ名前の組）。
         組が何枚あっても<b>まとめて選べます</b>（1枚ずつ繰り返さなくてよい）。<br>
         北が上で、EPSG:3857（Webメルカトル）で書き出したもの。大きさは長辺 ${ORTHO_MAX_PX}px まで。
-        作り方は PC 側の手引き（docs/ドローン写真の用意.md）にあります。
+        写真の外側を透明にしたいときは WebP か PNG（作り方は PC 側の手引き docs/ドローン写真の用意.md）。
       </div></div>
       <input type="file" id="fOrthoIn" multiple style="display:none" onchange="orthoImport(this)">
       <button class="btn primary" onclick="document.getElementById('fOrthoIn').click()">取り込む（画像＋ワールドファイル、何組でも）</button>
@@ -6329,6 +6392,10 @@ SCREENS.orthos = ()=>{
       <label class="field"><span class="lab">透過</span>
         <div onclick="setTimeout(()=>orthoSetOpacity(segVal('orthoOpacity')),0)">${segHtml('orthoOpacity', Object.keys(ORTHO_OPACITY), orthoOpacityName())}</div></label>
       <div class="tiny muted">出す／消すは、地図の上の「ドローン写真」ボタンで切り替えます（いまは「${orthoShown()?'出す':'消す'}」）。</div>
+      <label class="field"><span class="lab">上に重ねる地図</span>
+        <div onclick="setTimeout(()=>setMapOver(segVal('mapOver')),0)">${segHtml('mapOver', ['なし','地形図','淡色地図'], mapOverName())}</div></label>
+      <div class="tiny muted">地理院の地図を、ドローン写真や航空写真の上に「乗算」で重ねます（白い地は透け、線と文字だけが見える）。
+        基図が同じ地図のときは重ねません。圏外で使うなら、オフライン地図の保存で重ねる地図も一緒に保存しておきます。</div>
       ${list.length ? `<div class="sect">取り込み済み（${list.length}）</div>${cards}` : '<div class="empty">まだありません。</div>'}
       <div class="tiny muted">バックアップには入りません（PC に元があるため）。端末を変えたら入れ直してください。</div>`
   };
