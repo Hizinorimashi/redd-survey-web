@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v32';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v33';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-10';
-const APP_NOTE = 'ドローン写真は WebP（外側が透明）も取り込めます。'
-  + '地理院の地図を写真や航空写真の上に「乗算」で重ねられます（ドローン写真の画面の「上に重ねる地図」）';
+const APP_NOTE = 'ドローン写真の外側の白を、取り込むときにアプリで透明にできます（ドローン写真の画面のスイッチ）。'
+  + '上に重ねる地図は、陰影起伏図・傾斜量図・色別標高図・治水地形分類図・白地図と、好きなタイルの URL から選べ、濃さも変えられます';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -792,6 +792,76 @@ function orthoPairProblem(files, p){
   if(p.odd.length) return `組になっていないものがあります（${p.odd.map(q).join('')}）。画像とワールドファイルは a.png と a.pgw のように同じ名前の組で選んでください。何も取り込んでいません`;
   return '';
 }
+/* 取り込むときに、写真の外側の白を透明にする（v33）。
+   縁から「白」（RGB がすべて ORTHO_ALPHA_THR 以上）でつながっている画素だけを透明にする。
+   写真の中の白い屋根や車は縁とつながっていないので残る。PC の道具（ortho_alpha_webp.py）と同じ考え方 */
+const ORTHO_ALPHA_OPTS = {'そのまま':false, '透明にする':true};
+const ORTHO_ALPHA_THR = 235;
+function orthoAlphaName(){ return prefs().ortho_alpha === true ? '透明にする' : 'そのまま'; }
+function orthoAlphaOn(){ return prefs().ortho_alpha === true; }
+function orthoSetAlpha(name){ if(!(name in ORTHO_ALPHA_OPTS)) return; prefSet('ortho_alpha', ORTHO_ALPHA_OPTS[name]); }
+/* RGBA の並び（幅 w・高さ h）を書き換え、透明にした画素の数を返す。純粋な計算（試験しやすいように）。
+   走査線ごとの塗りつぶし: 種の画素から左右に白の続く範囲を一気に透明にし、その上下の行で白が始まる画素を次の種にする。
+   「済み」の印は alpha=0 そのもの（白の判定に alpha>0 を含める）なので、画素数ぶんの作業領域を持たない。
+   4096×4096 でも、種の一覧は「行ごとの白の範囲の数」程度で済む */
+function orthoAlphaFill(data, w, h, thr){
+  thr = thr == null ? ORTHO_ALPHA_THR : thr;
+  const white = i => { const p = i*4; return data[p+3] > 0 && data[p] >= thr && data[p+1] >= thr && data[p+2] >= thr; };
+  const seeds = [];
+  for(let x = 0; x < w; x++){ seeds.push(x, (h-1)*w + x); }
+  for(let y = 1; y < h-1; y++){ seeds.push(y*w, y*w + w-1); }
+  let count = 0;
+  while(seeds.length){
+    const i = seeds.pop();
+    if(!white(i)) continue;
+    const y = Math.floor(i / w), row = y*w;
+    let x0 = i - row, x1 = x0;
+    while(x0 > 0 && white(row + x0 - 1)) x0--;
+    while(x1 < w-1 && white(row + x1 + 1)) x1++;
+    for(let x = x0; x <= x1; x++){ data[(row+x)*4+3] = 0; count++; }
+    // 上下の行: この範囲に接する白の「始まり」だけを種にする
+    for(const ny of [y-1, y+1]){
+      if(ny < 0 || ny >= h) continue;
+      const nrow = ny*w; let inRun = false;
+      for(let x = x0; x <= x1; x++){
+        const isW = white(nrow + x);
+        if(isW && !inRun) seeds.push(nrow + x);
+        inRun = isW;
+      }
+    }
+  }
+  return count;
+}
+/* 準備した画像（長辺 4096 以下）を展開して外側を透明にし、透明を持てる形式で返す。
+   白い縁が無ければ（もう透明な写真も含む）そのまま返す（alpha:'skip'）。失敗は例外。
+   キャンバスの大きさは「展開した画像の大きさ」（縮めてあれば縮めた後）。prep.w / prep.h は
+   境界の計算用の元の画素数なので、ここでは使わない */
+async function orthoAlphaEdges(prep){
+  let src = null;
+  if(typeof createImageBitmap === 'function'){ try{ src = await createImageBitmap(prep.blob); }catch(e){ src = null; } }
+  if(!src) src = await orthoLoadImage(prep.blob);
+  let cv = null, ctx = null, cw = 0, ch = 0;
+  try{
+    cw = src.width || src.naturalWidth; ch = src.height || src.naturalHeight;
+    if(!(cw > 0 && ch > 0) || cw*ch > ORTHO_SAFE_PX) throw new Error('透明にするには大きすぎます');
+    cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+    ctx = cv.getContext('2d');
+    ctx.drawImage(src, 0, 0, cw, ch);
+  }finally{
+    // 展開した画像は成功でも失敗でも早めに手放す（メモリ。次の1枚の展開に響かないように）
+    if(src && src.close){ try{ src.close(); }catch(e){} }
+    src = null;
+  }
+  const id = ctx.getImageData(0, 0, cw, ch);
+  const n = orthoAlphaFill(id.data, cw, ch);
+  if(!n) return Object.assign({}, prep, {alpha:'skip'});   // 白い縁が無い（もう透明、など）→ 作り直さない
+  ctx.putImageData(id, 0, 0);
+  // WebP で書ける端末（Android）は WebP、書けない端末（iPhone）は PNG になる
+  let blob = await new Promise(res=>cv.toBlob(res, 'image/webp', 0.85));
+  if(!blob || blob.type !== 'image/webp') blob = await new Promise(res=>cv.toBlob(res, 'image/png'));
+  if(!blob) throw new Error('透明にした画像を作れませんでした');
+  return {blob, w:prep.w, h:prep.h, shrunk:prep.shrunk, alpha:'done'};
+}
 /* 1組を読んで正本に書く。失敗は {ok:false, why} で返す（断り文はまとめて出す） */
 async function orthoImportOne(img, wfile){
   let wf = null;
@@ -806,6 +876,12 @@ async function orthoImportOne(img, wfile){
   const bounds = orthoBoundsOf(wf, prep.w, prep.h);
   const why = orthoBoundsCheck(bounds);
   if(why) return { ok:false, why };
+  let alpha = '';
+  if(orthoAlphaOn()){
+    // 透明にできなくても（メモリ不足など）取り込みは止めない。そのまま入れて、あとで知らせる
+    try{ prep = await orthoAlphaEdges(prep); alpha = prep.alpha || 'done'; }
+    catch(e){ console.error(e); alpha = 'ng'; }
+  }
   const id = uuid();
   // 種類は実体の type で決める（縮めたときは canvas が付ける）。無ければ名前の拡張子で
   const nm = img.name||'', t = prep.blob.type||'';
@@ -813,11 +889,11 @@ async function orthoImportOne(img, wfile){
             : /\.webp$/i.test(nm) ? 'webp' : /\.png$/i.test(nm) ? 'png' : 'jpg';
   const rec = { id, kind:'ortho', blob:prep.blob, ext, size:prep.blob.size, type:prep.blob.type||'',
                 name:String(img.name||'').replace(/\.[^.]+$/,''), bounds, w:prep.w, h:prep.h,
-                shrunk:!!prep.shrunk, added_at:nowISO() };
+                shrunk:!!prep.shrunk, alpha:alpha === 'done', added_at:nowISO() };
   try{ await PhotoDB.put(rec); }
   catch(e){ return { ok:false, why:'保存できませんでした（端末の空き容量を確かめてください）' }; }
   if(!ORTHO_URLS[id]){ try{ ORTHO_URLS[id] = URL.createObjectURL(prep.blob); }catch(e){ console.error(e); } }
-  return { ok:true, shrunk:!!prep.shrunk };
+  return { ok:true, shrunk:!!prep.shrunk, alpha };
 }
 let ORTHO_BUSY = false;   // 取り込み中（重ねて始めると進み具合と知らせが混ざり、同じ写真を二重に入れやすい）
 async function orthoImport(input){
@@ -829,12 +905,12 @@ async function orthoImport(input){
   if(problem){ alert(problem); return false; }
   ORTHO_BUSY = true;
   const n = p.pairs.length, fails = [];
-  let ok = 0, shrunk = false;
+  let ok = 0, shrunk = false, alphaNg = 0;
   try{
     for(let i = 0; i < n; i++){
       toast(n > 1 ? `読み込んでいます…（${i+1}/${n}）` : '読み込んでいます…');
       const r = await orthoImportOne(p.pairs[i].img, p.pairs[i].wfile);
-      if(r.ok){ ok++; shrunk = shrunk || r.shrunk; }
+      if(r.ok){ ok++; shrunk = shrunk || r.shrunk; if(r.alpha === 'ng') alphaNg++; }
       else fails.push({ name:p.pairs[i].img.name||'', why:r.why });
     }
     if(ok){
@@ -843,9 +919,12 @@ async function orthoImport(input){
       allMaps().forEach(applyOrthos);
     }
   }finally{ ORTHO_BUSY = false; }
+  const alphaNote = alphaNg ? `${alphaNg}枚は透明にできず、そのまま入れました（端末のメモリ不足かもしれません。PC の道具で透明にしてから入れ直せます）` : '';
   if(fails.length){
     if(n === 1) alert(fails[0].why);
-    else alert(`${ok}枚を取り込み、${fails.length}枚は取り込めませんでした：\n` + fails.map(f=>`・${f.name}：${f.why}`).join('\n'));
+    else alert(`${ok}枚を取り込み、${fails.length}枚は取り込めませんでした：\n` + fails.map(f=>`・${f.name}：${f.why}`).join('\n') + (alphaNote ? '\n' + alphaNote : ''));
+  }else if(alphaNote){
+    alert((n === 1 ? '取り込みましたが、' : `${n}枚を取り込みましたが、`) + alphaNote);
   }else{
     const note = shrunk ? '（大きかったので縮めました）' : '';
     toast(n === 1 ? `取り込みました${note}` : `${n}枚を取り込みました${note}`);
@@ -5746,6 +5825,19 @@ const BASEMAPS = {
   '淡色地図': { url:'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', max:18 },
 };
 const GSI_ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html">国土地理院</a>';
+/* 上に重ねる地図の候補（v33）。乗算で写真の上に載せて効くもの。max はタイルのある最大ズーム
+   （それより先は引き伸ばし）。「URL」は利用者が入れたタイルの URL（{z}/{x}/{y}） */
+const OVERMAPS = {
+  '地形図'  : BASEMAPS['地形図'],
+  '淡色地図': BASEMAPS['淡色地図'],
+  '白地図'  : { url:'https://cyberjapandata.gsi.go.jp/xyz/blank/{z}/{x}/{y}.png', max:14 },
+  '陰影起伏図': { url:'https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png', max:16 },
+  '傾斜量図': { url:'https://cyberjapandata.gsi.go.jp/xyz/slopemap/{z}/{x}/{y}.png', max:15 },
+  '色別標高図': { url:'https://cyberjapandata.gsi.go.jp/xyz/relief/{z}/{x}/{y}.png', max:15 },
+  '治水地形分類図': { url:'https://cyberjapandata.gsi.go.jp/xyz/lcmfc2/{z}/{x}/{y}.png', max:16 },
+};
+const OVERMAP_URL = 'URL';   // 選択肢の名前
+function tileSourceOf(name){ return BASEMAPS[name] || OVERMAPS[name] || null; }
 function baseMapName(){ const v=localStorage.getItem('rd_basemap'); return BASEMAPS[v]?v:'航空写真'; }
 
 /* ============================================================
@@ -5812,26 +5904,24 @@ function packTiles(area, zmax){
   }
   return out;
 }
+// 地図の種類ごとに、タイルのある段まで（白地図は14、傾斜量図・色別標高図は15 など）で一覧を作る
 function packTileUrls(area, zmax, layers){
-  const tiles = packTiles(area, zmax);
   const urls=[];
   layers.forEach(name=>{
-    const b=BASEMAPS[name]; if(!b) return;
-    tiles.forEach(([z,x,y])=>urls.push(b.url.replace('{z}',z).replace('{x}',x).replace('{y}',y)));
+    const b=tileSourceOf(name); if(!b) return;   // 基図も、上に重ねる地図も
+    packTiles(area, Math.min(zmax, b.max)).forEach(([z,x,y])=>urls.push(b.url.replace('{z}',z).replace('{x}',x).replace('{y}',y)));
   });
   return urls;
 }
 // 見積り（枚数と、種類ごとの重みで概算したMB）
 function packEstimate(area, zmax, layers){
-  const tiles = packTiles(area, zmax);
-  const urls = packTileUrls(area, zmax, layers);
-  // ズームごとの枚数に、種類ごとの重みをかけてMBを概算
-  const perZoom={};
-  tiles.forEach(([z])=>{ perZoom[z]=(perZoom[z]||0)+1; });
-  let kb=0;
-  layers.forEach(name=>{ const w=PACK_TILE_KB[name]||15;
-    Object.keys(perZoom).forEach(z=>{ kb += perZoom[z]*w; }); });
-  return { count:urls.length, mb: kb/1024, urls };
+  let kb=0, count=0;
+  layers.forEach(name=>{
+    const b=tileSourceOf(name); if(!b) return;
+    const n=packTiles(area, Math.min(zmax, b.max)).length, w=PACK_TILE_KB[name]||15;
+    count += n; kb += n*w;
+  });
+  return { count, mb: kb/1024, urls: packTileUrls(area, zmax, layers) };
 }
 
 // Service Worker への依頼（保存・計測・削除）。返事を待つ
@@ -5864,8 +5954,12 @@ function allMaps(){ return [MAP, ENVMAP, OMAP].filter(Boolean); }
    crossOrigin を付けないと画像が「中身を見ない」応答になり、Service Worker が
    タイルをキャッシュできず、圏外で背景地図が出なくなる（地理院タイルはCORS対応済み）。
    地理院タイルは18までしか無い。そこから先は引き伸ばして寄れるようにする */
-function gsiTileLayer(b, extra){
-  return L.tileLayer(b.url, Object.assign({maxZoom:MAP_MAX_ZOOM, maxNativeZoom:b.max, crossOrigin:'anonymous'}, extra||{}));
+function gsiTileLayer(b, extra, noCors){
+  const opt = Object.assign({maxZoom:MAP_MAX_ZOOM, maxNativeZoom:b.max, crossOrigin:'anonymous'}, extra||{});
+  // 利用者が入れた URL の地図は crossOrigin を付けない（CORS の返事を返さない配信元だと、付けると表示できない）。
+  // その代わり、Service Worker の保存と、上の段のタイルを切り出す補完は効かない
+  if(noCors) delete opt.crossOrigin;
+  return L.tileLayer(b.url, opt);
 }
 function applyBaseMap(map, name){
   if(!map) return;
@@ -5883,12 +5977,26 @@ function applyBaseMap(map, name){
 /* 上に重ねる地図（v32）。地理院の地形図（または淡色地図）を、ドローン写真や航空写真の上に
    「乗算」で重ねる（QGIS の混合モードと同じ）。白い地は透けて、線と文字だけが見える。
    ドローン写真(250) の上、線や印(400) の下の専用パネルに置く */
-function mapOverName(){ const n = prefs().map_over; return (n && BASEMAPS[n]) ? n : 'なし'; }
+function mapOverName(){ const n = prefs().map_over; return (n && (OVERMAPS[n] || n === OVERMAP_URL)) ? n : 'なし'; }
+function mapOverOpacityName(){ const n = prefs().map_over_opacity; return ORTHO_OPACITY[n] ? n : '濃い'; }
+/* 利用者が入れたタイルの URL。{z} {x} {y} がそろった https のものだけ */
+function mapOverUrlOk(u){ return /^https:\/\/\S+$/.test(u||'') && /\{z\}/.test(u) && /\{x\}/.test(u) && /\{y\}/.test(u); }
+function mapOverUrl(){ const u = String(prefs().map_over_url||'').trim(); return mapOverUrlOk(u) ? u : ''; }
+/* いま重ねる地図のタイル元。無ければ null（「なし」、URL が未設定、基図と同じ地図） */
+function mapOverSource(){
+  const name = mapOverName();
+  if(name === 'なし') return null;
+  const b = name === OVERMAP_URL ? (mapOverUrl() ? {url:mapOverUrl(), max:18} : null) : OVERMAPS[name];
+  if(!b) return null;
+  const base = BASEMAPS[baseMapName()];
+  if(base && base.url === b.url) return null;   // 基図と同じものを重ねても意味がない
+  return b;
+}
 function applyMapOver(map){
   if(!map || typeof L === 'undefined' || !L.tileLayer) return;
   if(map._overLayer){ try{ map.removeLayer(map._overLayer); }catch(e){} map._overLayer = null; }
-  const name = mapOverName();
-  if(name === 'なし' || name === baseMapName()) return;   // 基図と同じものを重ねても意味がない
+  const b = mapOverSource();
+  if(!b) return;
   let pane = null;
   try{ pane = map.getPane('mapover'); }catch(e){ pane = null; }
   if(!pane){
@@ -5898,21 +6006,35 @@ function applyMapOver(map){
     pane.style.pointerEvents = 'none';
     pane.style.mixBlendMode = 'multiply';
   }
-  const b = BASEMAPS[name];
+  const custom = mapOverName() === OVERMAP_URL;
   try{
-    map._overLayer = gsiTileLayer(b, {pane:'mapover'}).addTo(map);
-    // 基図と同じく、タイルが無ければ（圏外で保存していない段など）上の段のタイルを切り出して埋める
-    map._overLayer.on('tileerror', ev=>{
+    map._overLayer = gsiTileLayer(b, {pane:'mapover', opacity:ORTHO_OPACITY[mapOverOpacityName()]}, custom).addTo(map);
+    // 基図と同じく、タイルが無ければ（圏外で保存していない段など）上の段のタイルを切り出して埋める。
+    // 利用者の URL は crossOrigin 無しで読むので canvas に切り出せず、補完は付けない
+    if(!custom) map._overLayer.on('tileerror', ev=>{
       try{ tileErrorFill(ev.tile, ev.coords, b.url, 1); }catch(e){}
     });
   }catch(e){ console.error(e); map._overLayer = null; }
 }
 function setMapOver(name){
   if(!name) name = 'なし';   // segVal は「なし」を '' で返す
-  if(!(name === 'なし' || BASEMAPS[name])) return;
+  if(!(name === 'なし' || OVERMAPS[name] || name === OVERMAP_URL)) return;
   prefSet('map_over', name);
   allMaps().forEach(applyMapOver);
-  if(name !== 'なし' && name === baseMapName()) toast(`基図が「${name}」のときは重ねません（航空写真などに切り替えると出ます）`);
+  if(name === OVERMAP_URL && !mapOverUrl()) toast('タイルの URL（https://…/{z}/{x}/{y}.png の形）を入れてください');
+  else if(name !== 'なし' && !mapOverSource()) toast(`基図が「${baseMapName()}」のときは重ねません（航空写真などに切り替えると出ます）`);
+}
+function setMapOverUrl(u){
+  u = String(u||'').trim();
+  if(u && !mapOverUrlOk(u)){ toast('URL は https で始まり、{z} {x} {y} を含む形にしてください'); return false; }
+  prefSet('map_over_url', u);
+  allMaps().forEach(applyMapOver);
+  return true;
+}
+function setMapOverOpacity(name){
+  if(!ORTHO_OPACITY[name]) return;
+  prefSet('map_over_opacity', name);
+  allMaps().forEach(m=>{ if(m._overLayer){ try{ m._overLayer.setOpacity(ORTHO_OPACITY[name]); }catch(e){} } });
 }
 function switchBaseMap(btn, name){
   if(!BASEMAPS[name]) return;
@@ -6339,7 +6461,10 @@ SCREENS.offlineMap = (sv)=>{
       <div class="seg" data-segmulti="omapLayers">
         ${Object.keys(BASEMAPS).map(n=>`<button type="button" class="${n===cur?'on':''}"
           onclick="pickSegMulti(this,'offlineEstimate')">${esc(n)}</button>`).join('')}
+        ${Object.keys(OVERMAPS).filter(n=>!BASEMAPS[n]).map(n=>`<button type="button" class="${n===mapOverName()?'on':''}"
+          onclick="pickSegMulti(this,'offlineEstimate')">${esc(n)}</button>`).join('')}
       </div>
+      <div class="tiny muted">上に重ねる地図（白地図〜治水地形分類図）も一緒に保存できます。利用者が入れた URL の地図は保存できません。</div>
       <div class="sect">細かさ（拡大の上限）</div>
       <label class="field"><span class="lab">これ以上は保存しません（枚数を抑えるため）</span>
         ${segHtml('omapZoom', ['z14（通りが見える）','z15（州・瀬淵）','z16（産卵床を置ける）'],
@@ -6386,16 +6511,25 @@ SCREENS.orthos = ()=>{
         北が上で、EPSG:3857（Webメルカトル）で書き出したもの。大きさは長辺 ${ORTHO_MAX_PX}px まで。
         写真の外側を透明にしたいときは WebP か PNG（作り方は PC 側の手引き docs/ドローン写真の用意.md）。
       </div></div>
+      <label class="field"><span class="lab">取り込むときに、写真の外側の白を透明にする</span>
+        <div onclick="setTimeout(()=>orthoSetAlpha(segVal('orthoAlpha')),0)">${segHtml('orthoAlpha', Object.keys(ORTHO_ALPHA_OPTS), orthoAlphaName())}</div></label>
+      <div class="tiny muted">縁から白でつながっている部分だけを透明にします（写真の中の白い屋根は残る）。
+        1枚あたり1〜2秒かかり、保存は大きくなります（1枚 10MB 前後）。もう透明になっている写真はそのまま。</div>
       <input type="file" id="fOrthoIn" multiple style="display:none" onchange="orthoImport(this)">
       <button class="btn primary" onclick="document.getElementById('fOrthoIn').click()">取り込む（画像＋ワールドファイル、何組でも）</button>
       <div class="sect">地図での見え方</div>
       <label class="field"><span class="lab">透過</span>
         <div onclick="setTimeout(()=>orthoSetOpacity(segVal('orthoOpacity')),0)">${segHtml('orthoOpacity', Object.keys(ORTHO_OPACITY), orthoOpacityName())}</div></label>
       <div class="tiny muted">出す／消すは、地図の上の「ドローン写真」ボタンで切り替えます（いまは「${orthoShown()?'出す':'消す'}」）。</div>
-      <label class="field"><span class="lab">上に重ねる地図</span>
-        <div onclick="setTimeout(()=>setMapOver(segVal('mapOver')),0)">${segHtml('mapOver', ['なし','地形図','淡色地図'], mapOverName())}</div></label>
-      <div class="tiny muted">地理院の地図を、ドローン写真や航空写真の上に「乗算」で重ねます（白い地は透け、線と文字だけが見える）。
-        基図が同じ地図のときは重ねません。圏外で使うなら、オフライン地図の保存で重ねる地図も一緒に保存しておきます。</div>
+      <div class="sect">上に重ねる地図</div>
+      <label class="field"><span class="lab">種類</span>
+        <div onclick="setTimeout(()=>setMapOver(segVal('mapOver')),0)">${segHtml('mapOver', ['なし'].concat(Object.keys(OVERMAPS), [OVERMAP_URL]), mapOverName())}</div></label>
+      <label class="field"><span class="lab">URL（「URL」を選んだとき。https://…/{z}/{x}/{y}.png の形）</span>
+        <input id="fMapOverUrl" type="url" inputmode="url" value="${esc(String(prefs().map_over_url||''))}" placeholder="https://cyberjapandata.gsi.go.jp/xyz/ort/{z}/{x}/{y}.jpg" onchange="setMapOverUrl(this.value)"></label>
+      <label class="field"><span class="lab">濃さ</span>
+        <div onclick="setTimeout(()=>setMapOverOpacity(segVal('mapOverOpacity')),0)">${segHtml('mapOverOpacity', Object.keys(ORTHO_OPACITY), mapOverOpacityName())}</div></label>
+      <div class="tiny muted">地理院の地図を、ドローン写真や航空写真の上に「乗算」で重ねます（白い地は透け、線と文字だけが見える。陰影起伏図なら地形の凹凸が写真に乗る）。
+        基図と同じ地図のときは重ねません。圏外で使うなら、オフライン地図の保存で重ねる地図も一緒に保存しておきます（URL の地図は保存できません）。</div>
       ${list.length ? `<div class="sect">取り込み済み（${list.length}）</div>${cards}` : '<div class="empty">まだありません。</div>'}
       <div class="tiny muted">バックアップには入りません（PC に元があるため）。端末を変えたら入れ直してください。</div>`
   };
