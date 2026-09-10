@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v33';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v34';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-10';
-const APP_NOTE = 'ドローン写真の外側の白を、取り込むときにアプリで透明にできます（ドローン写真の画面のスイッチ）。'
-  + '上に重ねる地図は、陰影起伏図・傾斜量図・色別標高図・治水地形分類図・白地図と、好きなタイルの URL から選べ、濃さも変えられます';
+const APP_NOTE = 'ドローン写真を選んでまとめて削除できます（ドローン写真の画面の「選んでまとめて削除」）。'
+  + 'v33: 取り込むときにアプリで外側の白を透明に／上に重ねる地図を7種＋URL＋濃さから';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -597,6 +597,7 @@ async function orthoReload(){
   const list = recs.map(orthoMeta).filter(Boolean)
     .sort((x,y)=> String(x.added_at).localeCompare(String(y.added_at)));
   ORTHO_LIST = list;
+  orthoSelPrune();   // 別のタブが消した写真を「選んだ印」から外す
   return { list, recs };
 }
 /* ワールドファイル（6行: A D B E C F）。回転（D・B）があれば null。
@@ -1081,16 +1082,65 @@ function orthoSetOpacity(name){
 async function orthoDelete(id){
   const o = ORTHO_LIST.find(x=>x && x.id===id); if(!o) return false;
   if(!confirm(`「${o.name||'ドローン写真'}」を消します。よろしいですか？`)) return false;
+  const ok = await orthoDeleteOne(id);
+  if(!ok) toast('消せませんでした');
+  await orthoAfterDelete();
+  return ok;
+}
+/* 1枚を正本から消す（確認・読み直し・描き直しはしない。まとめて消すときに何度も回すため） */
+async function orthoDeleteOne(id){
   ORTHO_GONE[id] = true;
   try{ await PhotoDB.del(id); }
-  catch(e){ delete ORTHO_GONE[id]; toast('消せませんでした'); return false; }
+  catch(e){ delete ORTHO_GONE[id]; return false; }
   allMaps().forEach(m=>orthoRemoveFrom(m, id));
   orthoDropUrl(id);
-  try{ await orthoReload(); }catch(e){ console.error(e); }
-  orthoNotify();
-  render();
   return true;
 }
+async function orthoAfterDelete(){
+  try{ await orthoReload(); }catch(e){ console.error(e); }
+  orthoNotify();
+  // 消している間に別の画面（入力中）へ移っていたら、その画面は描き直さない（入力を消さないため）
+  orthoSyncButtons();
+  orthoRefreshScreen();
+}
+/* 選んでまとめて消す（v34）。選んだ印は「ドローン写真」の画面を開いている間だけ持つ（正本には書かない）。
+   別の画面へ移ると消え（render で見張る）、別のタブが消した写真は写しの読み直しで外れる */
+let ORTHO_SEL = new Set(), ORTHO_SEL_MODE = false;
+function orthoSelIds(){ return Array.from(ORTHO_SEL); }
+function orthoSelReset(){ ORTHO_SEL = new Set(); ORTHO_SEL_MODE = false; }
+function orthoSelPrune(){ const alive = new Set(ORTHO_LIST.filter(Boolean).map(o=>o.id)); ORTHO_SEL = new Set(orthoSelIds().filter(id=>alive.has(id))); }
+/* 写真ごとのボタン・チェック欄・カードの押下。id は HTML の属性（data-ortho-id）で持ち、
+   onclick の JavaScript には埋めない（引用符を含む id でも壊れない）。document に1つだけ登録する */
+function orthoOnClick(ev){
+  const t = ev && ev.target; if(!t || typeof t.closest !== 'function') return;
+  const el = t.closest('[data-ortho-act]'); if(!el) return;
+  const act = el.getAttribute('data-ortho-act'), id = el.getAttribute('data-ortho-id') || '';
+  if(act === 'toggle'){ if(ev.stopPropagation) ev.stopPropagation(); orthoSelToggle(id); }
+  else if(act === 'del'){ if(ev.stopPropagation) ev.stopPropagation(); orthoDelete(id); }
+}
+function orthoSelSetMode(on){ ORTHO_SEL_MODE = !!on; if(!on) ORTHO_SEL = new Set(); render(); }
+function orthoSelToggle(id){
+  if(!ORTHO_SEL_MODE) return;
+  if(ORTHO_SEL.has(id)) ORTHO_SEL.delete(id); else if(ORTHO_LIST.some(o=>o && o.id===id)) ORTHO_SEL.add(id);
+  render();
+}
+function orthoSelAll(on){
+  ORTHO_SEL = new Set(on ? ORTHO_LIST.filter(Boolean).map(o=>o.id) : []);
+  render();
+}
+async function orthoDeleteMany(ids){
+  ids = (ids||[]).filter(id=>ORTHO_LIST.some(o=>o && o.id===id));
+  if(!ids.length){ toast('消す写真を選んでください'); return false; }
+  if(!confirm(`選んだ ${ids.length}枚を消します。よろしいですか？`)) return false;
+  let ok = 0, ng = 0;
+  for(const id of ids){ if(await orthoDeleteOne(id)) ok++; else ng++; }   // 1枚が消せなくても残りは消す
+  ORTHO_SEL = new Set(); ORTHO_SEL_MODE = false;
+  await orthoAfterDelete();
+  if(ng) alert(`${ok}枚を消しました。${ng}枚は消せませんでした（もう一度試してください）`);
+  else toast(`${ok}枚を消しました`);
+  return !ng;
+}
+function orthoSelDelete(){ return orthoDeleteMany(orthoSelIds()); }
 
 /* ============================================================
    選択肢マスタ
@@ -1164,6 +1214,8 @@ function reset(name,arg){ if(!envFlushOk()) return; STACK=[{name:name||'home',ar
 
 function render(){
   SCREEN_SEQ++;
+  // ドローン写真の「選んだ印」は、その画面にいる間だけ
+  if(!(STACK.length && STACK[STACK.length-1].name === 'orthos')) orthoSelReset();
   destroyMap();          // 前の画面の地図を残さない（画面の中身を入れ替えるため）
   closeEnvMap();
   closeOfflineMap();
@@ -6487,12 +6539,15 @@ SCREENS.offlineMap = (sv)=>{
    仕組み（正本・取り込み・重ねる）は写真の節の直後にある */
 SCREENS.orthos = ()=>{
   const list = orthoList();
+  const sel = ORTHO_SEL_MODE, nSel = orthoSelIds().length;
   const cards = list.map(o=>{
     const b = o.bounds || {};
     const wm = o.broken ? '' : distMeters([b.s,b.w],[b.s,b.e]), hm = o.broken ? '' : distMeters([b.s,b.w],[b.n,b.w]);
-    return `<div class="card">
-      <div class="row"><div class="grow"><b>${esc(o.name||'ドローン写真')}</b></div>
-        <button class="btn ghost small" style="width:auto" onclick="orthoDelete('${esc(o.id)}')">削除</button></div>
+    const on = ORTHO_SEL.has(o.id), idAttr = `data-ortho-id="${esc(o.id)}"`;
+    return `<div class="card${sel?' tap':''}"${sel?` data-ortho-act="toggle" ${idAttr}`:''}>
+      <div class="row">${sel?`<input type="checkbox" style="width:22px; height:22px" ${on?'checked':''} data-ortho-act="toggle" ${idAttr}>`:''}
+        <div class="grow"><b>${esc(o.name||'ドローン写真')}</b></div>
+        ${sel?'':`<button class="btn ghost small" style="width:auto" data-ortho-act="del" ${idAttr}>削除</button>`}</div>
       ${o.broken ? '<div class="tiny pctwarn">壊れています（削除して入れ直してください）</div>' : `
       <div class="small muted" style="margin-top:6px">
         ${fmtDist(wm)} × ${fmtDist(hm)} ／ ${esc(o.w)}×${esc(o.h)}px${o.shrunk?'（縮めて保存）':''}
@@ -6530,7 +6585,15 @@ SCREENS.orthos = ()=>{
         <div onclick="setTimeout(()=>setMapOverOpacity(segVal('mapOverOpacity')),0)">${segHtml('mapOverOpacity', Object.keys(ORTHO_OPACITY), mapOverOpacityName())}</div></label>
       <div class="tiny muted">地理院の地図を、ドローン写真や航空写真の上に「乗算」で重ねます（白い地は透け、線と文字だけが見える。陰影起伏図なら地形の凹凸が写真に乗る）。
         基図と同じ地図のときは重ねません。圏外で使うなら、オフライン地図の保存で重ねる地図も一緒に保存しておきます（URL の地図は保存できません）。</div>
-      ${list.length ? `<div class="sect">取り込み済み（${list.length}）</div>${cards}` : '<div class="empty">まだありません。</div>'}
+      ${list.length ? `<div class="sect">取り込み済み（${list.length}）</div>
+      ${sel ? `<div class="row" style="gap:6px; flex-wrap:wrap; margin-bottom:8px">
+          <button class="btn ghost small" style="width:auto" onclick="orthoSelAll(true)">すべて選ぶ</button>
+          <button class="btn ghost small" style="width:auto" onclick="orthoSelAll(false)">選択を外す</button>
+          <button class="btn small" style="width:auto" ${nSel?'':'disabled'} onclick="orthoSelDelete()">選んだ ${nSel}枚を削除</button>
+          <button class="btn ghost small" style="width:auto" onclick="orthoSelSetMode(false)">やめる</button></div>
+        <div class="tiny muted">写真を押すと選べます。</div>`
+        : `<button class="btn ghost small" style="width:auto; margin-bottom:8px" onclick="orthoSelSetMode(true)">選んでまとめて削除</button>`}
+      ${cards}` : '<div class="empty">まだありません。</div>'}
       <div class="tiny muted">バックアップには入りません（PC に元があるため）。端末を変えたら入れ直してください。</div>`
   };
 };
@@ -7812,6 +7875,7 @@ function migrateOldReddDrafts(){
   if(moved) setTimeout(()=>toast(`前の版の書きかけ ${moved}件を、記録として取り込みました`), 300);
   try{ PhotoDB.gc(); }catch(e){}   // どこからも使われなくなった写真を片付ける
   try{ orthoChannel(); orthoPreload().catch(e=>console.error(e)); }catch(e){}   // ドローン写真を読んで、地図に重ねられるようにする（別のタブの変更も受ける）
+  try{ document.addEventListener('click', orthoOnClick); }catch(e){}            // ドローン写真の一覧の押下（選ぶ・消す）を1か所で受ける
   // 保存領域を消されにくくする（写真やタイルを抱えるため）
   try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{}); }catch(e){}
   if('serviceWorker' in navigator && location.protocol!=='file:'){
