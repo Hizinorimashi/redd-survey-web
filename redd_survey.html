@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v30';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v31';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-09';
-const APP_NOTE = 'PC（QGIS）で位置合わせしたドローン写真を取り込んで、地図に重ねられます'
-  + '（ホームの「ドローン写真」から。地図の上のボタンで出す／消す）';
+const APP_DATE = '2026-09-10';
+const APP_NOTE = 'ドローン写真を何組でもまとめて取り込めます（画像と .jgw を全部選ぶ）。'
+  + '地図には、見えている範囲の写真だけ（6枚まで）重ねます。引きすぎた地図では出ません';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -731,57 +731,138 @@ async function orthoPrepare(file){
   if(!blob) throw tooBig;
   return {blob, w, h, shrunk:true};
 }
-/* 取り込み。画像1つ＋ワールドファイル1つを同時に選ぶ（同じ名前のもの）。
+/* 取り込み。画像とワールドファイルを同じ名前の組にして、何組でもまとめて選べる（v31）。
    file input に accept を付けない（iPhone では .pgw が選べなくなる）ので、中身で仕分ける。
-   書くのは正本の1レコードだけ（途中で失敗しても、半端なものは残らない） */
-async function orthoImport(input){
-  const files = Array.from((input && input.files) || []);
-  if(input) input.value = '';
-  const imgs = files.filter(orthoIsImage), others = files.filter(f=>!orthoIsImage(f));
-  if(imgs.length !== 1 || others.length !== 1){
-    alert('画像（PNG/JPG）とワールドファイル（.pgw/.jgw/.wld）の2つを一緒に選んでください'); return false;
+   組にならないファイルが1つでもあれば、何も取り込まずに断る（選び間違いに気づけるように）。
+   組ごとに正本の1レコードを書く（途中で失敗しても、半端なものは残らない） */
+function orthoPairUp(files){
+  // 名前を鍵にするので Map を使う（{} だと constructor / toString のような名前が「もうある」と誤る）
+  const imgs = new Map(), wfs = new Map(), badExt = [], dup = [];
+  files.forEach(f=>{
+    const name = String((f && f.name)||''), base = orthoBaseName(name);
+    if(orthoIsImage(f)){ if(imgs.has(base)) dup.push(name); else imgs.set(base, f); return; }
+    if(!ORTHO_WORLD_EXT.test(name)){ badExt.push(name); return; }
+    if(wfs.has(base)) dup.push(name); else wfs.set(base, f);
+  });
+  const pairs = [], odd = [];
+  imgs.forEach((f, b)=>{ if(wfs.has(b)) pairs.push({img:f, wfile:wfs.get(b)}); else odd.push(f.name||''); });
+  wfs.forEach((f, b)=>{ if(!imgs.has(b)) odd.push(f.name||''); });
+  return { pairs, odd, dup, badExt, nImg:imgs.size, nWf:wfs.size };
+}
+/* 選んだファイルの組み合わせが悪いときの断り文（良ければ ''）。
+   2つ以下（1組ぶん）のときは v30 と同じ文。3つ以上（まとめて）のときは、どれが余っているかを挙げる */
+function orthoPairProblem(files, p){
+  const q = s=>`「${s}」`;
+  if(files.length <= 2){
+    const imgs = files.filter(orthoIsImage), others = files.filter(f=>!orthoIsImage(f));
+    if(imgs.length !== 1 || others.length !== 1) return '画像（PNG/JPG）とワールドファイル（.pgw/.jgw/.wld）の2つを一緒に選んでください';
+    const img = imgs[0], wfile = others[0];
+    if(!ORTHO_WORLD_EXT.test(wfile.name||'')) return `ワールドファイルは .pgw / .jgw / .wld です（選んだのは「${wfile.name||''}」）`;
+    if(orthoBaseName(img.name) !== orthoBaseName(wfile.name)){
+      return `画像とワールドファイルの名前が違います（「${img.name||''}」と「${wfile.name||''}」）。`
+        + 'a.png と a.pgw のように、同じ名前の組を選んでください';
+    }
+    return '';
   }
-  const img = imgs[0], wfile = others[0];
-  if(!ORTHO_WORLD_EXT.test(wfile.name||'')){
-    alert(`ワールドファイルは .pgw / .jgw / .wld です（選んだのは「${wfile.name||''}」）`); return false;
-  }
-  if(orthoBaseName(img.name) !== orthoBaseName(wfile.name)){
-    alert(`画像とワールドファイルの名前が違います（「${img.name||''}」と「${wfile.name||''}」）。`
-      + 'a.png と a.pgw のように、同じ名前の組を選んでください'); return false;
-  }
+  if(p.badExt.length) return `画像でもワールドファイル（.pgw / .jgw / .wld）でもないものが混じっています（${p.badExt.map(q).join('')}）。外して選び直してください。何も取り込んでいません`;
+  if(p.dup.length) return `同じ名前の画像（またはワールドファイル）が複数あります（${p.dup.map(q).join('')}）。どちらか一方を外してください。何も取り込んでいません`;
+  if(!p.nImg || !p.nWf) return '画像（PNG/JPG）とワールドファイル（.pgw/.jgw/.wld）を両方選んでください（a.png と a.pgw のように同じ名前の組。何組でもまとめて選べます）';
+  if(p.odd.length) return `組になっていないものがあります（${p.odd.map(q).join('')}）。画像とワールドファイルは a.png と a.pgw のように同じ名前の組で選んでください。何も取り込んでいません`;
+  return '';
+}
+/* 1組を読んで正本に書く。失敗は {ok:false, why} で返す（断り文はまとめて出す） */
+async function orthoImportOne(img, wfile){
   let wf = null;
   try{ wf = parseWorldFile(await wfile.text()); }catch(e){ wf = null; }
-  if(!wf){ alert('ワールドファイルを読めませんでした。北が上（回転なし）の6行の数字であることを確かめてください'); return false; }
+  if(!wf) return { ok:false, why:'ワールドファイルを読めませんでした。北が上（回転なし）の6行の数字であることを確かめてください' };
   if(orthoIsDegrees(wf)){
-    alert('緯度経度（EPSG:4326）のままの画像は使えません。QGIS で EPSG:3857（Webメルカトル）に直して書き出してください'); return false;
+    return { ok:false, why:'緯度経度（EPSG:4326）のままの画像は使えません。QGIS で EPSG:3857（Webメルカトル）に直して書き出してください' };
   }
-  toast('読み込んでいます…');
   let prep = null;
   try{ prep = await orthoPrepare(img); }
-  catch(e){ alert(e && e.message ? e.message : '画像を読めませんでした'); return false; }
+  catch(e){ return { ok:false, why:(e && e.message ? e.message : '画像を読めませんでした') }; }
   const bounds = orthoBoundsOf(wf, prep.w, prep.h);
   const why = orthoBoundsCheck(bounds);
-  if(why){ alert(why); return false; }
+  if(why) return { ok:false, why };
   const id = uuid();
   const ext = prep.blob.type === 'image/png' || /\.png$/i.test(img.name||'') ? 'png' : 'jpg';
   const rec = { id, kind:'ortho', blob:prep.blob, ext, size:prep.blob.size, type:prep.blob.type||'',
                 name:String(img.name||'').replace(/\.[^.]+$/,''), bounds, w:prep.w, h:prep.h,
                 shrunk:!!prep.shrunk, added_at:nowISO() };
   try{ await PhotoDB.put(rec); }
-  catch(e){ alert('保存できませんでした（端末の空き容量を確かめてください）'); return false; }
+  catch(e){ return { ok:false, why:'保存できませんでした（端末の空き容量を確かめてください）' }; }
   if(!ORTHO_URLS[id]){ try{ ORTHO_URLS[id] = URL.createObjectURL(prep.blob); }catch(e){ console.error(e); } }
-  try{ await orthoReload(); }catch(e){ console.error(e); }
-  orthoNotify();
-  allMaps().forEach(applyOrthos);
-  toast(prep.shrunk ? '取り込みました（大きかったので縮めました）' : '取り込みました');
-  render();
-  return true;
+  return { ok:true, shrunk:!!prep.shrunk };
+}
+let ORTHO_BUSY = false;   // 取り込み中（重ねて始めると進み具合と知らせが混ざり、同じ写真を二重に入れやすい）
+async function orthoImport(input){
+  const files = Array.from((input && input.files) || []);
+  if(input) input.value = '';
+  if(ORTHO_BUSY){ toast('取り込み中です。終わるまでお待ちください'); return false; }
+  const p = orthoPairUp(files);
+  const problem = orthoPairProblem(files, p);
+  if(problem){ alert(problem); return false; }
+  ORTHO_BUSY = true;
+  const n = p.pairs.length, fails = [];
+  let ok = 0, shrunk = false;
+  try{
+    for(let i = 0; i < n; i++){
+      toast(n > 1 ? `読み込んでいます…（${i+1}/${n}）` : '読み込んでいます…');
+      const r = await orthoImportOne(p.pairs[i].img, p.pairs[i].wfile);
+      if(r.ok){ ok++; shrunk = shrunk || r.shrunk; }
+      else fails.push({ name:p.pairs[i].img.name||'', why:r.why });
+    }
+    if(ok){
+      try{ await orthoReload(); }catch(e){ console.error(e); }
+      orthoNotify();
+      allMaps().forEach(applyOrthos);
+    }
+  }finally{ ORTHO_BUSY = false; }
+  if(fails.length){
+    if(n === 1) alert(fails[0].why);
+    else alert(`${ok}枚を取り込み、${fails.length}枚は取り込めませんでした：\n` + fails.map(f=>`・${f.name}：${f.why}`).join('\n'));
+  }else{
+    const note = shrunk ? '（大きかったので縮めました）' : '';
+    toast(n === 1 ? `取り込みました${note}` : `${n}枚を取り込みました${note}`);
+  }
+  if(ok) render();
+  return !fails.length;
 }
 function orthoShown(){ return prefs().ortho_show !== false; }
 function orthoOpacityName(){ const n = prefs().ortho_opacity; return ORTHO_OPACITY[n] ? n : '濃い'; }
 function orthoOpacity(){ return ORTHO_OPACITY[orthoOpacityName()]; }
-/* 地図に重ねる。地図を作るたび（applyBaseMap）に呼ばれるので、地図×画像ごとに「まだ無いものだけ」足す。
+/* 地図に重ねる。地図を作るたび（applyBaseMap）と、地図を動かすたびに呼ばれる。
+   重ねるのは「いま見えている範囲とその周り（縦横それぞれ画面1つぶん）」に掛かる写真だけ（v31）。
+   長辺 4096px の写真は展開すると1枚 64MB になるので、20枚をすべて重ねるとスマホのメモリが足りない。
+   範囲から外れたものは外す（画像の実体は正本と表示用URLに残るので、戻れば即また重なる）。
    専用パネルをタイルと同じ親（回る地図では回転パネル）に作り、タイル(200)と線(400)の間に置く */
+const ORTHO_VIEW_PAD = 0.5;   // 見えている範囲の外側に、縦横それぞれ画面半分ぶんまで重ねておく（回る地図でも切れない）
+const ORTHO_MIN_ZOOM = 14;    // これより引いた地図には重ねない（1枚が数百px以下になり読めないのに、展開の重さは同じ）
+function orthoZoomLow(map){
+  try{ const z = map.getZoom(); return typeof z === 'number' && z < ORTHO_MIN_ZOOM; }catch(e){ return false; }
+}
+function orthoViewOf(map){
+  try{
+    const b = map.getBounds().pad(ORTHO_VIEW_PAD);
+    return { s:b.getSouth(), w:b.getWest(), n:b.getNorth(), e:b.getEast() };
+  }catch(e){ return null; }   // 大きさの決まっていない地図など。分からなければ全部重ねる（v30 と同じ）
+}
+function orthoInView(b, v){
+  if(!b) return false;
+  if(!v) return true;
+  return !(b.n < v.s || b.s > v.n || b.e < v.w || b.w > v.e);
+}
+/* 同時に重ねる枚数の上限。同じ場所を何枚も覆っているときは、画面の中心に近いものから */
+const ORTHO_MAX_ACTIVE = 6;
+function orthoCenterOf(map){
+  try{ const c = map.getCenter(); return (c && typeof c.lat === 'number') ? {lat:c.lat, lng:c.lng} : null; }catch(e){ return null; }
+}
+function orthoPickNearest(list, center, max){
+  if(list.length <= max) return list.slice();
+  if(!center) return list.slice(0, max);
+  const d = o=>{ const b = o.bounds; const la = (b.s+b.n)/2 - center.lat, lo = ((b.w+b.e)/2 - center.lng) * Math.cos(center.lat*Math.PI/180); return la*la + lo*lo; };
+  return list.map((o,i)=>({o, i, d:d(o)})).sort((a,b)=>a.d - b.d || a.i - b.i).slice(0, max).map(x=>x.o);
+}
 function applyOrthos(map){
   if(!map || typeof L === 'undefined' || !L.imageOverlay) return;
   if(!orthoShown()) return;
@@ -793,13 +874,23 @@ function applyOrthos(map){
     pane.style.zIndex = '250';
     pane.style.pointerEvents = 'none';
   }
+  if(!map._orthoHooked){
+    // 動かしている最中に何度も入れ替えないよう、止まってから少し待つ（産卵床の描き直しと同じ）
+    map._orthoHooked = true;
+    let t = null;
+    const later = ()=>{ if(t) clearTimeout(t); t = setTimeout(()=>{ t=null; applyOrthos(map); }, 200); };
+    try{ map.on('moveend resize', later); }catch(e){ console.error(e); }
+  }
   map._orthoLayers = map._orthoLayers || {};
-  ORTHO_LIST.forEach(o=>{
-    if(!o || o.broken || !o.bounds) return;
-    const url = ORTHO_URLS[o.id];
-    if(!url || map._orthoLayers[o.id]) return;
+  const view = orthoViewOf(map), low = orthoZoomLow(map);
+  let want = low ? [] : ORTHO_LIST.filter(o=>o && !o.broken && o.bounds && ORTHO_URLS[o.id] && orthoInView(o.bounds, view));
+  want = orthoPickNearest(want, orthoCenterOf(map), ORTHO_MAX_ACTIVE);
+  const keep = new Set(want.map(o=>o.id));
+  Object.keys(map._orthoLayers).forEach(id=>{ if(!keep.has(id)) orthoRemoveFrom(map, id); });
+  want.forEach(o=>{
+    if(map._orthoLayers[o.id]) return;
     try{
-      map._orthoLayers[o.id] = L.imageOverlay(url, [[o.bounds.s, o.bounds.w],[o.bounds.n, o.bounds.e]],
+      map._orthoLayers[o.id] = L.imageOverlay(ORTHO_URLS[o.id], [[o.bounds.s, o.bounds.w],[o.bounds.n, o.bounds.e]],
         {pane:'ortho', opacity:orthoOpacity(), interactive:false}).addTo(map);
     }catch(e){ console.error(e); }
   });
@@ -871,6 +962,8 @@ function orthoToggle(){
   prefSet('ortho_show', !orthoShown());
   allMaps().forEach(m=>{ if(orthoShown()) applyOrthos(m); else orthoRemoveAll(m); });
   $$('button[data-ortho]').forEach(b=>b.classList.toggle('on', orthoShown()));
+  // 引きすぎた地図では重ねないので、「出す」にしたのに何も出ないと思わせない
+  if(orthoShown() && allMaps().some(orthoZoomLow)) toast('ドローン写真は、地図をもう少し拡大すると出ます');
 }
 function orthoSetOpacity(name){
   if(!ORTHO_OPACITY[name]) return;
@@ -6225,12 +6318,13 @@ SCREENS.orthos = ()=>{
       <div class="card"><div class="small">
         PC（QGIS）で位置合わせした写真を、地図に重ねます。<br>
         画像（PNG/JPG）と一緒に書き出されるワールドファイル（.pgw / .jgw / .wld）を、
-        <b>画像と2つ同時に選んで</b>ください（a.png と a.pgw のように同じ名前の組）。<br>
+        <b>画像と2つ同時に選んで</b>ください（a.png と a.pgw のように同じ名前の組）。
+        組が何枚あっても<b>まとめて選べます</b>（1枚ずつ繰り返さなくてよい）。<br>
         北が上で、EPSG:3857（Webメルカトル）で書き出したもの。大きさは長辺 ${ORTHO_MAX_PX}px まで。
         作り方は PC 側の手引き（docs/ドローン写真の用意.md）にあります。
       </div></div>
       <input type="file" id="fOrthoIn" multiple style="display:none" onchange="orthoImport(this)">
-      <button class="btn primary" onclick="document.getElementById('fOrthoIn').click()">取り込む（画像＋ワールドファイル）</button>
+      <button class="btn primary" onclick="document.getElementById('fOrthoIn').click()">取り込む（画像＋ワールドファイル、何組でも）</button>
       <div class="sect">地図での見え方</div>
       <label class="field"><span class="lab">透過</span>
         <div onclick="setTimeout(()=>orthoSetOpacity(segVal('orthoOpacity')),0)">${segHtml('orthoOpacity', Object.keys(ORTHO_OPACITY), orthoOpacityName())}</div></label>
