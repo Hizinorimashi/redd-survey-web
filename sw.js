@@ -1,4 +1,4 @@
-const CACHE = 'redd-survey-v34';
+const CACHE = 'redd-survey-v36';
 // 必須資産（これが揃わないとアプリが成立しない）。install時に全部揃わなければ失敗させ、不完全キャッシュで有効化しない
 const CORE = [
   './redd_survey.html',
@@ -58,7 +58,7 @@ self.addEventListener('activate', e => {
   self.clients.claim();
 });
 
-function isTile(url){ return url.includes('cyberjapandata.gsi.go.jp'); }
+function isTile(url){ try{ return new URL(url).hostname === 'cyberjapandata.gsi.go.jp'; }catch(e){ return false; } }   // 地理院の host だけ（文字列を含むだけの別 host は違う）
 // 静的ベンダ資産（更新頻度が低い）はキャッシュ優先で、圏外でも即表示・毎回の再取得を避ける
 function isStaticVendor(url){
   return url.endsWith('/leaflet.js') || url.endsWith('/leaflet.css') ||

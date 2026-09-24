@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v34';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v36';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-10';
-const APP_NOTE = 'ドローン写真を選んでまとめて削除できます（ドローン写真の画面の「選んでまとめて削除」）。'
-  + 'v33: 取り込むときにアプリで外側の白を透明に／上に重ねる地図を7種＋URL＋濃さから';
+const APP_DATE = '2026-09-24';
+const APP_NOTE = '写真の欄を入力欄の先頭へ（産卵床・物理環境）／地図の下の産卵床・物理環境の一覧を折りたためる／'
+  + 'アプリの中でカメラを開いて連続で撮る';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -457,39 +457,56 @@ async function pickPhotos(input){
   const files = Array.from(input.files||[]);
   input.value='';
   if(!files.length) return;
+  await addPhotoFiles(files);
+}
+/* 写真（File か Blob）を縮めて保存し、いま開いている記録に付ける。
+   端末から選んだときも、アプリの中のカメラで撮ったときも、ここを通す。
+   expectedMark … 付け先の印を外から渡す（カメラは「撮った瞬間」の印を渡す。順番待ちの間に
+   別の記録へ移っていたら、移った先には付けない）。省略すれば、いま開いている記録
+   戻り値は付けられた枚数。別の記録へ移っていて付けなかったときは -1 */
+async function addPhotoFiles(files, expectedMark){
+  if(!files || !files.length) return 0;
   // 縮小には時間がかかる。始めたときの持ち主を覚えておき、
   // 戻ってきたときに別の記録へ移っていたら、そちらの写真の並びには触らない
   // （触ると、Aで撮った写真がBに付いてしまう）
-  const mark = envFormMark();
+  const mark = expectedMark || envFormMark();
   const owner = mark.uuid;
+  if(expectedMark && !envFormSame(mark)){ toast('別の記録へ移ったので、写真は付けませんでした'); return -1; }
   toast('写真を取り込んでいます…');
   // 途中で画面に足すと、2枚目の縮小中に切り替えたとき
   // 1枚目だけがどこにも付かず迷子になる。全部そろってから一度に足す
   const done = [];
   let ok=0, ng=0;
-  const moved = ()=>{ toast('別の記録へ移ったので、写真は付けませんでした'); };
+  const moved = ()=>{ toast('別の記録へ移ったので、写真は付けませんでした'); return -1; };
   for(const f of files){
     try{
       const blob = await shrinkImage(f);
       // もう別の記録へ移っていれば、書き込みもしない
-      if(!envFormSame(mark)){ moved(); return; }
+      if(!envFormSame(mark)) return moved();
       const ext = blobExt(blob);
       const id = uuid();
       await PhotoDB.put({ id, blob, ext, size:blob.size, added_at:nowISO() });
       // 実体は残るが参照は付けない。使われなければ gc が片付ける
-      if(!envFormSame(mark)){ moved(); return; }
+      if(!envFormSame(mark)) return moved();
       done.push({ id, ext, size:blob.size });
       ok++;
     }catch(e){ console.error(e); ng++; }
   }
-  if(!envFormSame(mark)){ moved(); return; }
-  if(!done.length){ if(ng) alert('写真を保存できませんでした（端末の空き容量を確認してください）'); return; }
+  if(!envFormSame(mark)) return moved();
+  if(!done.length){ if(ng) alert('写真を保存できませんでした（端末の空き容量を確認してください）'); return 0; }
   SCREENS._photos = (SCREENS._photos||[]).concat(done);
   renderPhotoPanel();
-  // 縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける
-  envPhotoTouch(owner);
+  // 縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける。
+  // 記録に書けなかった（端末の空き容量切れ）ときは「付いた」と言わない。
+  // 写真は画面の並びに残り、envPhotoTouch が知らせを出して、次に触ったときに付け直す
+  if(!envPhotoTouch(owner)){
+    // 写真そのものを保存できなかった分は、別に知らせる（記録に書けなかった知らせとは別の話）
+    if(ng) alert(`${ng}枚は写真そのものを保存できませんでした（端末の空き容量を確認してください）`);
+    return 0;
+  }
   if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（端末の空き容量を確認してください）`);
   else toast(ok+'枚を追加しました');
+  return ok;
 }
 // 実際の中身に合った拡張子を付ける。中身がPNGなのに .jpg だと開けないソフトがある
 function blobExt(blob){
@@ -553,8 +570,128 @@ async function renderPhotoPanel(){
 function photoPanelHtml(){
   return `<input type="file" id="fPhotoIn" accept="image/*" capture="environment" multiple
             style="display:none" onchange="pickPhotos(this)">
-    <button class="btn" onclick="document.getElementById('fPhotoIn').click()">写真を追加（カメラ／端末から）</button>
+    <div class="btn-grid">
+      <button class="btn" onclick="document.getElementById('fPhotoIn').click()">写真を追加（カメラ／端末から）</button>
+      <button class="btn" onclick="camOpen()">連続で撮る</button>
+    </div>
     <div class="mediagrid" id="photoGrid"></div>`;
+}
+
+/* ---------- 連続で撮る（v36） ----------
+   端末のカメラへ行くと1枚ごとに入力画面へ戻されるので、アプリの中でカメラを開き、
+   「撮る」を押すたびに保存する。付け先は端末から選んだときと同じ（addPhotoFiles）。
+   カメラの画面は #main の外（body 直下）に置くので、入力欄の描き直しに巻き込まれない。
+   - 付け先は「撮った瞬間」に決める（保存は順番待ちなので、待つ間に別の記録へ移っても移った先には付けない）
+   - 押した瞬間に JPEG へ圧縮して画素を手放す（未圧縮のまま順番待ちに抱えない）。抱える上限も置く
+   - 開く要求には番号を付け、許可待ちの間に閉じた／隠れたら、届いた映像は使わず止める */
+let CAM = null;          // { stream, box, count }
+let CAM_GEN = 0;         // 開く要求の番号。閉じる・隠れるたびに進めて、古い要求の結果を捨てる
+let CAM_QUEUE = Promise.resolve();   // 保存は撮った順に1枚ずつ
+let CAM_PENDING = 0;     // 写し取ったが、まだ記録に付いていない枚数
+const CAM_PENDING_MAX = 4;
+function camSupported(){
+  return !!(typeof navigator!=='undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+function camState(){ return CAM ? { count: CAM.count, pending: CAM_PENDING } : null; }
+function camHidden(){
+  return typeof document!=='undefined' && document.visibilityState === 'hidden';
+}
+async function camOpen(){
+  if(CAM) return false;
+  if(!camSupported()){
+    toast('この端末では連続撮影が使えません。「写真を追加」で1枚ずつ撮ってください');
+    return false;
+  }
+  const gen = ++CAM_GEN;
+  let stream = null;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1920 }, height:{ ideal:1440 } },
+      audio:false });
+  }catch(e){
+    if(gen === CAM_GEN) toast('カメラを使えませんでした。設定でカメラの許可を確かめてください');
+    return false;
+  }
+  // 許可を待つ間に、閉じられた・画面が隠れた・別の要求が始まった・もう開いている。
+  // 届いた映像は使わずに止める（止めないとカメラが点いたままになる）
+  if(gen !== CAM_GEN || CAM || camHidden()){
+    try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    return false;
+  }
+  const box = document.createElement('div');
+  box.id = 'camBox';
+  box.innerHTML = `
+    <div style="position:fixed; inset:0; z-index:1900; background:#000; display:flex; flex-direction:column">
+      <div id="camCount" style="padding:calc(10px + env(safe-area-inset-top)) 14px 10px; color:#fff;
+        text-align:center; font-weight:700">まだ0枚</div>
+      <video id="camVideo" autoplay playsinline muted
+        style="flex:1; min-height:0; width:100%; object-fit:contain; background:#000"></video>
+      <div class="row" style="padding:12px 14px calc(12px + env(safe-area-inset-bottom)); background:#000">
+        <button class="btn ghost" style="width:auto; color:#fff; border-color:#777"
+          onclick="camClose()">終わる</button>
+        <div class="grow"></div>
+        <button class="btn primary big" id="camShot" style="width:auto; padding:14px 30px"
+          onclick="camShot()">撮る</button>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+  CAM = { stream, box, count:0 };
+  const v = $('#camVideo');
+  if(v){ try{ v.srcObject = stream; }catch(e){} try{ const p=v.play&&v.play(); if(p&&p.catch) p.catch(()=>{}); }catch(e){} }
+  return true;
+}
+/* 閉じる。許可待ちの要求も無効にする。順番待ちの保存はそのまま続く（写真は撮った時の記録に付く） */
+function camClose(){
+  CAM_GEN++;
+  if(!CAM) return;
+  const c = CAM; CAM = null;
+  const v = $('#camVideo');
+  try{ if(v){ if(v.pause) v.pause(); v.srcObject = null; } }catch(e){}
+  try{ c.stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  try{ if(c.box && c.box.remove) c.box.remove(); else if(c.box) document.body.removeChild(c.box); }catch(e){}
+  if(c.count) toast(`${c.count}枚 撮りました`);
+}
+/* 「撮る」。押した瞬間の映像を写し取り、付け先（いま開いている記録）もその瞬間に決める。
+   JPEG への圧縮はすぐ始め、保存だけを撮った順に並べる。戻り値は「その1枚が記録に付いたか」 */
+function camShot(){
+  if(!CAM) return Promise.resolve(false);
+  if(CAM_PENDING >= CAM_PENDING_MAX){
+    toast('保存しています。少し待ってから撮ってください');
+    return Promise.resolve(false);
+  }
+  const v = $('#camVideo');
+  const w = v ? v.videoWidth : 0, h = v ? v.videoHeight : 0;
+  if(!w || !h){ toast('カメラの映像がまだ出ていません'); return Promise.resolve(false); }
+  let c = null;
+  try{
+    // 保存するのは長辺 1600px（端末から選んだ写真と同じ大きさ）
+    const scale = Math.min(1, 1600/Math.max(w, h));
+    const cw = Math.max(1, Math.round(w*scale)), ch = Math.max(1, Math.round(h*scale));
+    c = document.createElement('canvas'); c.width = cw; c.height = ch;
+    c.getContext('2d').drawImage(v, 0, 0, cw, ch);
+  }catch(e){ console.error(e); toast('写真を写し取れませんでした'); return Promise.resolve(false); }
+  const mark = envFormMark();   // 付け先は、押した瞬間の記録
+  const session = CAM;          // 枚数を数える相手も、押した瞬間のカメラ
+  CAM_PENDING++;
+  const blobP = new Promise(r=>{ try{ c.toBlob(b=>r(b||null), 'image/jpeg', 0.85); }catch(e){ r(null); } })
+    .then(b=>{ try{ c.width = 0; c.height = 0; }catch(e){} return b; });   // 画素を手放す
+  const p = CAM_QUEUE.then(()=>blobP).then(blob=>camStore(blob, mark, session));
+  CAM_QUEUE = p.then(()=>{ CAM_PENDING--; }, ()=>{ CAM_PENDING--; });
+  return p;
+}
+async function camStore(blob, mark, session){
+  let n = 0;
+  try{
+    if(!blob) throw new Error('camera: no image');
+    n = await addPhotoFiles([blob], mark);
+  }catch(e){ console.error(e); toast('写真を保存できませんでした'); n = 0; }
+  // 数えるのは、撮ったときのカメラがまだ開いているときだけ
+  // （閉じて開き直した新しいカメラの枚数に、前の分を足さない）
+  if(n > 0 && CAM && CAM === session){
+    CAM.count += n;
+    const cnt = $('#camCount'); if(cnt) cnt.textContent = `${CAM.count}枚 撮りました`;
+  }
+  return n > 0;
 }
 
 /* ============================================================
@@ -589,16 +726,30 @@ function orthoMeta(rec){
   if(!rec || rec.kind !== 'ortho' || typeof rec.id !== 'string' || !rec.id) return null;
   const broken = !orthoValid(rec);
   return { id:rec.id, broken, name:rec.name||'', bounds:rec.bounds||null, w:rec.w, h:rec.h,
+           rw:(rec.rw > 0 ? rec.rw : null), rh:(rec.rh > 0 ? rec.rh : null),   // 保存した実体の画素数（v35〜。無ければ w/h と shrunk から見積もる）
            size:rec.size||0, type:rec.type||'', shrunk:!!rec.shrunk, added_at:rec.added_at||'' };
 }
+/* 展開したときの画素数（メモリの見積もり用）。実体の画素数が分かればそれ、無ければ
+   縮めて保存したものは長辺 4096 として見積もる（v34 以前の記録） */
+function orthoRasterPx(o){
+  if(!o) return 0;
+  if(o.rw > 0 && o.rh > 0) return o.rw*o.rh;
+  const w = o.w > 0 ? o.w : 0, h = o.h > 0 ? o.h : 0;
+  if(!w || !h) return 0;
+  if(o.shrunk && Math.max(w,h) > ORTHO_MAX_PX){ const k = ORTHO_MAX_PX/Math.max(w,h); return Math.round(w*k)*Math.round(h*k); }
+  return w*h;
+}
 /* 正本から読み直す。読めなければ前の写しを残す（空と取り違えて「無い」と見せない） */
+let ORTHO_RELOAD_GEN = 0;   // 読み直しの世代。古い読み直しが後から終わっても、新しい写しを上書きしない
 async function orthoReload(){
+  const gen = ++ORTHO_RELOAD_GEN;
   const recs = (await PhotoDB.byKind('ortho')) || [];   // 現場写真の実体は読まない
   const list = recs.map(orthoMeta).filter(Boolean)
     .sort((x,y)=> String(x.added_at).localeCompare(String(y.added_at)));
+  if(gen !== ORTHO_RELOAD_GEN) return { list, recs, stale:true };   // もっと新しい読み直しが始まっている
   ORTHO_LIST = list;
   orthoSelPrune();   // 別のタブが消した写真を「選んだ印」から外す
-  return { list, recs };
+  return { list, recs, stale:false };
 }
 /* ワールドファイル（6行: A D B E C F）。回転（D・B）があれば null。
    BOM・CRLF・末尾の空行は許す。A は正、E は負（北が上） */
@@ -727,7 +878,7 @@ async function orthoPrepare(file){
     // そのまま保存する前に、展開できる画像であることを確かめる（先頭だけ残った壊れた画像を弾く）。
     // 長辺が上限以下なら総画素数も安全な範囲なので、ここで展開してよい
     if(!(await orthoCanDecode(file))) throw new Error('画像が壊れているか、この端末では開けません');
-    return {blob:file, w, h, shrunk:false};
+    return {blob:file, w, h, rw:w, rh:h, shrunk:false};
   }
   const k = ORTHO_MAX_PX / Math.max(w,h);
   const tw = Math.max(1, Math.round(w*k)), th = Math.max(1, Math.round(h*k));
@@ -750,9 +901,12 @@ async function orthoPrepare(file){
     cv.getContext('2d').drawImage(srcImg, 0, 0, tw, th);
     blob = await new Promise(res=>cv.toBlob(res, type, 0.85));
   }catch(e){ blob = null; }
-  if(srcImg && srcImg.close) srcImg.close();
+  finally{
+    if(srcImg && srcImg.close){ try{ srcImg.close(); }catch(e){} }
+    cv.width = 0; cv.height = 0;   // 大きなキャンバスはすぐ手放す（次の1枚の展開に響かないように）
+  }
   if(!blob) throw tooBig;
-  return {blob, w, h, shrunk:true};
+  return {blob, w, h, rw:tw, rh:th, shrunk:true};
 }
 /* 取り込み。画像とワールドファイルを同じ名前の組にして、何組でもまとめて選べる（v31）。
    file input に accept を付けない（iPhone では .pgw が選べなくなる）ので、中身で仕分ける。
@@ -778,7 +932,7 @@ function orthoPairProblem(files, p){
   const q = s=>`「${s}」`;
   if(files.length <= 2){
     const imgs = files.filter(orthoIsImage), others = files.filter(f=>!orthoIsImage(f));
-    if(imgs.length !== 1 || others.length !== 1) return '画像（PNG/JPG）とワールドファイル（.pgw/.jgw/.wld）の2つを一緒に選んでください';
+    if(imgs.length !== 1 || others.length !== 1) return '画像（PNG/JPG/WebP）とワールドファイル（.pgw/.jgw/.wld）の2つを一緒に選んでください';
     const img = imgs[0], wfile = others[0];
     if(!ORTHO_WORLD_EXT.test(wfile.name||'')) return `ワールドファイルは .pgw / .jgw / .wld です（選んだのは「${wfile.name||''}」）`;
     if(orthoBaseName(img.name) !== orthoBaseName(wfile.name)){
@@ -789,7 +943,7 @@ function orthoPairProblem(files, p){
   }
   if(p.badExt.length) return `画像でもワールドファイル（.pgw / .jgw / .wld）でもないものが混じっています（${p.badExt.map(q).join('')}）。外して選び直してください。何も取り込んでいません`;
   if(p.dup.length) return `同じ名前の画像（またはワールドファイル）が複数あります（${p.dup.map(q).join('')}）。どちらか一方を外してください。何も取り込んでいません`;
-  if(!p.nImg || !p.nWf) return '画像（PNG/JPG）とワールドファイル（.pgw/.jgw/.wld）を両方選んでください（a.png と a.pgw のように同じ名前の組。何組でもまとめて選べます）';
+  if(!p.nImg || !p.nWf) return '画像（PNG/JPG/WebP）とワールドファイル（.pgw/.jgw/.wld）を両方選んでください（a.png と a.pgw のように同じ名前の組。何組でもまとめて選べます）';
   if(p.odd.length) return `組になっていないものがあります（${p.odd.map(q).join('')}）。画像とワールドファイルは a.png と a.pgw のように同じ名前の組で選んでください。何も取り込んでいません`;
   return '';
 }
@@ -841,27 +995,31 @@ async function orthoAlphaEdges(prep){
   let src = null;
   if(typeof createImageBitmap === 'function'){ try{ src = await createImageBitmap(prep.blob); }catch(e){ src = null; } }
   if(!src) src = await orthoLoadImage(prep.blob);
-  let cv = null, ctx = null, cw = 0, ch = 0;
+  let cv = null, blob = null, cw = 0, ch = 0;
   try{
     cw = src.width || src.naturalWidth; ch = src.height || src.naturalHeight;
     if(!(cw > 0 && ch > 0) || cw*ch > ORTHO_SAFE_PX) throw new Error('透明にするには大きすぎます');
     cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
-    ctx = cv.getContext('2d');
+    const ctx = cv.getContext('2d');
     ctx.drawImage(src, 0, 0, cw, ch);
+    // 展開した画像は描き終えたらすぐ手放す（メモリ。次の1枚の展開に響かないように）
+    if(src.close){ try{ src.close(); }catch(e){} }
+    src = null;
+    const id = ctx.getImageData(0, 0, cw, ch);
+    const n = orthoAlphaFill(id.data, cw, ch);
+    if(!n) return Object.assign({}, prep, {alpha:'skip'});   // 白い縁が無い（もう透明、など）→ 作り直さない
+    ctx.putImageData(id, 0, 0);
+    // WebP で書ける端末（Android）は WebP、書けない端末（iPhone）は PNG になる
+    blob = await new Promise(res=>cv.toBlob(res, 'image/webp', 0.85));
+    if(!blob || blob.type !== 'image/webp') blob = await new Promise(res=>cv.toBlob(res, 'image/png'));
   }finally{
-    // 展開した画像は成功でも失敗でも早めに手放す（メモリ。次の1枚の展開に響かないように）
+    // 成功でも失敗でも（作れなかった・描けなかった・読めなかった）大きなものはすぐ手放す
     if(src && src.close){ try{ src.close(); }catch(e){} }
     src = null;
+    if(cv){ cv.width = 0; cv.height = 0; }
   }
-  const id = ctx.getImageData(0, 0, cw, ch);
-  const n = orthoAlphaFill(id.data, cw, ch);
-  if(!n) return Object.assign({}, prep, {alpha:'skip'});   // 白い縁が無い（もう透明、など）→ 作り直さない
-  ctx.putImageData(id, 0, 0);
-  // WebP で書ける端末（Android）は WebP、書けない端末（iPhone）は PNG になる
-  let blob = await new Promise(res=>cv.toBlob(res, 'image/webp', 0.85));
-  if(!blob || blob.type !== 'image/webp') blob = await new Promise(res=>cv.toBlob(res, 'image/png'));
   if(!blob) throw new Error('透明にした画像を作れませんでした');
-  return {blob, w:prep.w, h:prep.h, shrunk:prep.shrunk, alpha:'done'};
+  return {blob, w:prep.w, h:prep.h, rw:cw, rh:ch, shrunk:prep.shrunk, alpha:'done'};
 }
 /* 1組を読んで正本に書く。失敗は {ok:false, why} で返す（断り文はまとめて出す） */
 async function orthoImportOne(img, wfile){
@@ -890,10 +1048,14 @@ async function orthoImportOne(img, wfile){
             : /\.webp$/i.test(nm) ? 'webp' : /\.png$/i.test(nm) ? 'png' : 'jpg';
   const rec = { id, kind:'ortho', blob:prep.blob, ext, size:prep.blob.size, type:prep.blob.type||'',
                 name:String(img.name||'').replace(/\.[^.]+$/,''), bounds, w:prep.w, h:prep.h,
+                rw:(prep.rw > 0 ? prep.rw : null), rh:(prep.rh > 0 ? prep.rh : null),
                 shrunk:!!prep.shrunk, alpha:alpha === 'done', added_at:nowISO() };
   try{ await PhotoDB.put(rec); }
   catch(e){ return { ok:false, why:'保存できませんでした（端末の空き容量を確かめてください）' }; }
   if(!ORTHO_URLS[id]){ try{ ORTHO_URLS[id] = URL.createObjectURL(prep.blob); }catch(e){ console.error(e); } }
+  // 正本に書けたら、写しにもその場で足す（あとの読み直しが失敗しても、一覧と地図に出るように）
+  const meta = orthoMeta(rec);
+  if(meta) ORTHO_LIST = ORTHO_LIST.filter(o=>o && o.id !== id).concat([meta]);
   return { ok:true, shrunk:!!prep.shrunk, alpha };
 }
 let ORTHO_BUSY = false;   // 取り込み中（重ねて始めると進み具合と知らせが混ざり、同じ写真を二重に入れやすい）
@@ -905,6 +1067,7 @@ async function orthoImport(input){
   const problem = orthoPairProblem(files, p);
   if(problem){ alert(problem); return false; }
   ORTHO_BUSY = true;
+  allMaps().forEach(applyOrthos);   // 取り込み中は重ねている写真を外す（展開・透明化のメモリと重ならないように）
   const n = p.pairs.length, fails = [];
   let ok = 0, shrunk = false, alphaNg = 0;
   try{
@@ -914,12 +1077,10 @@ async function orthoImport(input){
       if(r.ok){ ok++; shrunk = shrunk || r.shrunk; if(r.alpha === 'ng') alphaNg++; }
       else fails.push({ name:p.pairs[i].img.name||'', why:r.why });
     }
-    if(ok){
-      try{ await orthoReload(); }catch(e){ console.error(e); }
-      orthoNotify();
-      allMaps().forEach(applyOrthos);
-    }
   }finally{ ORTHO_BUSY = false; }
+  // 写し・表示用URL・地図・画面をひとまとめに合わせ直す（読み直しが失敗しても、上で足した分は残る）
+  if(ok){ await orthoResync(); orthoNotify(); }
+  else allMaps().forEach(applyOrthos);   // 外していた写真を戻す
   const alphaNote = alphaNg ? `${alphaNg}枚は透明にできず、そのまま入れました（端末のメモリ不足かもしれません。PC の道具で透明にしてから入れ直せます）` : '';
   if(fails.length){
     if(n === 1) alert(fails[0].why);
@@ -930,7 +1091,6 @@ async function orthoImport(input){
     const note = shrunk ? '（大きかったので縮めました）' : '';
     toast(n === 1 ? `取り込みました${note}` : `${n}枚を取り込みました${note}`);
   }
-  if(ok) render();
   return !fails.length;
 }
 function orthoShown(){ return prefs().ortho_show !== false; }
@@ -957,16 +1117,29 @@ function orthoInView(b, v){
   if(!v) return true;
   return !(b.n < v.s || b.s > v.n || b.e < v.w || b.w > v.e);
 }
-/* 同時に重ねる枚数の上限。同じ場所を何枚も覆っているときは、画面の中心に近いものから */
+/* 同時に重ねる量の上限。枚数（6枚）に加えて、展開後の画素数の合計（幅×高さ）でも抑える。
+   1枚 4096×4096 は展開すると 64MB なので、合計 4000万画素（約160MB）まで。
+   同じ場所を何枚も覆っているときは、画面の中心に近いものから。最低1枚は重ねる */
 const ORTHO_MAX_ACTIVE = 6;
+const ORTHO_ACTIVE_PX = 40e6;
 function orthoCenterOf(map){
   try{ const c = map.getCenter(); return (c && typeof c.lat === 'number') ? {lat:c.lat, lng:c.lng} : null; }catch(e){ return null; }
 }
-function orthoPickNearest(list, center, max){
-  if(list.length <= max) return list.slice();
-  if(!center) return list.slice(0, max);
-  const d = o=>{ const b = o.bounds; const la = (b.s+b.n)/2 - center.lat, lo = ((b.w+b.e)/2 - center.lng) * Math.cos(center.lat*Math.PI/180); return la*la + lo*lo; };
-  return list.map((o,i)=>({o, i, d:d(o)})).sort((a,b)=>a.d - b.d || a.i - b.i).slice(0, max).map(x=>x.o);
+function orthoPickNearest(list, center, max, maxPx){
+  maxPx = maxPx == null ? ORTHO_ACTIVE_PX : maxPx;
+  let order = list.slice();
+  if(center){
+    const d = o=>{ const b = o.bounds; const la = (b.s+b.n)/2 - center.lat, lo = ((b.w+b.e)/2 - center.lng) * Math.cos(center.lat*Math.PI/180); return la*la + lo*lo; };
+    order = list.map((o,i)=>({o, i, d:d(o)})).sort((a,b)=>a.d - b.d || a.i - b.i).map(x=>x.o);
+  }
+  const out = []; let px = 0;
+  for(const o of order){
+    if(out.length >= max) break;
+    const p = orthoRasterPx(o);   // 展開したときの画素数（縮めて保存したものは縮めた後）
+    if(out.length && px + p > maxPx) break;
+    out.push(o); px += p;
+  }
+  return out;
 }
 function applyOrthos(map){
   if(!map || typeof L === 'undefined' || !L.imageOverlay) return;
@@ -988,7 +1161,8 @@ function applyOrthos(map){
   }
   map._orthoLayers = map._orthoLayers || {};
   const view = orthoViewOf(map), low = orthoZoomLow(map);
-  let want = low ? [] : ORTHO_LIST.filter(o=>o && !o.broken && o.bounds && ORTHO_URLS[o.id] && orthoInView(o.bounds, view));
+  // 取り込み中（展開・透明化でメモリを使う）は重ねない。終わったら applyOrthos で戻る
+  let want = (low || ORTHO_BUSY) ? [] : ORTHO_LIST.filter(o=>o && !o.broken && o.bounds && ORTHO_URLS[o.id] && orthoInView(o.bounds, view));
   want = orthoPickNearest(want, orthoCenterOf(map), ORTHO_MAX_ACTIVE);
   const keep = new Set(want.map(o=>o.id));
   Object.keys(map._orthoLayers).forEach(id=>{ if(!keep.has(id)) orthoRemoveFrom(map, id); });
@@ -1018,7 +1192,8 @@ function orthoDropUrl(id){
    読んでいる間に消されたもの（ORTHO_GONE）には URL を作らない */
 async function orthoPreload(){
   let r = null;
-  try{ r = await orthoReload(); }catch(e){ console.error(e); return; }
+  try{ r = await orthoReload(); }catch(e){ console.error(e); return false; }
+  if(r.stale) return true;   // 新しい読み直しが走っている。そちらが URL・地図・画面まで合わせる
   r.recs.forEach(rec=>{
     if(ORTHO_GONE[rec.id] || ORTHO_URLS[rec.id] || !orthoValid(rec)) return;
     // 1件が作れなくても、残りの読み込み・片付け・同期は続ける
@@ -1032,6 +1207,7 @@ async function orthoPreload(){
   });
   orthoSyncButtons();
   orthoRefreshScreen();
+  return true;
 }
 /* 開いている地図の「ドローン写真」ボタンを写しにそろえる（別のタブで最初の1枚が増えた・最後の1枚が消えたとき）。
    地図の画面を丸ごと描き直すと入力中の内容を壊すので、ボタンだけ足す・外す */
@@ -1094,14 +1270,26 @@ async function orthoDeleteOne(id){
   catch(e){ delete ORTHO_GONE[id]; return false; }
   allMaps().forEach(m=>orthoRemoveFrom(m, id));
   orthoDropUrl(id);
+  // 正本から消せたら、写しからもその場で外す（あとの読み直しが失敗しても一覧に残らないように）
+  ORTHO_LIST = ORTHO_LIST.filter(o=>o && o.id !== id);
+  ORTHO_SEL.delete(id);
   return true;
 }
 async function orthoAfterDelete(){
-  try{ await orthoReload(); }catch(e){ console.error(e); }
+  await orthoResync();
   orthoNotify();
-  // 消している間に別の画面（入力中）へ移っていたら、その画面は描き直さない（入力を消さないため）
-  orthoSyncButtons();
-  orthoRefreshScreen();
+}
+/* 足した・消したあとの合わせ直し。正本を読み直し、足りない表示用URLを作り、消えたものの URL と地図の重ねを外し、
+   home／orthos を開いていれば描き直す（入力中の画面は触らない）。読み直せなければ、その場で更新した写しのまま
+   地図とボタンだけ合わせる */
+async function orthoResync(){
+  let done = false;
+  try{ done = await orthoPreload(); }catch(e){ console.error(e); }
+  if(!done){
+    allMaps().forEach(applyOrthos);
+    orthoSyncButtons();
+    orthoRefreshScreen();
+  }
 }
 /* 選んでまとめて消す（v34）。選んだ印は「ドローン写真」の画面を開いている間だけ持つ（正本には書かない）。
    別の画面へ移ると消え（render で見張る）、別のタブが消した写真は写しの読み直しで外れる */
@@ -1328,7 +1516,8 @@ SCREENS.home = ()=>{
           電波の届くところで行ってください。</div>
       </div>
       <div class="tiny muted" style="margin-top:10px; text-align:center">
-        記録はこの端末の中だけに保存されます。外部へ自動送信しません。
+        記録はこの端末の中だけに保存されます。記録の中身や写真を外部へ自動送信することはありません
+        （地図を見ている間は、表示している範囲が地図タイルの取得のため国土地理院、または自分で指定した配信先へ送られます）。
       </div>`
   };
 };
@@ -2077,6 +2266,7 @@ function reddName(r){
 /* ---------- 産卵床の入力欄。地図の下でも、記録の画面でも、ここ1か所で作る ----------
    2か所に持つと、欄を1つ足したとき片方だけ直す事故が起きる（v19で実際に起きた）。
    opt.fold … よく使うもの以外を「詳しく入れる」の折りたたみに入れる（地図の下）
+   写真は先頭（v36）。現場では置いてすぐ撮るので、下まで送らずに撮れるようにする
    取り出しは collectReddForm() ひとつ。欄が1か所なので、取り出しも1か所で足りる */
 function reddFormHtml(r, sv, opt){
   const o = opt || {};
@@ -2086,6 +2276,9 @@ function reddFormHtml(r, sv, opt){
 
   // よく使うもの。ここは折りたたまず、いつも出す
   const head = `
+      <div class="sect">写真</div>
+      ${photoPanelHtml()}
+
       <div class="sect">この記録は何ですか（いくつでも選べます）</div>
       ${segMultiHtml('target', OPT.target, recordTargets(r), 'onTargetChange')}
       <div class="tiny muted" style="margin-top:6px">
@@ -2195,9 +2388,6 @@ function reddFormHtml(r, sv, opt){
         <label class="field"><span class="lab">行動</span>${segHtml('behavior', OPT.behavior, r.behavior, true)}</label>
       </div>
 
-      <div class="sect">写真</div>
-      ${photoPanelHtml()}
-
       <div class="sect">その他</div>
       <label class="field"><span class="lab">メモ</span>
         <textarea id="fNote">${esc(r.note||'')}</textarea></label>
@@ -2207,7 +2397,7 @@ function reddFormHtml(r, sv, opt){
 
   return o.fold
     ? head + foldHtml('rddetail', '詳しく入れる',
-        '<span class="tiny muted">規模・区間・位置・測点・底質・水温・写真・メモ</span>', detail)
+        '<span class="tiny muted">規模・区間・位置・測点・底質・水温・メモ</span>', detail)
     : head + detail;
 }
 
@@ -3197,6 +3387,10 @@ function envItemFormHtml(cur, sv, opt){
             onclick="envDelete('${cur.uuid}')">消す</button>
         </div>
 
+        <div class="sect">写真</div>
+        ${photoPanelHtml()}
+        <div class="sp"></div>
+
         ${foldHtml('envfix', kind==='M' ? '時刻を直す' : '位置と時刻を直す', '', 位置欄
           + (kind==='L' ? `<div class="row" style="margin-top:6px">
               <div class="grow"><div class="small muted">曲がり</div>
@@ -3291,11 +3485,6 @@ function envItemFormHtml(cur, sv, opt){
         <label class="field" style="margin-top:8px"><span class="lab">メモ</span>
           <textarea id="ev_memo" rows="2">${esc(g('memo'))}</textarea></label>
         <div id="ev_err"></div>
-      </div>
-
-      <div class="card">
-        <div class="sect" style="margin-top:0">写真</div>
-        ${photoPanelHtml()}
       </div>
     </div>
     <div class="tiny muted" id="ev_saved">入れたそばから、自動で保存されます。</div>
@@ -3981,6 +4170,13 @@ function reddChipsHtml(svUuid){
       onclick="reddPick('${r.uuid}','${svUuid}')">${esc(reddName(r))}${reddEmpty(r)?'…':''}</button>`;
   }).join('');
 }
+/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残しが分かる（v36） */
+function reddFoldHeadHtml(svUuid){
+  const all = DB.reddsOf(svUuid);
+  const empty = all.filter(reddEmpty).length;
+  return `${all.length}件`
+    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : (all.length ? '　ぜんぶ入りました' : ''));
+}
 function reddHeadHtml(svUuid){
   const all = DB.reddsOf(svUuid);
   const empty = all.filter(reddEmpty).length;
@@ -3988,11 +4184,6 @@ function reddHeadHtml(svUuid){
   const reaches = DB.reachesOf(svUuid);
   const opt = (v, t)=>`<option value="${esc(v)}"${REDD_FILTER.reach===v?' selected':''}>${esc(t)}</option>`;
   return `
-    <div class="row" style="margin-bottom:6px">
-      <div class="grow">産卵床 ${all.length}件
-        ${empty ? `　<b>まだ入れていない ${empty}件</b>`
-                : (all.length ? '　ぜんぶ入りました' : '')}</div>
-    </div>
     <div class="row">
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
         onclick="reddFilterToggle('empty','${svUuid}')">${REDD_FILTER.empty?'絞り込みをやめる':`まだ入れていないものだけ（${empty}）`}</button>
@@ -4493,6 +4684,8 @@ function reddChipSync(svUuid){
   if(list) list.innerHTML = reddChipsHtml(svUuid);
   const head = $('#reddHead');
   if(head) head.innerHTML = reddHeadHtml(svUuid);
+  const fh = $('#reddFoldHead');
+  if(fh) fh.innerHTML = reddFoldHeadHtml(svUuid);
   reddKeepFormPlace(top);
 }
 /* 入力欄の先頭が画面のどこにあるか（測れなければ null） */
@@ -4632,17 +4825,16 @@ SCREENS.envMap = (argStr)=>{
       <div class="tiny muted" id="envGps"></div>
       <div id="envPending"></div>
 
-      <div class="card">
+      ${foldHtml('reddchips', '産卵床',
+        `<span class="tiny muted" id="reddFoldHead" style="margin-left:8px">${reddFoldHeadHtml(svUuid)}</span>`, `
         <div id="reddHead">${reddHeadHtml(svUuid)}</div>
         <div class="seg" id="reddChips">${reddChipsHtml(svUuid)}</div>
         ${redds.length ? '' :
-          '<div class="tiny muted">まだありません。地図の左下の産卵床の印を押してから、地図をタップしてください。</div>'}
-      </div>
+          '<div class="tiny muted">まだありません。地図の左下の産卵床の印を押してから、地図をタップしてください。</div>'}`,
+        true)}
 
-      <div class="card">
-        <div class="row" style="margin-bottom:6px">
-          <div class="grow">物理環境 ${list.length}件</div>
-        </div>
+      ${foldHtml('envchips', '物理環境',
+        `<span class="tiny muted" style="margin-left:8px">${list.length}件</span>`, `
         ${list.length
           ? `<div class="seg" data-seg="envsel">${list.map(chip).join('')}</div>
              ${envPickOn() ? `
@@ -4653,8 +4845,8 @@ SCREENS.envMap = (argStr)=>{
                  選んでいるあいだは、新しく置けません。</div>`
              : `<button class="btn ghost small" style="width:auto;padding:4px 10px;margin-top:8px"
                  onclick="envPickStart('${svUuid}')">選んで消す</button>`}`
-          : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}
-      </div>
+          : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}`,
+        true)}
 
       <div class="card">
         <div class="sect" style="margin-top:0">メッシュの範囲</div>
@@ -6032,13 +6224,15 @@ function applyBaseMap(map, name){
 function mapOverName(){ const n = prefs().map_over; return (n && (OVERMAPS[n] || n === OVERMAP_URL)) ? n : 'なし'; }
 function mapOverOpacityName(){ const n = prefs().map_over_opacity; return ORTHO_OPACITY[n] ? n : '濃い'; }
 /* 利用者が入れたタイルの URL。{z} {x} {y} がそろった https のものだけ */
-function mapOverUrlOk(u){ return /^https:\/\/\S+$/.test(u||'') && /\{z\}/.test(u) && /\{x\}/.test(u) && /\{y\}/.test(u); }
+function mapOverUrlOk(u){ return /^https:\/\/\S+$/.test(u||'') && !/[\\@]/.test(u) && /\{z\}/.test(u) && /\{x\}/.test(u) && /\{y\}/.test(u) && !!mapOverHost(u); }
 function mapOverUrl(){ const u = String(prefs().map_over_url||'').trim(); return mapOverUrlOk(u) ? u : ''; }
-/* いま重ねる地図のタイル元。無ければ null（「なし」、URL が未設定、基図と同じ地図） */
+/* いま重ねる地図のタイル元。無ければ null（「なし」、URL が未設定、送り先に同意していない、基図と同じ地図）。
+   地図に載せる経路はここだけなので、同意していない送り先へは何も送られない（v34 以前の設定が残っていても） */
 function mapOverSource(){
   const name = mapOverName();
   if(name === 'なし') return null;
-  const b = name === OVERMAP_URL ? (mapOverUrl() ? {url:mapOverUrl(), max:18} : null) : OVERMAPS[name];
+  const u = mapOverUrl();
+  const b = name === OVERMAP_URL ? ((u && mapOverHostOk(mapOverHost(u))) ? {url:u, max:18} : null) : OVERMAPS[name];
   if(!b) return null;
   const base = BASEMAPS[baseMapName()];
   if(base && base.url === b.url) return null;   // 基図と同じものを重ねても意味がない
@@ -6068,17 +6262,51 @@ function applyMapOver(map){
     });
   }catch(e){ console.error(e); map._overLayer = null; }
 }
+/* 地理院以外の送り先を使う前の確認。同意すれば覚える（送り先が変わればまた聞く） */
+function mapOverConsent(host){
+  if(mapOverHostOk(host)) return true;
+  if(!confirm(`地図を見ている間、表示している範囲（現在地や記録のそば）がタイルの座標として「${host}」へ送られます。この送り先を使いますか？`)) return false;
+  prefSet('map_over_url_host', host);
+  return true;
+}
 function setMapOver(name){
   if(!name) name = 'なし';   // segVal は「なし」を '' で返す
   if(!(name === 'なし' || OVERMAPS[name] || name === OVERMAP_URL)) return;
   prefSet('map_over', name);
+  // 保存済みの URL（前の版で入れたものを含む）を使うときも、送り先に同意してからでないと載せない
+  if(name === OVERMAP_URL && mapOverUrl() && !mapOverConsent(mapOverHost(mapOverUrl()))) toast('送り先に同意しなかったので、この地図は重ねません');
   allMaps().forEach(applyMapOver);
   if(name === OVERMAP_URL && !mapOverUrl()) toast('タイルの URL（https://…/{z}/{x}/{y}.png の形）を入れてください');
-  else if(name !== 'なし' && !mapOverSource()) toast(`基図が「${baseMapName()}」のときは重ねません（航空写真などに切り替えると出ます）`);
+  else if(name !== 'なし' && name !== OVERMAP_URL && !mapOverSource()) toast(`基図が「${baseMapName()}」のときは重ねません（航空写真などに切り替えると出ます）`);
 }
+/* URL の送り先（ホスト名）。ブラウザと同じ解釈（new URL）で取る。逆斜線・@・空白を含むものは
+   ブラウザの解釈が見た目と食い違う（https://evil\@gsi… の送り先は evil）ので、受けない */
+function mapOverHost(u){
+  u = String(u||'');
+  if(!/^https:\/\//i.test(u) || /[\\@\s]/.test(u)) return '';
+  // 送り先（https:// から最初の / まで）に {z} {x} {y} のような差し込みは許さない
+  // （ホスト名が座標で変わると、同意した先と違う所へ送ることになる）
+  const auth = /^https:\/\/([^\/?#]*)\//.exec(u);
+  if(!auth || /[{}]/.test(auth[1])) return '';
+  let h = '';
+  try{ const p = new URL(u); if(p.protocol === 'https:') h = String(p.hostname||'').toLowerCase(); }catch(e){ h = ''; }
+  return h;   // URL を読めない環境では ''（＝受けない。安全側）
+}
+/* 送り先への同意。地理院はいつでも可。それ以外は、同意した送り先（prefs.map_over_url_host）と同じときだけ */
+function mapOverHostOk(host){ return !!host && (host === 'cyberjapandata.gsi.go.jp' || host === prefs().map_over_url_host); }
 function setMapOverUrl(u){
   u = String(u||'').trim();
   if(u && !mapOverUrlOk(u)){ toast('URL は https で始まり、{z} {x} {y} を含む形にしてください'); return false; }
+  // 地図を見るたびに「どこを見ているか」（タイルの座標＝現在地や記録のそば）が、その配信先へ送られる。
+  // 地理院以外の送り先は、使う前に確認する（送り先が変わったときだけ）
+  if(u){
+    const host = mapOverHost(u);
+    if(!host){ toast('URL の送り先（ホスト名）を読めませんでした'); return false; }
+    if(!mapOverConsent(host)){
+      const el = $('#fMapOverUrl'); if(el) el.value = mapOverUrl();
+      return false;
+    }
+  }
   prefSet('map_over_url', u);
   allMaps().forEach(applyMapOver);
   return true;
@@ -6511,7 +6739,7 @@ SCREENS.offlineMap = (sv)=>{
 
       <div class="sect">保存する地図の種類</div>
       <div class="seg" data-segmulti="omapLayers">
-        ${Object.keys(BASEMAPS).map(n=>`<button type="button" class="${n===cur?'on':''}"
+        ${Object.keys(BASEMAPS).map(n=>`<button type="button" class="${(n===cur || n===mapOverName())?'on':''}"
           onclick="pickSegMulti(this,'offlineEstimate')">${esc(n)}</button>`).join('')}
         ${Object.keys(OVERMAPS).filter(n=>!BASEMAPS[n]).map(n=>`<button type="button" class="${n===mapOverName()?'on':''}"
           onclick="pickSegMulti(this,'offlineEstimate')">${esc(n)}</button>`).join('')}
@@ -7748,9 +7976,14 @@ function tellSaveFailed(){
   toast('保存できませんでした。端末の空き容量をご確認ください'
     + '（空きを作ってから、もう一度この記録を触ると保存されます）');
 }
-window.addEventListener('pagehide', onLeaveApp);
+/* アプリを離れるとき（別のアプリへ・タブを閉じる）。保存が途中で失敗しても、
+   カメラは必ず止める（点きっぱなしにしない。戻ったときの映像は当てにならない） */
+function leaveApp(){
+  try{ onLeaveApp(); } finally { camClose(); }
+}
+window.addEventListener('pagehide', leaveApp);
 document.addEventListener && document.addEventListener('visibilitychange', ()=>{
-  if(document.visibilityState==='hidden') onLeaveApp();
+  if(document.visibilityState==='hidden') leaveApp();
 });
 
 /* v21 までは、産卵床の記録画面に「書きかけ」を控える仕組みがあった。
