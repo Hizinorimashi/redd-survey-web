@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v36';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v37';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-24';
-const APP_NOTE = '写真の欄を入力欄の先頭へ（産卵床・物理環境）／地図の下の産卵床・物理環境の一覧を折りたためる／'
-  + 'アプリの中でカメラを開いて連続で撮る';
+const APP_DATE = '2026-09-25';
+const APP_NOTE = '写真のボタンを「カメラで撮る」「端末の写真から選ぶ（複数可）」に分けた'
+  + '（カメラアプリで撮りためた写真を、あとからまとめて付けられる）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -567,13 +567,22 @@ async function renderPhotoPanel(){
   }
   box.innerHTML = parts.join('');
 }
+/* 写真のボタン3つ（v37）
+   - カメラで撮る … 端末のカメラアプリ（capture）。1枚撮るたびに入力欄へ戻る（OS の決まりで変えられない）
+   - 連続で撮る … アプリの中の簡易カメラ。「撮る」のたびに保存（ズーム等は無い）
+   - 端末の写真から選ぶ … capture を付けない入力。カメラアプリで撮りためた写真を、あとからまとめて付ける。
+     capture を付けたままだと iPhone はカメラに直行し、写真一覧から選べない */
 function photoPanelHtml(){
-  return `<input type="file" id="fPhotoIn" accept="image/*" capture="environment" multiple
+  return `<input type="file" id="fPhotoIn" accept="image/*" capture="environment"
+            style="display:none" onchange="pickPhotos(this)">
+    <input type="file" id="fPhotoPick" accept="image/*" multiple
             style="display:none" onchange="pickPhotos(this)">
     <div class="btn-grid">
-      <button class="btn" onclick="document.getElementById('fPhotoIn').click()">写真を追加（カメラ／端末から）</button>
+      <button class="btn" onclick="document.getElementById('fPhotoIn').click()">カメラで撮る</button>
       <button class="btn" onclick="camOpen()">連続で撮る</button>
+      <button class="btn" style="grid-column:1/-1" onclick="document.getElementById('fPhotoPick').click()">端末の写真から選ぶ（複数可）</button>
     </div>
+    <div class="tiny muted">カメラアプリで先にまとめて撮っておき、あとから選んで付けることもできます</div>
     <div class="mediagrid" id="photoGrid"></div>`;
 }
 
@@ -599,7 +608,7 @@ function camHidden(){
 async function camOpen(){
   if(CAM) return false;
   if(!camSupported()){
-    toast('この端末では連続撮影が使えません。「写真を追加」で1枚ずつ撮ってください');
+    toast('この端末では連続撮影が使えません。「カメラで撮る」で1枚ずつ撮ってください');
     return false;
   }
   const gen = ++CAM_GEN;
