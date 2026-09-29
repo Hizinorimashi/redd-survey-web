@@ -160,12 +160,13 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v38';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v39';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-29';
-const APP_NOTE = '「データベースへ直接送る」を追加（この調査を書き出す → 宛先と合言葉を入れて「いま送る」）'
-  + '（カメラアプリで撮りためた写真を、あとからまとめて付けられる）';
+const APP_NOTE = '産卵床に「数」を入れられる（同じ場所に何床も。既定 1、親魚・ホッチャレだけなら 0）'
+  + '／物理環境の一覧にも絞り込み（まだ入れていないものだけ・すべて表示・区間）'
+  + '／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -234,14 +235,14 @@ function rangeCheckAll(list){
 const REDD_RANGE = {
   length_cm:[0,2000], width_cm:[0,2000], area_m2:[0,400],
   water_temp_c:[-5,45], intragravel_temp_c:[-5,45], temp_depth_cm:[0,500],
-  female_n:[0,9999], male_n:[0,9999], carcass_n:[0,9999] };
+  female_n:[0,9999], male_n:[0,9999], carcass_n:[0,9999], redd_count:[0,999] };
 const ENV_RANGE = { depth_cm:[0,2000], velocity_ms:[0,10] };
-// 個体数は整数だけ。1.5尾を「要確認」にし、集計にも入れない
-const REDD_WHOLE = { female_n:true, male_n:true, carcass_n:true };
+// 個体数・産卵床の数は整数だけ。1.5尾を「要確認」にし、集計にも入れない
+const REDD_WHOLE = { female_n:true, male_n:true, carcass_n:true, redd_count:true };
 function reddRangeItem(k, v){ return [REDD_LABEL[k], v, REDD_RANGE[k][0], REDD_RANGE[k][1], !!REDD_WHOLE[k]]; }
 const REDD_LABEL = {
   length_cm:'長さ', width_cm:'幅', area_m2:'面積', water_temp_c:'河川水温', intragravel_temp_c:'河床内水温',
-  temp_depth_cm:'河床内を測った深さ', female_n:'雌', male_n:'雄', carcass_n:'ホッチャレ' };
+  temp_depth_cm:'河床内を測った深さ', female_n:'雌', male_n:'雄', carcass_n:'ホッチャレ', redd_count:'産卵床の数' };
 function inRange(n, rg){ return !rg || (n>=rg[0] && n<=rg[1]); }
 /* 画面ごとの覚えごと（色分けの基準・折りたたみの開閉など） */
 function prefs(){ try{ return JSON.parse(localStorage.getItem('rd_prefs')||'{}')||{}; }catch(e){ return {}; } }
@@ -1886,8 +1887,8 @@ function liveTally(sv){
   const male   = sumOf(withFish,'male_n');
   const carcass= sumOf(all.filter(r=>hasTarget(r,'ホッチャレ')),'carcass_n');
   // 魚種別の産卵床数（多い順・上位のみ文字で）
-  const bySp = countBy(redds,'species','種不明');
-  return { redd:redds.length, female, male, carcass, review:all.filter(r=>r.needs_review).length, bySp };
+  const bySp = reddCountBy(redds,'species','種不明');
+  return { redd:reddTotal(redds), female, male, carcass, review:all.filter(r=>r.needs_review).length, bySp };
 }
 function liveTallyHtml(sv){
   const t = liveTally(sv);
@@ -2044,7 +2045,7 @@ SCREENS.reaches = (sv)=>{
   const list = DB.reachesOf(sv);
   const cards = list.map(r=>{
     // 床数は「産卵床」を含む記録だけ。集計画面・CSV・GeoJSONと定義を揃える
-    const n = DB.reddsOf(sv).filter(x=>x.reach_uuid===r.uuid && hasTarget(x,'産卵床')).length;
+    const n = reddTotal(DB.reddsOf(sv).filter(x=>x.reach_uuid===r.uuid));   // 床数（1 記録に複数も）
     const len = reachLength(r);
     const manual = (r.length_m_manual!=='' && r.length_m_manual!=null);
     const dens = len>0 ? (n/len*100).toFixed(1) : '—';
@@ -2117,6 +2118,9 @@ function deleteReach(u){
     return;
   }
   if(TRACK && TRACK.reach_uuid===u) TRACK=null;
+  // この区間で絞っていたら解く。残すと、消えた区間の UUID で絞られたまま一覧が 0 件になる
+  if(REDD_FILTER.reach===u) REDD_FILTER.reach='';
+  if(ENV_FILTER.reach===u)  ENV_FILTER.reach='';
   if(!DB.softDelete(DB.key.re, u)){
     alert('区間を削除できませんでした。端末の空き容量を確認してください。');
     return;
@@ -2214,6 +2218,28 @@ function recordTargets(r){
 }
 function hasTarget(r, name){ return recordTargets(r).indexOf(name) >= 0; }
 function targetLabel(r){ return recordTargets(r).join('＋'); }
+/* その記録が表す産卵床の数（v39）。
+   「産卵床」を含まない記録は 0。数の欄が無い古い記録・空欄は 1（1 記録 = 1 床 だった）。
+   おかしい値（負・小数・範囲外）は「要確認」で知らせ、数えるときは 1 とみなす */
+function reddCountOf(r){
+  if(!hasTarget(r,'産卵床')) return 0;
+  const v = numOf(r.redd_count);
+  if(v==='') return 1;
+  return (Number.isInteger(v) && inRange(v, REDD_RANGE.redd_count)) ? v : 1;
+}
+/* 保存するときの整え方: 産卵床を含まなければ 0、含むのに空なら 1。打った数はそのまま残す */
+function reddCountNormalize(f){
+  if(!hasTarget(f,'産卵床')) return 0;
+  const v = numOf(f.redd_count);
+  return v==='' ? 1 : f.redd_count;
+}
+/* 産卵床の数の合計と、魚種ごとの合計（多い順） */
+function reddTotal(list){ return list.reduce((a,r)=>a+reddCountOf(r), 0); }
+function reddCountBy(list, field, fallback){
+  const m=new Map();
+  list.forEach(x=>{ const k=x[field]||fallback; m.set(k,(m.get(k)||0)+reddCountOf(x)); });
+  return [...m.entries()].sort((a,b)=>b[1]-a[1]);
+}
 
 /* この調査ぜんたいの通し番号（S1・S2…）。v21 から区間ごとではなくなった。
    消したものも数える。消した番号を使い回すと、先に書き出したCSVの S3 と
@@ -2272,6 +2298,8 @@ function newRedd(sv, opt){
     position_source: o.position_source || '',
     // 置いた時点では「産卵床」。親魚だけ・ホッチャレだけに変えるのは入力画面の仕事
     record_targets: ['産卵床'],
+    // 産卵床の数。同じ場所に何床もあるときに増やす（v39）。親魚だけ・ホッチャレだけなら 0
+    redd_count: 1,
     river_form: carry.river_form||'',
     // 魚種と判断根拠は引き継がない（見ていない魚種が入り、
     // 「まだ入れていない」の印も最初から消えてしまうため）
@@ -2319,6 +2347,10 @@ function reddFormHtml(r, sv, opt){
       ${segHtml('species', speciesList(), r.species, true)}
 
       <div data-part="産卵床">
+        <div class="sect">産卵床の数</div>
+        <label class="field"><span class="lab">この場所で見つけた産卵床の数</span>
+          <input id="fCnt" type="number" step="1" min="0" inputmode="numeric" value="${esc(reddCountShown(r))}"></label>
+        <div class="tiny muted">1 つなら 1 のまま。同じ場所にいくつもあるときは、その数を入れてください。</div>
         <div class="sect">産卵床の状態</div>
         <label class="field"><span class="lab">新旧</span>${segHtml('age', OPT.age, r.age_class, true)}</label>
         <label class="field"><span class="lab">状態</span>${segHtml('state', OPT.state, r.state, true)}</label>
@@ -2431,12 +2463,28 @@ function reddFormHtml(r, sv, opt){
 
 // 選んだ対象に関係する欄だけ出す。選んでいない欄は隠すが、値は消さない
 // （選び直せば元の入力がそのまま戻る）
-function onTargetChange(){
-  SCREENS._targetsTouched = true;     // 種類の欄を触った印（保存のとき、種類の断りを消してよい）
+function targetPartsSync(){
   const sel = segMultiVal('target');
   $$('[data-part]').forEach(el=>{
     el.style.display = sel.indexOf(el.getAttribute('data-part'))>=0 ? '' : 'none';
   });
+  return sel;
+}
+/* 人が種類のボタンを押したとき */
+function onTargetChange(){
+  SCREENS._targetsTouched = true;     // 種類の欄を触った印（保存のとき、種類の断りを消してよい）
+  const sel = targetPartsSync();
+  // 産卵床の数の既定（v39）: 産卵床を選べば 1（すでに 2 以上ならそのまま）、選んでいなければ 0
+  const c = $('#fCnt');
+  if(c){
+    const v = numOf(c.value);
+    if(sel.indexOf('産卵床') < 0) c.value = '0';
+    else if(v==='' || v===0) c.value = '1';
+  }
+}
+/* 入力欄に出す数。空欄・古い記録は読み方（reddCountOf）にそろえる。打った値はそのまま出す */
+function reddCountShown(r){
+  return (r && r.redd_count!=='' && r.redd_count!=null) ? r.redd_count : reddCountOf(r||{});
 }
 
 /* ---------- 測点の入力欄（水深・流速） ---------- */
@@ -2538,6 +2586,7 @@ function collectReddForm(){
     water_temp_c: numVal('#fWT'), intragravel_temp_c: numVal('#fIGT'), temp_depth_cm: numVal('#fTD'),
     female_n: numVal('#fFem'), male_n: numVal('#fMal'),
     behavior: segVal('behavior'), carcass_n: numVal('#fCar'),
+    redd_count: numVal('#fCnt'),
     note: $('#fNote').value||'',
     review_manual: !!($('#fReview')&&$('#fReview').checked),
   };
@@ -3101,7 +3150,13 @@ function envKindWord(k){
        : k==='LE' ? 'ラインの終わり' : '曲がり';
 }
 function envUseSurvey(svUuid){
-  if(ENV_NEXT.survey !== svUuid) ENV_NEXT = {kind:'P', auto:false, line:'', survey:svUuid};
+  if(ENV_NEXT.survey !== svUuid){
+    ENV_NEXT = {kind:'P', auto:false, line:'', survey:svUuid};
+    // 一覧の絞り込みは調査ごと。前の調査の区間 UUID が残ると、次の調査で一覧が 0 件になる
+    // （選択欄は「区間：すべて」に見えるのに絞られたまま。監査 v39 Major）
+    REDD_FILTER = {all:false, empty:false, reach:''};
+    ENV_FILTER  = {all:false, empty:false, reach:''};
+  }
 }
 function envSetKind(k){
   // 地図の上の印だけを書き替えるときは画面を作り直さないが、
@@ -3597,7 +3652,7 @@ function reddItemFormWire(cur){
   SCREENS._env = envPoints(cur);
   renderEnvList();
   updateArea();
-  onTargetChange();           // 選んでいる対象の欄だけ出す
+  targetPartsSync();          // 選んでいる対象の欄だけ出す（数の既定は触らない）
   SCREENS._targetsTouched = false;   // 出しただけ。まだ触っていない
   // 自動で「要確認」が付いている記録は、なぜ付いたかを画面にも出す
   reddShowError(reviewReasons(cur).join(' ／ '));
@@ -3621,6 +3676,8 @@ function reddItemFormWire(cur){
    測点（水深・流速）も見る。ここを見ないと 水深-10cm がそのまま通る */
 function reddOddValues(f, points){
   const odd = rangeCheckAll(Object.keys(REDD_LABEL).map(k=>reddRangeItem(k, f[k])));
+  // 産卵床を選んでいるのに 0 床は、ちぐはぐ（親魚だけなら「産卵床」を外す）
+  if(hasTarget(f,'産卵床') && numOf(f.redd_count)===0) odd.push('産卵床の数が 0 です。産卵床が無いなら種類の「産卵床」を外し、あるなら数を入れてください');
   (points||[]).forEach((pt,i)=>{
     rangeCheckAll([[`測点${i+1}の水深`, pt.depth_cm, ENV_RANGE.depth_cm[0], ENV_RANGE.depth_cm[1]],
                    [`測点${i+1}の流速`, pt.velocity_ms, ENV_RANGE.velocity_ms[0], ENV_RANGE.velocity_ms[1]]])
@@ -3675,6 +3732,8 @@ function saveReddItem(u, opt){
   }else if(!SCREENS._targetsTouched && prev.indexOf(TARGET_NOTE)>=0){
     notes.push(TARGET_NOTE);
   }
+  // 産卵床の数: 産卵床を含まなければ 0、含むのに空なら 1（種類が決まってから整える）
+  f.redd_count = reddCountNormalize(f);
   // 位置が読めない文字なら、前の位置を残す（座標にならないものは入れられない）。
   // そのときは位置の決め方と誤差も前のまま。座標だけ戻して由来を「手入力」にすると、
   // GPSで測った位置が手入力だったことになる
@@ -3878,8 +3937,9 @@ function saveEnvItem(u, opt){
   envShowError('');
   ENV_DIRTY = false;
   if(quiet){
-    // 打っている最中なので、画面は作り直さない。地図の色だけ追いつかせる
+    // 打っている最中なので、画面は作り直さない。地図の色と一覧の印だけ追いつかせる
     envDrawAll(rec.survey_uuid);
+    unitChipSync(rec.survey_uuid);
     const mark = $('#ev_saved');
     if(mark) mark.textContent = '保存しました（' + timeValue() + '）';
     return true;
@@ -3945,6 +4005,16 @@ function envPickToggle(u){
   if(ENV_PICK.set.has(u)) ENV_PICK.set.delete(u); else ENV_PICK.set.add(u);
   envPickSync();
 }
+/* 選んだものを、いま一覧に見えているものだけに絞る（絞り込みや保存で隠れたものは外す）。
+   別の調査の選択は捨てる。一覧に出ていない記録が「選んだ N 件を消す」で消えないための唯一の関所。
+   絞り込みの切り替え・自動保存（unitChipSync）、画面の作り直し（SCREENS.envMap）、
+   消す直前（envPickDelete）の 3 か所から呼ぶ（監査 v39 1〜2 往復目 Major） */
+function envPickPrune(svUuid){
+  if(!envPickOn()) return;
+  if(ENV_PICK.sv !== svUuid){ ENV_PICK = null; return; }
+  const shown = new Set(unitListFor(svUuid).map(x=>x.uuid));
+  Array.from(ENV_PICK.set).forEach(u=>{ if(!shown.has(u)) ENV_PICK.set.delete(u); });
+}
 /* 選んだ数と印を、その場で書き替える（画面ごと作り直すと地図がちらつく） */
 function envPickSync(){
   const n = envPickOn() ? ENV_PICK.set.size : 0;
@@ -3960,7 +4030,10 @@ function envPickSync(){
 /* まとめて消す。1回の保存で書く。
    1件ずつ書くと、途中で失敗したときに「消えたもの・残ったもの」が混ざる */
 function envPickDelete(svUuid){
-  if(!envPickOn() || !ENV_PICK.set.size) return;
+  if(!envPickOn()) return;
+  // 消す直前にも、いま見えている一覧と突き合わせる（ここを通らずに消える経路を残さない）
+  envPickPrune(svUuid);
+  if(!envPickOn() || !ENV_PICK.set.size){ envPickSync(); return; }
   if(!envFlushOk()) return;
   const ids = Array.from(ENV_PICK.set);
   const names = ids.map(u=>(DB.get(DB.key.un, u)||{}).name||'').filter(Boolean);
@@ -4223,6 +4296,90 @@ function reddHeadHtml(svUuid){
       </select>` : ''}
     </div>
     ${shown < all.length ? `<div class="tiny muted">${shown}件を表示しています。</div>` : ''}`;
+}
+
+/* ---------- 物理環境の一覧の絞り込み（産卵床と同じ作り・v39） ----------
+   点・ラインが増えると、ぜんぶ並べても目的のものを探せない。メッシュは別の欄に出す */
+let ENV_FILTER = {all:false, empty:false, reach:''};
+/* 置いただけで、中身をまだ入れていない物理環境。
+   名前・場所・時刻は置いたときに自動で入るので見ない */
+function unitEmpty(x){
+  if(!x) return false;
+  const f = v => v!=='' && v!=null;
+  return !(f(x.habitat_type) || f(x.depth_rep_cm) || f(x.velocity_rep_ms) ||
+           (Array.isArray(x.env_points) && x.env_points.length) ||
+           f(x.substrate1) || f(x.water_temp_c) || f(x.memo));
+}
+function unitFilterToggle(what, svUuid){
+  if(what==='all')   ENV_FILTER.all   = !ENV_FILTER.all;
+  if(what==='empty'){ ENV_FILTER.empty = !ENV_FILTER.empty; ENV_FILTER.all = true; }
+  unitChipSync(svUuid);
+}
+function unitFilterReach(v, svUuid){ ENV_FILTER.reach = v || ''; unitChipSync(svUuid); }
+/* 一覧に並べる物理環境。DB.unitsOf は古い順（P1・P2…と読める順）なのでそのまま */
+function unitsListed(svUuid){ return DB.unitsOf(svUuid).filter(x=>!isMesh(x)); }
+function unitListFor(svUuid){
+  let list = unitsListed(svUuid);
+  if(ENV_FILTER.reach) list = list.filter(x=>(x.reach_uuid||'') === ENV_FILTER.reach);
+  if(ENV_FILTER.empty) list = list.filter(unitEmpty);
+  // ふだんは新しいほうの20件だけ。古いものは「すべて表示」で出す
+  if(!ENV_FILTER.all && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
+  return list;
+}
+function unitChipsHtml(svUuid){
+  const list = unitListFor(svUuid);
+  if(!list.length) return '<div class="tiny muted">この条件に合うものはありません。</div>';
+  const picking = envPickOn();
+  return list.map(x=>{
+    // 終わっていないラインと、まだ入れていないものに「…」を付ける（産卵床と同じ印）
+    const half = (isLine(x) && !linePt(x,'end'));
+    // 光らせるのは「いま入れているもの」だけ。両方光ると、どちらに打っているか分からない
+    const on = picking ? ENV_PICK.set.has(x.uuid) : (envFocus()==='un' && x.uuid===ENV_SEL);
+    const act = picking ? `envPickToggle('${x.uuid}')` : `envSelect('${x.uuid}')`;
+    return `<button type="button" data-u="${x.uuid}" class="${on?'on':''}"
+      onclick="${act}">${picking && on ? '&check; ' : ''}${esc(x.name||'')}${(half || unitEmpty(x))?'…':''}</button>`;
+  }).join('');
+}
+/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残しが分かる */
+function unitFoldHeadHtml(svUuid){
+  const all = unitsListed(svUuid);
+  const empty = all.filter(unitEmpty).length;
+  return `${all.length}件`
+    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : (all.length ? '　ぜんぶ入りました' : ''));
+}
+function unitHeadHtml(svUuid){
+  const all = unitsListed(svUuid);
+  if(!all.length) return '';
+  const empty = all.filter(unitEmpty).length;
+  const shown = unitListFor(svUuid).length;
+  const reaches = DB.reachesOf(svUuid);
+  const opt = (v, t)=>`<option value="${esc(v)}"${ENV_FILTER.reach===v?' selected':''}>${esc(t)}</option>`;
+  return `
+    <div class="row">
+      <button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="unitFilterToggle('empty','${svUuid}')">${ENV_FILTER.empty?'絞り込みをやめる':`まだ入れていないものだけ（${empty}）`}</button>
+      <button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="unitFilterToggle('all','${svUuid}')">${ENV_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>
+      ${reaches.length ? `<select style="width:auto"
+        onchange="unitFilterReach(this.value,'${svUuid}')">
+        ${opt('','区間：すべて')}${reaches.map(re=>opt(re.uuid, re.name||'')).join('')}
+      </select>` : ''}
+    </div>
+    ${shown < all.length ? `<div class="tiny muted">${shown}件を表示しています。</div>` : ''}`;
+}
+/* 物理環境の一覧の見た目だけを書き替える（画面は作り直さない）。
+   産卵床の reddChipSync と同じく、入力欄の位置は動かさない */
+function unitChipSync(svUuid){
+  const top = reddFormTopY();
+  envPickPrune(svUuid);   // 絞り込みで隠れたものは選択から外す
+  const list = $('#unitChips');
+  if(list) list.innerHTML = unitChipsHtml(svUuid);
+  const head = $('#unitHead');
+  if(head) head.innerHTML = unitHeadHtml(svUuid);
+  const fh = $('#unitFoldHead');
+  if(fh) fh.innerHTML = unitFoldHeadHtml(svUuid);
+  if(envPickOn()) envPickSync();     // 件数と印を、いま見えている一覧にそろえる
+  reddKeepFormPlace(top);
 }
 /* 全体が入るように動かす。押したときだけ */
 function envFitAll(svUuid){
@@ -4792,6 +4949,7 @@ SCREENS.envMap = (argStr)=>{
   const svUuid = a.sv;
   const s = DB.survey(svUuid); if(!s) return SCREENS.home();
   envUseSurvey(svUuid);        // 別の調査から持ち越さない
+  envPickPrune(svUuid);        // 手動保存・区間の削除などで作り直したときも、隠れたものは選択から外す
   // メッシュの範囲は位置の持ち方が違うので、点・線の並びに混ぜない。
   // 混ぜると、位置の無い点として並んでしまう
   const meshes = DB.unitsOf(svUuid).filter(isMesh);
@@ -4819,16 +4977,6 @@ SCREENS.envMap = (argStr)=>{
     if(here && here.name==='envMap') here.arg = JSON.stringify({sv:svUuid});
   }
   const focus = envFocus();
-
-  const chip = (x)=>{
-    const half = (isLine(x) && !linePt(x,'end'));
-    const picking = envPickOn();
-    // 光らせるのは「いま入れているもの」だけ。両方光ると、どちらに打っているか分からない
-    const on = picking ? ENV_PICK.set.has(x.uuid) : (envFocus()==='un' && x.uuid===ENV_SEL);
-    const act = picking ? `envPickToggle('${x.uuid}')` : `envSelect('${x.uuid}')`;
-    return `<button type="button" data-u="${x.uuid}" class="${on?'on':''}"
-      onclick="${act}">${picking && on ? '&check; ' : ''}${esc(x.name||'')}${half?'…':''}</button>`;
-  };
 
   return {
     title:'物理環境（地図で記録）',
@@ -4862,9 +5010,10 @@ SCREENS.envMap = (argStr)=>{
         true)}
 
       ${foldHtml('envchips', '物理環境',
-        `<span class="tiny muted" style="margin-left:8px">${list.length}件</span>`, `
+        `<span class="tiny muted" id="unitFoldHead" style="margin-left:8px">${unitFoldHeadHtml(svUuid)}</span>`, `
+        <div id="unitHead">${unitHeadHtml(svUuid)}</div>
         ${list.length
-          ? `<div class="seg" data-seg="envsel">${list.map(chip).join('')}</div>
+          ? `<div class="seg" data-seg="envsel" id="unitChips">${unitChipsHtml(svUuid)}</div>
              ${envPickOn() ? `
                <button class="btn ghost small" id="envPickDel" style="margin-top:8px"
                  onclick="envPickDelete('${svUuid}')">消すものを押してください</button>
@@ -5916,12 +6065,13 @@ function reachStats(sv){
   const all = DB.reddsOf(sv);
   const build = (name, list, len)=>{
     const redds = list.filter(x=>hasTarget(x,'産卵床'));
-    return { name, len, n:redds.length,
-      density: len>0 ? redds.length/len*100 : null,
+    const n = reddTotal(redds);                       // 床数（1 記録に複数もある・v39）
+    return { name, len, n,
+      density: len>0 ? n/len*100 : null,
       area: sumOf(redds,'area_m2'),
       fishOnly: list.filter(x=>!hasTarget(x,'産卵床') && hasTarget(x,'親魚')).length,
       carcass: sumOf(list.filter(x=>hasTarget(x,'ホッチャレ')),'carcass_n'),
-      species: countBy(redds,'species','種不明') };
+      species: reddCountBy(redds,'species','種不明') };
   };
   const rows = DB.reachesOf(sv).map(r=>
     build(r.name, all.filter(x=>x.reach_uuid===r.uuid), reachLength(r)));
@@ -5989,20 +6139,22 @@ SCREENS.summary = (sv)=>{
       ${pairs.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${v} 件</td></tr>`).join('')}
     </table></div>` : `<div class="small muted">—</div>` }`;
 
+  const reddN = reddTotal(redds);                    // 床数（1 記録に複数もある・v39）
   return {
     title:'集計',
-    sub:[{text:s.name},{text:`産卵床 ${redds.length}`}],
+    sub:[{text:s.name},{text:`産卵床 ${reddN}`}],
     html:`
       <div class="card">
         <div class="row"><div class="grow small muted">産卵床の合計</div>
-          <div style="font-weight:700; font-size:20px">${redds.length} 件</div></div>
+          <div style="font-weight:700; font-size:20px">${reddN} 床</div></div>
         <div class="small muted" style="margin-top:8px">
           記録の内訳（全 ${all.length} 件）：産卵床 ${redds.length}（うち親魚を伴う ${withFish.length-fishOnly.length}）
           ／ 親魚のみ ${fishOnly.length} ／ ホッチャレを含む ${carcass.length}
+          ${ reddN!==redds.length ? `／ 産卵床の記録 ${redds.length} 件で ${reddN} 床` : '' }
         </div>
         <div class="small muted" style="margin-top:8px">
           歩いた区間の合計 ${totalLen>0?fmtDist(totalLen):'—'}
-          ${ totalLen>0 ? `／ 全体の密度 ${fmtNum(redds.length/totalLen*100)} 件/100m` : '' }
+          ${ totalLen>0 ? `／ 全体の密度 ${fmtNum(reddN/totalLen*100)} 床/100m` : '' }
         </div>
         <div class="small muted" style="margin-top:4px">
           総面積 ${areaN?fmtNum(sumOf(redds,'area_m2'),2):'—'} m² ／ 平均 ${fmtNum(avgOf(redds,'area_m2'),2)} m²（面積のある ${areaN} 件）
@@ -7168,7 +7320,7 @@ function exportBase(surveys){
 /* ---------- 産卵床 ---------- */
 const REDD_COLS = ['survey_id','survey_name','survey_date','river_name','water_system','investigator',
   'record_id','reach_id','reach_name','reach_length_m','redd_no','observed_at',
-  'record_type','has_redd','has_fish','has_carcass',
+  'record_type','has_redd','has_fish','has_carcass','redd_count',
   'latitude','longitude','gps_accuracy','position_source','river_form',
   'species','species_basis','age_class','state','length_cm','width_cm','area_m2',
   'env_point_count','depth_cm_mean','velocity_ms_mean','depth_cm_all','velocity_ms_all',
@@ -7192,6 +7344,8 @@ function reddRows(surveys){
         has_redd:hasTarget(r,'産卵床')?1:0,
         has_fish:hasTarget(r,'親魚')?1:0,
         has_carcass:hasTarget(r,'ホッチャレ')?1:0,
+        // 打った値はそのまま（おかしい値は review_reasons で分かる）。空欄・古い記録は読み方にそろえる
+        redd_count: reddCountShown(r),
         latitude:r.latitude, longitude:r.longitude, gps_accuracy:r.gps_accuracy,
         position_source:r.position_source||'', river_form:r.river_form||'',
         species:r.species, species_basis:r.species_basis, age_class:r.age_class, state:r.state,
@@ -7224,7 +7378,7 @@ function reachRows(surveys){
     const redds = DB.reddsOf(s.uuid);
     DB.reachesOf(s.uuid).forEach(r=>{
       const inReach = redds.filter(x=>x.reach_uuid===r.uuid);
-      const n = inReach.filter(x=>hasTarget(x,'産卵床')).length;   // 床数は産卵床のみ
+      const n = reddTotal(inReach);   // 床数は産卵床のみ（1 記録に複数もある・v39）
       const len = reachLength(r);
       rows.push({
         survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date), river_name:s.river_name,
