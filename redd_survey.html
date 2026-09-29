@@ -160,11 +160,11 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v37';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v38';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-25';
-const APP_NOTE = '写真のボタンを「カメラで撮る」「端末の写真から選ぶ（複数可）」に分けた'
+const APP_DATE = '2026-09-29';
+const APP_NOTE = '「データベースへ直接送る」を追加（この調査を書き出す → 宛先と合言葉を入れて「いま送る」）'
   + '（カメラアプリで撮りためた写真を、あとからまとめて付けられる）';
 
 /* ---------- 小道具 ---------- */
@@ -246,6 +246,13 @@ function inRange(n, rg){ return !rg || (n>=rg[0] && n<=rg[1]); }
 /* 画面ごとの覚えごと（色分けの基準・折りたたみの開閉など） */
 function prefs(){ try{ return JSON.parse(localStorage.getItem('rd_prefs')||'{}')||{}; }catch(e){ return {}; } }
 function prefSet(k,v){ const p=prefs(); p[k]=v; try{ localStorage.setItem('rd_prefs', JSON.stringify(p)); }catch(e){} }
+/* 複数の設定を 1 回の書き込みで保存し、成否を返す。宛先と合言葉のように「対で揃っていないと危ない」ものに使う
+   （2 回に分けると片方だけ保存されて、古い宛先＋新しい合言葉のような混成が残る。監査 2 往復目 Critical） */
+function prefSetMany(obj){
+  const p=prefs(); Object.keys(obj).forEach(k=>{ p[k]=obj[k]; });
+  try{ localStorage.setItem('rd_prefs', JSON.stringify(p)); }catch(e){ return false; }
+  try{ const back=prefs(); return Object.keys(obj).every(k=>back[k]===obj[k]); }catch(e){ return false; }
+}
 function foldOpen(key, defOpen){ const v=(prefs().folds||{})[key]; return v===undefined ? !!defOpen : !!v; }
 function foldSet(key, open){ const f=Object.assign({}, prefs().folds||{}); f[key]=!!open; prefSet('folds', f); }
 function foldHtml(key, title, head, inner, defOpen){
@@ -2098,10 +2105,22 @@ function deleteReach(u){
   const n = DB.reddsOf(r.survey_uuid).filter(x=>x.reach_uuid===u).length;
   // 産卵床は消さず「区間なし」に戻す。記録そのものが巻き添えで消えないように
   if(!confirm(`「${r.name}」を削除しますか？${n?`\nこの区間の産卵床 ${n} 件は「区間なし」になります（消えません）。`:''}`)) return;
-  DB.reddsOf(r.survey_uuid).filter(x=>x.reach_uuid===u)
-    .forEach(x=>DB.upsert(DB.key.rd, {uuid:x.uuid, reach_uuid:''}));
+  // 産卵床・物理環境の区間参照を「区間なし」に付け替えてから区間を消す。
+  // 1 件でも保存できなければ区間は消さない（消えた区間を指したままの記録が端末に残り、
+  // データベースへ送るときに拒まれる。監査 2 往復目 Major）
+  const rds = DB.reddsOf(r.survey_uuid).filter(x=>x.reach_uuid===u);
+  const uns = DB.unitsOf(r.survey_uuid).filter(x=>x.reach_uuid===u);
+  const okRd = rds.every(x=>!!DB.upsert(DB.key.rd, {uuid:x.uuid, reach_uuid:''}));
+  const okUn = okRd && uns.every(x=>!!DB.upsert(DB.key.un, {uuid:x.uuid, reach_uuid:''}));
+  if(!okRd || !okUn){
+    alert('区間を削除できませんでした。産卵床・物理環境の「区間なし」への付け替えを保存できません。端末の空き容量を確認してください。');
+    return;
+  }
   if(TRACK && TRACK.reach_uuid===u) TRACK=null;
-  DB.softDelete(DB.key.re, u);
+  if(!DB.softDelete(DB.key.re, u)){
+    alert('区間を削除できませんでした。端末の空き容量を確認してください。');
+    return;
+  }
   toast('ゴミ箱へ入れました');
   goBack();
 }
@@ -7689,6 +7708,248 @@ function parseStoredZip(buf){
   return out;
 }
 
+/* ---------- データベースへ直接送る（v38・魚類DB spec 19 章） ----------
+   魚類調査アプリの方式を産卵床版に。送るのは「記録だけバックアップ（JSON）」を 1 調査ぶんに絞ったもの
+   （消した記録も含める＝データベース側で「消えた」と伝えるため。写真は含めない）。
+   受け口（魚類データベース fish_ingest_server.py の /ingest/redd）は、同じものを 2 回受け取っても増やさず、
+   アプリで直した分は新しい送信で反映し、データベースの画面で直した分は上書きしない。
+   自動では送らない。押したときだけ送る。送っても手元の記録は消さない */
+function dbSendUrl(){ return String(prefs().dbsend_url||'').trim(); }
+function dbSendToken(){ return String(prefs().dbsend_token||''); }
+/* 端末の識別（どの端末から送ったかが取り込み記録に残る。個人名は入らない）。一度作ったら変えない */
+function dbSendDeviceId(){
+  let id = String(prefs().dbsend_device_id||'');
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)){
+    id = uuid(); prefSet('dbsend_device_id', id);
+  }
+  return id;
+}
+/* 宛先の検査。おかしな宛先に記録を投げないための門。
+   受け口は「通り道」（/app-ingest）の下に居るので、パスは許す。末尾の /ingest や /ping はこちらで付ける */
+function dbSendCheckUrl(raw){
+  const v = String(raw||'').trim().replace(/\/+$/,'');
+  if(!v) return {why:'宛先が空です'};
+  let u = null;
+  try{ u = new URL(v); }catch(e){}
+  if(!u) return {why:'宛先の形がおかしいです'};
+  if(u.protocol !== 'https:') return {why:'宛先は https で始めてください'};
+  if(u.username || u.password) return {why:'宛先に名前やパスワードを入れないでください'};
+  if(u.search || u.hash) return {why:'宛先に ? や # を付けないでください'};
+  if(/\/(ingest(\/redd)?|ping)$/i.test(u.pathname)){
+    return {why:'宛先は /ingest まで書かず、その手前までにしてください'};
+  }
+  return {url:v, ts:/\.ts\.net$/i.test(u.hostname)};
+}
+/* 宛先と合言葉が「同じ 1 回の書き込みで揃って保存された対」である印。prefSetMany で 3 つを一緒に書く。
+   印の無い保存値（この印を入れる前の版で、宛先と合言葉を別々に保存していた）は古い宛先＋新しい合言葉の
+   混成かもしれないので、欄の無い画面からは使わない（監査 3 往復目 Critical） */
+const DB_SEND_PAIR = 1;
+/* 画面の欄にある宛先・合言葉を返し、設定にも控える。
+   **検査と送信は返した値で行う**（設定の保存は容量不足で失敗することがあり、そのあと設定を読み直すと
+   古い宛先に送ってしまう。監査 1 回目 Critical）。欄が無い画面（ゴミ箱など）では、印の付いた保存済みの対だけ */
+function dbSendSavePrefs(){
+  if($('#dbs_url') && $('#dbs_token')){
+    const url = strVal('#dbs_url'), token = String($('#dbs_token').value||'');
+    // 対と印を 1 回に保存する（片方だけ保存されない）。失敗しても、いまの送信は画面の値で行う
+    const saved = prefSetMany({dbsend_url:url, dbsend_token:token, dbsend_pair:DB_SEND_PAIR});
+    return {url, token, saved};
+  }
+  const p = prefs();                      // 1 回だけ読む（宛先と合言葉を同じ保存値から取る）
+  if(p.dbsend_pair !== DB_SEND_PAIR) return {url:'', token:'', saved:false, unpaired:true};
+  return {url:String(p.dbsend_url||'').trim(), token:String(p.dbsend_token||''), saved:true};
+}
+const DB_SEND_UNPAIRED_MSG = '保存されている宛先と合言葉を確かめられません。送るのをやめました。'
+  + '調査の「書き出す」画面の「データベースへ直接送る」で、宛先と合言葉を入れ直してから送ってください';
+const DB_SEND_UNSAVED_MSG = '　（宛先と合言葉はこの端末に保存できませんでした。次回も入れ直してください）';
+/* 合言葉をこの端末から消す（共有の端末で使ったあと用）。消えたことを読み戻して確かめる */
+function dbSendForget(){
+  const ok = prefSetMany({dbsend_token:''}) && prefs().dbsend_token === '';
+  if($('#dbs_token')) $('#dbs_token').value = '';
+  if(ok){ toast('合言葉をこの端末から消しました'); }
+  else{ toast('合言葉を消せませんでした（端末の空き容量を確認してください）。この端末には合言葉が残っています。共有の端末では、このまま使わないでください'); }
+  return ok;
+}
+/* 送る中身: バックアップと同じ外形を、この調査 1 件に絞る。消した記録（deleted_at）も含める。
+   写真の実体は元から含まれない（記録に写真の id が並ぶだけ） */
+function buildSendPayload(svUuid){
+  const b = buildBackup();
+  const data = {};
+  CORE_KEYS.forEach(k=>{
+    const key = DB.key[k]; const rows = b.data[key] || [];
+    data[key] = (k==='sv') ? rows.filter(r=>r && r.uuid===svUuid)
+                           : rows.filter(r=>r && r.survey_uuid===svUuid);
+  });
+  if(data[DB.key.sv].length !== 1) return null;
+  // 親を失った参照（区間をゴミ箱から完全に消したあとの物理環境・産卵床の reach_uuid、
+  // 物理環境を完全に消したあとのマス）は、受け口の親子検査で調査ごと拒まれる。
+  // 区間の参照は「区間なし」に、親の無いマスは外す（手元の記録は書き換えない。送る写しだけ）
+  const reaches = new Set(data[DB.key.re].map(r=>r.uuid));
+  const units = new Set(data[DB.key.un].map(r=>r.uuid));
+  ['rd','un'].forEach(k=>{
+    data[DB.key[k]] = data[DB.key[k]].map(r=> (r.reach_uuid && !reaches.has(r.reach_uuid)) ? Object.assign({}, r, {reach_uuid:''}) : r);
+  });
+  data[DB.key.mc] = data[DB.key.mc].filter(r=>r.unit_uuid && units.has(r.unit_uuid));
+  return { app:b.app, version:b.version, exported_at:b.exported_at, species:b.species, data };
+}
+/* 受け口の返事（counts）を短い日本語に */
+const DB_SEND_SKIP_LABEL = { skipped_db_edited:'データベースで直した', skipped_older:'古い', skipped_tombstone:'消えていた',
+                             skipped_existing:'既にあった', skipped_unchanged:'変わっていない' };
+function dbSendSummary(j){
+  const c = (j && j.counts) || {};
+  const tot = {};
+  Object.keys(c).forEach(k=>{ const per=c[k]||{}; Object.keys(per).forEach(t=>{ tot[t] = (tot[t]||0) + (Number(per[t]||0) || 0); }); });
+  const parts = [`追加 ${tot.added||0}`, `更新 ${tot.updated||0}`, `削除 ${tot.deleted||0}`];
+  Object.keys(tot).filter(t=>/^skipped_/.test(t) && tot[t]).forEach(t=>{
+    const label = DB_SEND_SKIP_LABEL[t] || t.replace(/^skipped_/,'');
+    parts.push(t==='skipped_db_edited' ? `データベースで直した ${tot[t]} 件は残しました` : `${label} ${tot[t]} 件は飛ばしました`);
+  });
+  return parts.join('・');
+}
+/* 端末に残す要約: 件数 ＋ 受け口の message ＋ 注意（warnings）＋ CSV 同期の結果。長さは抑える */
+function dbSendResultText(j){
+  const cut = (s, n)=>{ s = String(s==null?'':s); return s.length>n ? s.slice(0,n)+'…' : s; };
+  const out = [dbSendSummary(j)];
+  if(j && j.message) out.push(cut(j.message, 200));
+  const w = (j && Array.isArray(j.warnings)) ? j.warnings : [];
+  w.slice(0,3).forEach(x=>out.push('注意: ' + cut(x, 160)));
+  if(w.length>3) out.push(`注意 ほか ${w.length-3} 件`);
+  if(j && j.csv_sync && j.csv_sync !== 'ok') out.push('CSV 同期: ' + cut(j.csv_sync, 80));
+  return out.join('\n');
+}
+/* 送った印。記録の中身ではなく通信の控えなので、updated_at は変えない（DB.upsert は使わない） */
+function dbSendMark(svUuid, info){
+  const a = DB.load(DB.key.sv); const o = a.find(x=>x.uuid===svUuid);
+  if(!o) return false;
+  o.db_sent_at = nowISO();
+  o.db_receipt = (info && info.receipt != null) ? String(info.receipt) : '';
+  o.db_send_result = (info && info.summary) || '';
+  return DB.save(DB.key.sv, a);     // 容量不足なら false（呼び出し側が「届いたが印は残せなかった」と伝える）
+}
+function dbSendWhen(iso){
+  const d = new Date(iso); if(isNaN(d)) return String(iso||'');
+  const p = n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+async function dbSendTest(){
+  const cur = dbSendSavePrefs();
+  if(cur.unpaired){ toast(DB_SEND_UNPAIRED_MSG); return {ok:false, why:'unpaired'}; }
+  const c = dbSendCheckUrl(cur.url);
+  if(!c.url){ toast(c.why); return {ok:false, why:c.why}; }
+  toast('つながるか試しています…');
+  try{
+    const r = await fetch(c.url + '/ping', {method:'GET'});
+    const j = await r.json();
+    const ok = !!(j && j.ok === true);
+    toast(ok ? 'つながりました' : '返事の形が違います。宛先をご確認ください');
+    return {ok};
+  }catch(e){
+    toast('つながりませんでした。電波と宛先をご確認ください');
+    return {ok:false, why:'network'};
+  }
+}
+let DB_SENDING = false;
+/* 「いま送る」。戻り値はテスト用（{ok, status, why}）。成功したときだけ送った印を付ける */
+async function dbSendNow(svUuid){
+  // ゴミ箱の調査（deleted_at 付き）も送れる＝「消した」ことをデータベースへ伝える
+  const sv = DB.get(DB.key.sv, svUuid); if(!sv) return {ok:false, why:'no-survey'};
+  if(DB_SENDING) return {ok:false, why:'busy'};
+  const cur = dbSendSavePrefs();          // 検査も送信も、いま画面にある値で（設定の読み直しはしない）
+  if(cur.unpaired){ toast(DB_SEND_UNPAIRED_MSG); return {ok:false, why:'unpaired'}; }
+  const c = dbSendCheckUrl(cur.url);
+  if(!c.url){ toast(c.why); return {ok:false, why:c.why}; }
+  const token = cur.token;
+  if(!token){ toast('合言葉を入れてください'); return {ok:false, why:'no-token'}; }
+  if(/[^\x20-\x7e]/.test(token)){
+    // そのまま送ると意味の分からない通信エラーになる（鳥アプリの教訓）
+    toast('合言葉に日本語などが混ざっています。データベースの管理者から受け取った半角の合言葉を入れてください');
+    return {ok:false, why:'token-charset'};
+  }
+  if(!c.ts && !confirm('宛先が Tailscale（.ts.net）ではありません。この宛先に記録を送りますか？')) return {ok:false, why:'cancel'};
+  let payload = null;
+  try{ payload = buildSendPayload(svUuid); }
+  catch(e){ toast('保存データを読めませんでした。送るのをやめました'); return {ok:false, why:'broken'}; }
+  if(!payload){ toast('この調査の記録が見つかりません'); return {ok:false, why:'no-payload'}; }
+  DB_SENDING = true;
+  const btn = $('#dbs_send'); if(btn) btn.disabled = true;
+  toast('送っています…');
+  let res = null, j = null;
+  try{
+    try{
+      res = await fetch(c.url + '/ingest/redd', {
+        method:'POST',
+        headers:{'Content-Type':'application/json',
+                 'Authorization':'Bearer ' + token,
+                 'X-Device-Id': dbSendDeviceId()},
+        body: JSON.stringify(payload),
+      });
+      try{ j = await res.json(); }catch(e){}
+    }catch(e){
+      toast('送れませんでした（通信エラー）。電波の良いところでお試しください');
+      return {ok:false, why:'network'};            // 送った印は付けない
+    }
+    if(res.status === 200 && j && j.ok === true){        // 契約どおり 200 だけを成功とする（201 などは扱わない）
+      const summary = dbSendSummary(j);
+      const marked = dbSendMark(svUuid, {receipt:j.receipt, summary: dbSendResultText(j)});
+      const warn = (Array.isArray(j.warnings) && j.warnings.length) ? `　注意: ${String(j.warnings[0]).slice(0,120)}` : '';
+      const unsaved = cur.saved ? '' : DB_SEND_UNSAVED_MSG;   // 印の成否にかかわらず伝える（監査 3 往復目 Major）
+      if(marked){
+        toast((sv.deleted_at ? '送りました（削除を伝えました）。' : '送りました。') + summary + warn + unsaved);
+      }else{
+        toast(`データベースには届きました（受領証 ${j.receipt==null?'-':j.receipt}）が、この端末に受領の印を保存できませんでした。端末の空き容量を確認してください` + unsaved);
+      }
+      return {ok:true, status:res.status, receipt:j.receipt, marked};
+    }
+    if(j && j.ok === true){
+      // 本文は成功でも契約外の状態（200 以外の 2xx など）。印は付けない
+      toast(`送れたかどうか確かめられませんでした（HTTP ${res.status}）。もう一度送っても二重にはなりません`);
+      return {ok:false, status:res.status, why:'HTTP ' + res.status};
+    }
+    if(j && j.stored === true){
+      // 記録は届いたが、向こうの控え（CSV）の同期に失敗。同じ内容をもう一度送れば二重にならない
+      toast('記録は届きましたが、データベース側の後処理に失敗しました。少し待ってから同じ内容をもう一度送ってください（二重にはなりません）');
+      return {ok:false, status:res.status, why:'stored'};
+    }
+    const why = (j && (j.error || j.message)) ||
+      (res.status===401 ? '合言葉が違います。設定を確かめてください'
+       : res.status===413 ? '送るものが大きすぎます。JSON を書き出してデータベースの画面から取り込んでください'
+       : res.status===409 ? '前に送った内容と食い違いがあります。データベースの画面で確かめてください'
+       : ('HTTP ' + res.status));
+    toast('送れませんでした：' + why);
+    return {ok:false, status:res.status, why};
+  }finally{
+    DB_SENDING = false;
+    if(btn) btn.disabled = false;
+    try{ render(); }catch(e){}
+  }
+}
+function dbSendCardHtml(sv){
+  // 印の無い保存値（混成かもしれない）は欄に出さない。出すと、そのまま押しただけで混成に印が付いて送られる
+  // （監査 4 回目 Critical）。入れ直してもらう
+  const paired = prefs().dbsend_pair === DB_SEND_PAIR;
+  const unpairedOld = !paired && !!(dbSendUrl() || dbSendToken());
+  return `
+      <div class="sect">データベースへ直接送る</div>
+      <div class="card" id="dbSendCard">
+        <div class="tiny muted">この調査の記録（写真は含みません）を、ファイルを作らずに魚類データベースへ送ります。
+          <b>同じものを2回送っても、向こうでは増えません。</b>
+          アプリで直した分は次の送信で反映され、データベースの画面で直した分は上書きしません。
+          送っても、手元の記録は消えません。</div>
+        <div class="sp"></div>
+        ${unpairedOld ? `<div class="tiny" style="color:var(--warn);margin-bottom:6px">前の版で保存した宛先と合言葉は、組み合わせを確かめられないため使いません。お手数ですが、宛先と合言葉を入れ直してください。</div>` : ''}
+        <label class="field"><span class="lab">宛先</span>
+          <input id="dbs_url" value="${paired ? esc(dbSendUrl()) : ''}" placeholder="https://…….ts.net/app-ingest" inputmode="url" autocapitalize="off" autocorrect="off"></label>
+        <label class="field"><span class="lab">合言葉</span>
+          <input id="dbs_token" type="password" value="${paired ? esc(dbSendToken()) : ''}" placeholder="データベースの管理者から受け取ったもの"></label>
+        <button class="btn" onclick="dbSendTest()">つながるか試す</button>
+        <div class="sp"></div>
+        <button class="btn primary" id="dbs_send" onclick="dbSendNow('${sv.uuid}')">いま送る</button>
+        <div class="tiny muted" style="margin-top:8px">合言葉はこの端末の中に保存されます。<b>共有の端末では入力しないでください</b>。使い終わったら
+          <button class="btn ghost small" style="width:auto;display:inline-block" onclick="dbSendForget()">合言葉を消す</button></div>
+        ${sv.db_sent_at ? `<div class="tiny muted" style="margin-top:8px">前回の送信：${esc(dbSendWhen(sv.db_sent_at))}${sv.db_receipt ? `（受領証 ${esc(sv.db_receipt)}）` : ''}${sv.db_send_result ? `<br>${esc(sv.db_send_result)}` : ''}</div>` : ''}
+        <div class="tiny muted" style="margin-top:8px">電波が無いときや受け口が止まっているときは、下の「記録だけバックアップ（JSON）」を書き出して、データベースの画面から取り込めます。</div>
+      </div>`;
+}
+
 /* ---------- 書き出し画面 ---------- */
 SCREENS.exportHub = (svUuid)=>{
   const one = svUuid ? DB.survey(svUuid) : null;
@@ -7705,7 +7966,7 @@ SCREENS.exportHub = (svUuid)=>{
       <div class="card"><div class="small muted">対象</div>
         <div>${esc(one? one.name : `すべての調査（${surveys.length}件）`)}</div>
         <div class="small muted" style="margin-top:6px">産卵床 ${nRedd} 件 ／ 写真 ${nPhoto} 枚</div></div>
-
+      ${one ? dbSendCardHtml(one) : ''}
       <div class="sect">表計算・GIS用</div>
       <button class="btn" onclick="exportCSV(exportTargets(${arg}))">CSV（記録・区間・測点）</button>
       <div class="sp"></div>
@@ -7759,7 +8020,8 @@ SCREENS.trash = ()=>{
         <div class="grow"><div>${esc(g.name(x))}</div>
           <div class="tiny muted">削除 ${fmtDate(x.deleted_at)} ${fmtTime(x.deleted_at)}</div></div>
         <button class="btn ghost small" style="width:auto" onclick="restoreItem('${g.key}','${x.uuid}')">戻す</button>
-      </div></div>`).join('');
+      </div>${(g.key==='sv' && dbSendUrl()) ? `<div class="tiny muted" style="margin-top:6px">データベースに送ってある調査なら、消したことも送れます。
+        <button class="btn ghost small" style="width:auto;display:inline-block" onclick="dbSendNow('${x.uuid}')">削除をデータベースへ送る</button></div>` : ''}</div>`).join('');
   }).join('');
   const total = TRASH_GROUPS.reduce((a,g)=>a+DB.deleted(DB.key[g.key]).length, 0);
   return {
