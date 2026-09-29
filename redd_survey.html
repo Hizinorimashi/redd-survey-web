@@ -160,11 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v39';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v40';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-29';
-const APP_NOTE = '産卵床に「数」を入れられる（同じ場所に何床も。既定 1、親魚・ホッチャレだけなら 0）'
+const APP_NOTE = '一覧はふだん新しい10件／物理環境のメッシュの範囲を1行に'
+  + '／産卵床に「数」を入れられる（同じ場所に何床も。既定 1、親魚・ホッチャレだけなら 0）'
   + '／物理環境の一覧にも絞り込み（まだ入れていないものだけ・すべて表示・区間）'
   + '／データベースへ直接送る（v38）';
 
@@ -4189,7 +4190,7 @@ function envDrawAll(svUuid){
 
 /* ---------- 産卵床（S）を地図に描く ---------- */
 /* ふだん一覧に並べる数。これを超える分は「すべて表示」を押したときだけ出す */
-const REDD_CHIP_MAX = 20;
+const REDD_CHIP_MAX = 10;
 /* これを超えたら、地図には見えている範囲のものだけを描く */
 const REDD_DRAW_MAX = 300;
 /* 置いただけで、まだ中身が入っていない産卵床。
@@ -4257,7 +4258,7 @@ function reddListFor(svUuid){
   let list = reddsSorted(svUuid);
   if(REDD_FILTER.reach) list = list.filter(r=>(r.reach_uuid||'') === REDD_FILTER.reach);
   if(REDD_FILTER.empty) list = list.filter(reddEmpty);
-  // ふだんは新しいほうの20件だけ。古いものは「すべて表示」で出す
+  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す
   if(!REDD_FILTER.all && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
   return list;
 }
@@ -4322,7 +4323,7 @@ function unitListFor(svUuid){
   let list = unitsListed(svUuid);
   if(ENV_FILTER.reach) list = list.filter(x=>(x.reach_uuid||'') === ENV_FILTER.reach);
   if(ENV_FILTER.empty) list = list.filter(unitEmpty);
-  // ふだんは新しいほうの20件だけ。古いものは「すべて表示」で出す
+  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す
   if(!ENV_FILTER.all && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
   return list;
 }
@@ -4951,6 +4952,7 @@ SCREENS.envMap = (argStr)=>{
   envUseSurvey(svUuid);        // 別の調査から持ち越さない
   envPickPrune(svUuid);        // 手動保存・区間の削除などで作り直したときも、隠れたものは選択から外す
   // メッシュの範囲は位置の持ち方が違うので、点・線の並びに混ぜない。
+  // 地図の下では 1 行（id=meshRow）だけ。見出し・説明の 3 段は一覧と入力欄のあいだで邪魔だった（v40）
   // 混ぜると、位置の無い点として並んでしまう
   const meshes = DB.unitsOf(svUuid).filter(isMesh);
   const list = DB.unitsOf(svUuid).filter(x=>!isMesh(x));
@@ -5025,14 +5027,14 @@ SCREENS.envMap = (argStr)=>{
           : '<div class="tiny muted">まだありません。地図の左下の印で、置くものを選んでから地図をタップしてください。</div>'}`,
         true)}
 
-      <div class="card">
-        <div class="sect" style="margin-top:0">メッシュの範囲</div>
+      <div class="row" id="meshRow" style="flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0">
+        <span class="tiny muted">メッシュ：</span>
         ${meshes.map(x=>`<button class="btn ghost small"
-          style="width:auto;padding:4px 10px;margin:0 6px 6px 0"
+          style="width:auto;padding:4px 10px;margin:0;min-height:32px"
           onclick="nav('mesh','${x.uuid}')">${esc(x.name||'')}（${meshCellsOf(x.uuid).length}マス）</button>`).join('')}
-        <div><button class="btn ghost small" style="width:auto;padding:4px 10px"
-          onclick="meshCreate('${svUuid}')">メッシュの範囲を作る</button></div>
-        <div class="tiny muted">メッシュは別の画面で記録します。マスごとに水深・流速・河床材料を入れられます。</div>
+        <button class="btn ghost small" style="width:auto;padding:4px 10px;margin:0;min-height:32px"
+          title="マスごとに水深・流速・河床材料を入れる範囲を、別の画面で作ります"
+          onclick="meshCreate('${svUuid}')">＋ 範囲を作る</button>
       </div>
 
       <div id="envFormTop"></div>
