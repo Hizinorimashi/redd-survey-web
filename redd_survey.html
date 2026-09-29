@@ -160,13 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v41';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v42';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-29';
-const APP_NOTE = 'データベースに弾かれたとき、その理由の一覧を送信カードの下に出す'
-  + '／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」・物理環境の一覧にも絞り込み（v39）'
-  + '／データベースへ直接送る（v38）';
+const APP_NOTE = '一覧の絞り込みを増やす（産卵床: 要確認だけ・魚種が未定・魚種で絞る・並び順／物理環境: 直しが要るものだけ・点かラインか・並び順）'
+  + '／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -3154,8 +3153,8 @@ function envUseSurvey(svUuid){
     ENV_NEXT = {kind:'P', auto:false, line:'', survey:svUuid};
     // 一覧の絞り込みは調査ごと。前の調査の区間 UUID が残ると、次の調査で一覧が 0 件になる
     // （選択欄は「区間：すべて」に見えるのに絞られたまま。監査 v39 Major）
-    REDD_FILTER = {all:false, empty:false, reach:''};
-    ENV_FILTER  = {all:false, empty:false, reach:''};
+    REDD_FILTER = reddFilterDefault();
+    ENV_FILTER  = envFilterDefault();
   }
 }
 function envSetKind(k){
@@ -4245,20 +4244,48 @@ function reddDrawAll(svUuid){
 }
 
 /* 一覧の絞り込み。100件を超えると、ぜんぶ並べても目的のものを探せない */
-let REDD_FILTER = {all:false, empty:false, reach:''};
+/* ---------- 一覧の絞り込みと並び順（産卵床・物理環境で同じ作り。v22・v39・v42） ----------
+   REDD_FILTER / ENV_FILTER は調査ごと（envUseSurvey で初期化。区間を消したらその区間の絞り込みも解く）。
+     all     … ふだんは新しい REDD_CHIP_MAX 件だけ → すべて
+     empty   … まだ入れていないものだけ
+     reach   … 区間の UUID で絞る
+     sort    … 'no'（番号順・既定）／'new'（新しい順）
+   産卵床だけ:   review（要確認だけ）・species（'' すべて／'__none' 魚種が未定／魚種名）
+   物理環境だけ: odd（直しが要るものだけ＝データベースが受け付けない値）・kind（'' すべて／'点'／'ライン'）
+   絞り込みをどれか使ったら件数の窓は外す（探しているものが窓の外にあると見つからない） */
+function reddFilterDefault(){ return {all:false, empty:false, reach:'', sort:'no', review:false, species:''}; }
+function envFilterDefault(){  return {all:false, empty:false, reach:'', sort:'no', odd:false, kind:''}; }
+let REDD_FILTER = reddFilterDefault();
+/* 絞り込み（まだ入れていない・要確認・魚種）を使っている間は、件数の窓（新しい N 件）を掛けない。
+   窓が掛かると 11 件以上の要確認が隠れ、まとめて直せない（監査 v42 Major）。区間と並びは絞り込みに数えない */
+function reddFiltering(){ return !!(REDD_FILTER.empty || REDD_FILTER.review || REDD_FILTER.species); }
 function reddFilterToggle(what, svUuid){
-  if(what==='all')   REDD_FILTER.all   = !REDD_FILTER.all;
-  if(what==='empty'){ REDD_FILTER.empty = !REDD_FILTER.empty; REDD_FILTER.all = true; }
+  if(what==='all')    REDD_FILTER.all    = !REDD_FILTER.all;
+  if(what==='empty')  REDD_FILTER.empty  = !REDD_FILTER.empty;
+  if(what==='review') REDD_FILTER.review = !REDD_FILTER.review;
   reddChipSync(svUuid);
 }
 function reddFilterReach(v, svUuid){ REDD_FILTER.reach = v || ''; reddChipSync(svUuid); }
+function reddFilterSpecies(v, svUuid){ REDD_FILTER.species = v || ''; reddChipSync(svUuid); }
+function reddFilterSort(v, svUuid){ REDD_FILTER.sort = (v==='new') ? 'new' : 'no'; reddChipSync(svUuid); }
+/* 魚種が未定: 空欄・「なし」・「不明」。集計では「種不明」にまとまるもの */
+function reddSpeciesUnknown(r){ const s = String((r&&r.species)||'').trim(); return s==='' || s==='なし' || s==='不明'; }
+function reddSpeciesMatch(r, v){
+  if(!v) return true;
+  if(v==='__none') return reddSpeciesUnknown(r);
+  return String((r&&r.species)||'').trim() === v;
+}
 /* いま一覧に並べるもの */
 function reddListFor(svUuid){
   let list = reddsSorted(svUuid);
-  if(REDD_FILTER.reach) list = list.filter(r=>(r.reach_uuid||'') === REDD_FILTER.reach);
-  if(REDD_FILTER.empty) list = list.filter(reddEmpty);
-  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す
-  if(!REDD_FILTER.all && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
+  if(REDD_FILTER.reach)   list = list.filter(r=>(r.reach_uuid||'') === REDD_FILTER.reach);
+  if(REDD_FILTER.empty)   list = list.filter(reddEmpty);
+  if(REDD_FILTER.review)  list = list.filter(r=>!!r.needs_review);
+  if(REDD_FILTER.species) list = list.filter(r=>reddSpeciesMatch(r, REDD_FILTER.species));
+  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す。絞り込み中は全件
+  if(!REDD_FILTER.all && !reddFiltering() && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
+  // 番号は置いた順に増えるので、番号順の逆＝新しい順
+  if(REDD_FILTER.sort==='new') list = list.slice().reverse();
   return list;
 }
 function reddChipsHtml(svUuid){
@@ -4266,41 +4293,67 @@ function reddChipsHtml(svUuid){
   if(!list.length) return '<div class="tiny muted">この条件に合うものはありません。</div>';
   return list.map(r=>{
     const on = envFocus()==='rd' && r.uuid === REDD_SEL;
-    // まだ入れていないものには「…」を付ける（終わっていないラインと同じ印）
+    // まだ入れていないものには「…」（終わっていないラインと同じ印）、要確認には「！」
     return `<button type="button" data-u="${r.uuid}" class="${on?'on':''}"
-      onclick="reddPick('${r.uuid}','${svUuid}')">${esc(reddName(r))}${reddEmpty(r)?'…':''}</button>`;
+      onclick="reddPick('${r.uuid}','${svUuid}')">${r.needs_review?'！':''}${esc(reddName(r))}${reddEmpty(r)?'…':''}</button>`;
   }).join('');
 }
-/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残しが分かる（v36） */
+/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残し・要確認が分かる（v36・v42） */
 function reddFoldHeadHtml(svUuid){
   const all = DB.reddsOf(svUuid);
   const empty = all.filter(reddEmpty).length;
+  const review = all.filter(r=>!!r.needs_review).length;
   return `${all.length}件`
-    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : (all.length ? '　ぜんぶ入りました' : ''));
+    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : '')
+    + (review ? `　<b>要確認 ${review}件</b>` : '')
+    + (all.length && !empty && !review ? '　ぜんぶ入りました' : '');
+}
+/* 魚種の選択肢: 未定（空・なし・不明）と、この調査で使われている魚種（多い順） */
+function reddSpeciesOptions(svUuid){
+  const all = DB.reddsOf(svUuid);
+  const m = new Map();
+  all.forEach(r=>{ if(!reddSpeciesUnknown(r)){ const k=String(r.species).trim(); m.set(k,(m.get(k)||0)+1); } });
+  return { none: all.filter(reddSpeciesUnknown).length,
+           list: [...m.entries()].sort((a,b)=>b[1]-a[1]) };
 }
 function reddHeadHtml(svUuid){
   const all = DB.reddsOf(svUuid);
+  if(!all.length) return '';
   const empty = all.filter(reddEmpty).length;
+  const review = all.filter(r=>!!r.needs_review).length;
   const shown = reddListFor(svUuid).length;
   const reaches = DB.reachesOf(svUuid);
-  const opt = (v, t)=>`<option value="${esc(v)}"${REDD_FILTER.reach===v?' selected':''}>${esc(t)}</option>`;
+  const sp = reddSpeciesOptions(svUuid);
+  const opt = (cur, v, t)=>`<option value="${esc(v)}"${cur===v?' selected':''}>${esc(t)}</option>`;
   return `
-    <div class="row">
+    <div class="row" style="flex-wrap:wrap;gap:6px">
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
-        onclick="reddFilterToggle('empty','${svUuid}')">${REDD_FILTER.empty?'絞り込みをやめる':`まだ入れていないものだけ（${empty}）`}</button>
+        onclick="reddFilterToggle('empty','${svUuid}')">${REDD_FILTER.empty?'まだ入れていないものだけ：やめる':`まだ入れていないものだけ（${empty}）`}</button>
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
-        onclick="reddFilterToggle('all','${svUuid}')">${REDD_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>
+        onclick="reddFilterToggle('review','${svUuid}')">${REDD_FILTER.review?'要確認だけ：やめる':`要確認だけ（${review}）`}</button>
+      ${reddFiltering() ? '' : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="reddFilterToggle('all','${svUuid}')">${REDD_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>`}
+    </div>
+    <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
       ${reaches.length ? `<select style="width:auto"
         onchange="reddFilterReach(this.value,'${svUuid}')">
-        ${opt('','区間：すべて')}${reaches.map(re=>opt(re.uuid, re.name||'')).join('')}
+        ${opt(REDD_FILTER.reach,'','区間：すべて')}${reaches.map(re=>opt(REDD_FILTER.reach, re.uuid, re.name||'')).join('')}
       </select>` : ''}
+      <select style="width:auto" onchange="reddFilterSpecies(this.value,'${svUuid}')">
+        ${opt(REDD_FILTER.species,'','魚種：すべて')}
+        ${opt(REDD_FILTER.species,'__none',`魚種が未定（${sp.none}）`)}
+        ${sp.list.map(([k,n])=>opt(REDD_FILTER.species, k, `${k}（${n}）`)).join('')}
+      </select>
+      <select style="width:auto" onchange="reddFilterSort(this.value,'${svUuid}')">
+        ${opt(REDD_FILTER.sort,'no','並び：番号順')}${opt(REDD_FILTER.sort,'new','並び：新しい順')}
+      </select>
     </div>
     ${shown < all.length ? `<div class="tiny muted">${shown}件を表示しています。</div>` : ''}`;
 }
 
-/* ---------- 物理環境の一覧の絞り込み（産卵床と同じ作り・v39） ----------
+/* ---------- 物理環境の一覧の絞り込み（産卵床と同じ作り・v39・v42） ----------
    点・ラインが増えると、ぜんぶ並べても目的のものを探せない。メッシュは別の欄に出す */
-let ENV_FILTER = {all:false, empty:false, reach:''};
+let ENV_FILTER = envFilterDefault();
 /* 置いただけで、中身をまだ入れていない物理環境。
    名前・場所・時刻は置いたときに自動で入るので見ない */
 function unitEmpty(x){
@@ -4310,20 +4363,105 @@ function unitEmpty(x){
            (Array.isArray(x.env_points) && x.env_points.length) ||
            f(x.substrate1) || f(x.water_temp_c) || f(x.memo));
 }
+/* 直しが要るもの＝データベースが受け付けない値（受け口の検査 redd_import_common と同じ規則）。
+   アプリは保存を止めない（v24 方針）ので、送る前にここで探せるようにする。
+   2026-09-29 の実機で、河床材料の割合の合計が 100 を超えた物理環境 9 件のために調査ごと弾かれ、
+   1 件直しては送り直す羽目になった */
+/* 受け口（redd_import_common.py）の数の検査と同じ規則。空は通す。数でない文字・範囲外は理由にする。
+   範囲は受け口の RANGES と同じ値（length_m / area_m2 / acc_m / pct。水深・流速・水温はアプリの表と同じ） */
+const DB_RANGE = { length_m:[0,100000], area_m2:[0,10000000], acc_m:[0,100000], pct:[0,100] };
+const JP_LAT = [20, 46], JP_LON = [122, 154];        // 受け口の LAT_RANGE / LON_RANGE
+function oddNum(odd, label, v, rg){
+  if(v===null || v===undefined || String(v).trim()==='') return;
+  const n = numOf(v);
+  if(n==='' || !isFinite(n)) odd.push(`${label}が数ではありません（いま ${String(v).trim()}）`);
+  else if(n < rg[0] || n > rg[1]) odd.push(`${label}は ${rg[0]}〜${rg[1]} の間で入れてください（いま ${n}）`);
+}
+/* 受け口の latlon() と同じ: 両方空は通す。片方だけ・数でない・日本の範囲外は理由 */
+function oddLatLon(odd, label, lat, lon){
+  const la = String(lat??'').trim(), lo = String(lon??'').trim();
+  if(la==='' && lo==='') return;
+  if(la==='' || lo===''){ odd.push(`${label}が片方だけ入っています`); return; }
+  const a = numOf(la), b = numOf(lo);
+  if(a==='' || b===''){ odd.push(`${label}が数ではありません（${la}, ${lo}）`); return; }
+  if(a < JP_LAT[0] || a > JP_LAT[1] || b < JP_LON[0] || b > JP_LON[1]) odd.push(`${label}が日本の範囲外です（${a}, ${b}）`);
+}
+/* 物理環境 1 件について、受け口 norm_unit / measures_from_points / pct_dict / _cover が拒む条件をすべて調べる。
+   受け口が拒むなら、ここも必ず 1 つ以上返す（phase43 の対照テストで固定。監査 v42 Major） */
+function unitOddValues(u){
+  if(!u) return [];
+  const odd = [];
+  // 位置（本体・始点・終点）と精度
+  oddLatLon(odd, '緯度経度', u.latitude, u.longitude);
+  oddLatLon(odd, '始点の緯度経度', u.line_start_lat, u.line_start_lon);
+  oddLatLon(odd, '終点の緯度経度', u.line_end_lat, u.line_end_lon);
+  oddNum(odd, 'GPS 精度', u.gps_accuracy, DB_RANGE.acc_m);
+  oddNum(odd, '始点の精度', u.line_start_acc, DB_RANGE.acc_m);
+  oddNum(odd, '終点の精度', u.line_end_acc, DB_RANGE.acc_m);
+  // 長さ・面積・格子
+  oddNum(odd, '長さ（手入力）', u.length_m_manual, DB_RANGE.length_m);
+  oddNum(odd, '川幅', u.width_m, DB_RANGE.length_m);
+  oddNum(odd, '面積（手入力）', u.area_m2_manual, DB_RANGE.area_m2);
+  oddNum(odd, '格子の行間隔', u.mesh_row_m, DB_RANGE.length_m);
+  oddNum(odd, '格子の列間隔', u.mesh_col_m, DB_RANGE.length_m);
+  // 代表値・水温
+  oddNum(odd, '水深', u.depth_rep_cm, ENV_RANGE.depth_cm);
+  oddNum(odd, '流速', u.velocity_rep_ms, ENV_RANGE.velocity_ms);
+  oddNum(odd, '水温', u.water_temp_c, REDD_RANGE.water_temp_c);
+  // 河床材料: 区分ごと 0〜100、合計 100 以下（受け口は泥＋砂を足して 1 区分にするが、合計の条件で同じ結果になる）
+  const pct = substratePct(u);
+  let sum = 0;
+  OPT.substrate.forEach(k=>{
+    oddNum(odd, `河床材料「${k}」の割合`, pct[k], DB_RANGE.pct);
+    const v = numOf(pct[k]); if(v!=='' && isFinite(v)) sum += v;
+  });
+  // 判定は丸めない（受け口 pct_dict と同じ「100 + 1e-9 を超えたら拒む」。丸めると 33.3334×3 が通ってしまう。監査 v42 2 往復目 Major）。
+  // 表示の値だけ小数第 2 位に丸める
+  if(sum > 100 + 1e-9) odd.push(`河床材料の割合の合計が 100 を超えています（${Math.round(sum*100)/100}）`);
+  // 受け口は泥＋砂を 1 区分（砂泥）に足し、その区分を誤差なしの「> 100」で拒む（pct_dict）。同じ判定をする（監査 v42 3 往復目 Major）
+  const mud = numOf(pct['泥']), sand = numOf(pct['砂']);
+  if(mud!=='' && sand!=='' && isFinite(mud) && isFinite(sand) && mud + sand > 100)
+    odd.push(`河床材料の割合（泥+砂）が 100 を超えています（${Math.round((mud+sand)*100)/100}）`);
+  // カバー（左右岸 3 つまで。受け口も先頭 3 つしか読まない）と、その長さ
+  ['left','right'].forEach(side=>{
+    const jp = side==='left' ? '左岸' : '右岸';
+    const arr = Array.isArray(u['cover_'+side]) ? u['cover_'+side] : [];
+    arr.slice(0,3).forEach((c,i)=>{ if(c && typeof c==='object') oddNum(odd, `${jp}のカバー${i+1}「${c.type||''}」の割合`, c.pct, DB_RANGE.pct); });
+    oddNum(odd, `${jp}のカバーの長さ`, u['cover_'+side+'_length_m'], DB_RANGE.length_m);
+  });
+  // 測点: 位置・精度・水深・流速
+  envPoints(u).forEach((pt,i)=>{
+    if(!pt || typeof pt!=='object') return;
+    oddLatLon(odd, `測点${i+1}の緯度経度`, pt.latitude, pt.longitude);
+    oddNum(odd, `測点${i+1}の GPS 精度`, pt.gps_accuracy, DB_RANGE.acc_m);
+    oddNum(odd, `測点${i+1}の水深`, pt.depth_cm, ENV_RANGE.depth_cm);
+    oddNum(odd, `測点${i+1}の流速`, pt.velocity_ms, ENV_RANGE.velocity_ms);
+  });
+  return odd;
+}
+function unitOdd(u){ return unitOddValues(u).length > 0; }
+/* 絞り込み（まだ入れていない・直しが要る・取り方）を使っている間は、件数の窓を掛けない（産卵床と同じ） */
+function unitFiltering(){ return !!(ENV_FILTER.empty || ENV_FILTER.odd || ENV_FILTER.kind); }
 function unitFilterToggle(what, svUuid){
   if(what==='all')   ENV_FILTER.all   = !ENV_FILTER.all;
-  if(what==='empty'){ ENV_FILTER.empty = !ENV_FILTER.empty; ENV_FILTER.all = true; }
+  if(what==='empty') ENV_FILTER.empty = !ENV_FILTER.empty;
+  if(what==='odd')   ENV_FILTER.odd   = !ENV_FILTER.odd;
   unitChipSync(svUuid);
 }
 function unitFilterReach(v, svUuid){ ENV_FILTER.reach = v || ''; unitChipSync(svUuid); }
+function unitFilterKind(v, svUuid){ ENV_FILTER.kind = (v==='点'||v==='ライン') ? v : ''; unitChipSync(svUuid); }
+function unitFilterSort(v, svUuid){ ENV_FILTER.sort = (v==='new') ? 'new' : 'no'; unitChipSync(svUuid); }
 /* 一覧に並べる物理環境。DB.unitsOf は古い順（P1・P2…と読める順）なのでそのまま */
 function unitsListed(svUuid){ return DB.unitsOf(svUuid).filter(x=>!isMesh(x)); }
 function unitListFor(svUuid){
   let list = unitsListed(svUuid);
   if(ENV_FILTER.reach) list = list.filter(x=>(x.reach_uuid||'') === ENV_FILTER.reach);
+  if(ENV_FILTER.kind)  list = list.filter(x=>envMethod(x) === ENV_FILTER.kind);
   if(ENV_FILTER.empty) list = list.filter(unitEmpty);
-  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す
-  if(!ENV_FILTER.all && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
+  if(ENV_FILTER.odd)   list = list.filter(unitOdd);
+  // ふだんは新しいほうの REDD_CHIP_MAX 件（10件）だけ。古いものは「すべて表示」で出す。絞り込み中は全件
+  if(!ENV_FILTER.all && !unitFiltering() && list.length > REDD_CHIP_MAX) list = list.slice(-REDD_CHIP_MAX);
+  if(ENV_FILTER.sort==='new') list = list.slice().reverse();
   return list;
 }
 function unitChipsHtml(svUuid){
@@ -4331,40 +4469,55 @@ function unitChipsHtml(svUuid){
   if(!list.length) return '<div class="tiny muted">この条件に合うものはありません。</div>';
   const picking = envPickOn();
   return list.map(x=>{
-    // 終わっていないラインと、まだ入れていないものに「…」を付ける（産卵床と同じ印）
+    // 終わっていないラインと、まだ入れていないものに「…」（産卵床と同じ印）。直しが要るものに「！」
     const half = (isLine(x) && !linePt(x,'end'));
     // 光らせるのは「いま入れているもの」だけ。両方光ると、どちらに打っているか分からない
     const on = picking ? ENV_PICK.set.has(x.uuid) : (envFocus()==='un' && x.uuid===ENV_SEL);
     const act = picking ? `envPickToggle('${x.uuid}')` : `envSelect('${x.uuid}')`;
     return `<button type="button" data-u="${x.uuid}" class="${on?'on':''}"
-      onclick="${act}">${picking && on ? '&check; ' : ''}${esc(x.name||'')}${(half || unitEmpty(x))?'…':''}</button>`;
+      onclick="${act}">${picking && on ? '&check; ' : ''}${unitOdd(x)?'！':''}${esc(x.name||'')}${(half || unitEmpty(x))?'…':''}</button>`;
   }).join('');
 }
-/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残しが分かる */
+/* 折りたたみの見出しに出す件数。閉じていても、数と入れ残し・直しが要るものが分かる */
 function unitFoldHeadHtml(svUuid){
   const all = unitsListed(svUuid);
   const empty = all.filter(unitEmpty).length;
+  const odd = all.filter(unitOdd).length;
   return `${all.length}件`
-    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : (all.length ? '　ぜんぶ入りました' : ''));
+    + (empty ? `　<b>まだ入れていない ${empty}件</b>` : '')
+    + (odd ? `　<b>直しが要る ${odd}件</b>` : '')
+    + (all.length && !empty && !odd ? '　ぜんぶ入りました' : '');
 }
 function unitHeadHtml(svUuid){
   const all = unitsListed(svUuid);
   if(!all.length) return '';
   const empty = all.filter(unitEmpty).length;
+  const odd = all.filter(unitOdd).length;
   const shown = unitListFor(svUuid).length;
   const reaches = DB.reachesOf(svUuid);
-  const opt = (v, t)=>`<option value="${esc(v)}"${ENV_FILTER.reach===v?' selected':''}>${esc(t)}</option>`;
+  const opt = (cur, v, t)=>`<option value="${esc(v)}"${cur===v?' selected':''}>${esc(t)}</option>`;
   return `
-    <div class="row">
+    <div class="row" style="flex-wrap:wrap;gap:6px">
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
-        onclick="unitFilterToggle('empty','${svUuid}')">${ENV_FILTER.empty?'絞り込みをやめる':`まだ入れていないものだけ（${empty}）`}</button>
+        onclick="unitFilterToggle('empty','${svUuid}')">${ENV_FILTER.empty?'まだ入れていないものだけ：やめる':`まだ入れていないものだけ（${empty}）`}</button>
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
-        onclick="unitFilterToggle('all','${svUuid}')">${ENV_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>
+        onclick="unitFilterToggle('odd','${svUuid}')">${ENV_FILTER.odd?'直しが要るものだけ：やめる':`直しが要るものだけ（${odd}）`}</button>
+      ${unitFiltering() ? '' : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="unitFilterToggle('all','${svUuid}')">${ENV_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>`}
+    </div>
+    <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
       ${reaches.length ? `<select style="width:auto"
         onchange="unitFilterReach(this.value,'${svUuid}')">
-        ${opt('','区間：すべて')}${reaches.map(re=>opt(re.uuid, re.name||'')).join('')}
+        ${opt(ENV_FILTER.reach,'','区間：すべて')}${reaches.map(re=>opt(ENV_FILTER.reach, re.uuid, re.name||'')).join('')}
       </select>` : ''}
+      <select style="width:auto" onchange="unitFilterKind(this.value,'${svUuid}')">
+        ${opt(ENV_FILTER.kind,'','取り方：すべて')}${opt(ENV_FILTER.kind,'点','点だけ')}${opt(ENV_FILTER.kind,'ライン','ラインだけ')}
+      </select>
+      <select style="width:auto" onchange="unitFilterSort(this.value,'${svUuid}')">
+        ${opt(ENV_FILTER.sort,'no','並び：番号順')}${opt(ENV_FILTER.sort,'new','並び：新しい順')}
+      </select>
     </div>
+    ${ENV_FILTER.odd && odd ? `<div class="tiny" style="color:var(--warn);margin-top:6px">「！」の付いたものは、データベースに送っても受け付けられません（河床材料の割合の合計が 100 を超えている、水深や流速が範囲外、など）。押して開いて直してください。</div>` : ''}
     ${shown < all.length ? `<div class="tiny muted">${shown}件を表示しています。</div>` : ''}`;
 }
 /* 物理環境の一覧の見た目だけを書き替える（画面は作り直さない）。
@@ -4381,6 +4534,7 @@ function unitChipSync(svUuid){
   if(envPickOn()) envPickSync();     // 件数と印を、いま見えている一覧にそろえる
   reddKeepFormPlace(top);
 }
+
 /* 全体が入るように動かす。押したときだけ */
 function envFitAll(svUuid){
   if(!ENVMAP) return;
