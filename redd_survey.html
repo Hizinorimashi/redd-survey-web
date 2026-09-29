@@ -160,13 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v40';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v41';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-29';
-const APP_NOTE = '一覧はふだん新しい10件／物理環境のメッシュの範囲を1行に'
-  + '／産卵床に「数」を入れられる（同じ場所に何床も。既定 1、親魚・ホッチャレだけなら 0）'
-  + '／物理環境の一覧にも絞り込み（まだ入れていないものだけ・すべて表示・区間）'
+const APP_NOTE = 'データベースに弾かれたとき、その理由の一覧を送信カードの下に出す'
+  + '／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」・物理環境の一覧にも絞り込み（v39）'
   + '／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
@@ -8044,6 +8043,7 @@ async function dbSendNow(svUuid){
       return {ok:false, why:'network'};            // 送った印は付けない
     }
     if(res.status === 200 && j && j.ok === true){        // 契約どおり 200 だけを成功とする（201 などは扱わない）
+      if(DB_SEND_LAST_FAIL && DB_SEND_LAST_FAIL.sv === svUuid) DB_SEND_LAST_FAIL = null;
       const summary = dbSendSummary(j);
       const marked = dbSendMark(svUuid, {receipt:j.receipt, summary: dbSendResultText(j)});
       const warn = (Array.isArray(j.warnings) && j.warnings.length) ? `　注意: ${String(j.warnings[0]).slice(0,120)}` : '';
@@ -8070,13 +8070,39 @@ async function dbSendNow(svUuid){
        : res.status===413 ? '送るものが大きすぎます。JSON を書き出してデータベースの画面から取り込んでください'
        : res.status===409 ? '前に送った内容と食い違いがあります。データベースの画面で確かめてください'
        : ('HTTP ' + res.status));
-    toast('送れませんでした：' + why);
+    dbSendFailNote(svUuid, why, j);                  // 理由の一覧はカードの下に残す（finally の render で出る）
+    const first = (j && Array.isArray(j.errors) && j.errors.length) ? '　' + String(j.errors[0]).slice(0,120) : '';
+    toast('送れませんでした：' + why + first + '　理由の一覧は送信カードの下に出しています');
     return {ok:false, status:res.status, why};
   }finally{
     DB_SENDING = false;
     if(btn) btn.disabled = false;
     try{ render(); }catch(e){}
   }
+}
+/* 直前の送信が受け口に弾かれた理由。トーストは数秒で消えるので、カードの下に残す（v41）。
+   端末には保存しない（送り直せば消える。理由の文には記録の値が入ることがある）。
+   2026-09-29 の実機で「9 件の問題」の中身が読めず、原因の特定に DB 側の記録を見に行く羽目になった */
+let DB_SEND_LAST_FAIL = null;
+function dbSendFailNote(sv, why, j){
+  // 受け口は 20 件までしか返さないが、契約外の巨大な返事でも画面が重くならないよう、
+  // 先に 20 件に切ってから文字にし、1 件ずつ 500 字までに詰める（監査 v41 Minor）
+  const CUT = 500;
+  const errs = (j && Array.isArray(j.errors))
+    ? j.errors.slice(0,20).map(x=>String(x).slice(0,CUT)).filter(Boolean) : [];
+  const tot = (j && Number.isFinite(+j.error_total)) ? Math.max(0, Math.floor(+j.error_total)) : errs.length;
+  DB_SEND_LAST_FAIL = { sv, when: nowISO(), why: String(why||'').slice(0,CUT), errors: errs,
+                        total: Math.max(tot, errs.length) };
+}
+function dbSendFailHtml(sv){
+  const f = DB_SEND_LAST_FAIL;
+  if(!f || f.sv !== sv.uuid) return '';
+  const more = f.total > f.errors.length ? `<li>…ほか ${f.total - f.errors.length} 件</li>` : '';
+  return `<div class="warnbox" id="dbs_fail" style="margin-top:8px">
+      前回の送信（${esc(dbSendWhen(f.when))}）は受け付けられませんでした：${esc(f.why)}
+      ${f.errors.length ? `<ul style="margin:6px 0 0 18px;padding:0">${f.errors.map(e=>`<li>${esc(e)}</li>`).join('')}${more}</ul>` : ''}
+      <div class="tiny" style="margin-top:6px">該当する記録をアプリで直してから、もう一度「いま送る」を押してください。直せない理由のときは、この文をそのまま管理者に伝えてください。</div>
+    </div>`;
 }
 function dbSendCardHtml(sv){
   // 印の無い保存値（混成かもしれない）は欄に出さない。出すと、そのまま押しただけで混成に印が付いて送られる
@@ -8101,6 +8127,7 @@ function dbSendCardHtml(sv){
         <button class="btn primary" id="dbs_send" onclick="dbSendNow('${sv.uuid}')">いま送る</button>
         <div class="tiny muted" style="margin-top:8px">合言葉はこの端末の中に保存されます。<b>共有の端末では入力しないでください</b>。使い終わったら
           <button class="btn ghost small" style="width:auto;display:inline-block" onclick="dbSendForget()">合言葉を消す</button></div>
+        ${dbSendFailHtml(sv)}
         ${sv.db_sent_at ? `<div class="tiny muted" style="margin-top:8px">前回の送信：${esc(dbSendWhen(sv.db_sent_at))}${sv.db_receipt ? `（受領証 ${esc(sv.db_receipt)}）` : ''}${sv.db_send_result ? `<br>${esc(sv.db_send_result)}` : ''}</div>` : ''}
         <div class="tiny muted" style="margin-top:8px">電波が無いときや受け口が止まっているときは、下の「記録だけバックアップ（JSON）」を書き出して、データベースの画面から取り込めます。</div>
       </div>`;
