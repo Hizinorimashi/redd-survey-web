@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v42';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v43';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-29';
-const APP_NOTE = '一覧の絞り込みを増やす（産卵床: 要確認だけ・魚種が未定・魚種で絞る・並び順／物理環境: 直しが要るものだけ・点かラインか・並び順）'
-  + '／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
+const APP_DATE = '2026-09-30';
+const APP_NOTE = '区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる。空欄なら調査の条件を使う。区間の日付は始めた時刻から'
+  + '／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -1824,6 +1824,53 @@ function reachLength(r){
   return +r.length_m_auto || 0;
 }
 function reachName(sv, u){ const r=DB.get(DB.key.re,u); return r?r.name:''; }
+
+/* ---------- 区間ごとの調査時条件（v43・spec 20 章） ----------
+   調査が 2 日以上にまたがるとき、天候・気温・水温・濁り・水位を区間ごとに持てる。
+   区間が空欄なら調査の値を使う（項目ごと）。0 は入力値。JSON バックアップと直接送信は生の値のまま。
+   産卵床・物理環境の水温は「その場所の水温」で別物（変えない） */
+const REACH_COND_KEYS = ['weather','air_temp_c','water_temp_c','turbidity','water_level'];
+const REACH_COND_LABEL = { weather:'天候', air_temp_c:'気温', water_temp_c:'水温', turbidity:'濁り', water_level:'水位' };
+const AIR_TEMP_RANGE = [-50, 50];      // 気温。冬の氷点下を異常扱いしない。水温は REDD_RANGE.water_temp_c
+function condBlank(v){ return v===null || v===undefined || String(v).trim()===''; }
+/* 有効な条件。inherited = 調査の値を使った項目名（調査側も空なら空のまま、それでも継承扱い） */
+function reachCond(r, s){
+  const out = { inherited: [] };
+  REACH_COND_KEYS.forEach(k=>{
+    const rv = r ? r[k] : undefined;
+    if(!condBlank(rv)){ out[k] = rv; }
+    else { out[k] = (s && !condBlank(s[k])) ? s[k] : ''; out.inherited.push(k); }
+  });
+  return out;
+}
+/* 区間の日付。started_at を端末の現地時刻で読む（slice(0,10) は UTC の日付になり深夜にずれる）。空・読めない → '' */
+function reachDate(r){
+  const t = r ? r.started_at : '';
+  if(condBlank(t)) return '';
+  const d = new Date(t); if(isNaN(d)) return '';
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+/* 範囲外の温度（要確認）。保存せず、出すたびに計算する（区間には要確認の欄を持たない）。
+   見るのは「有効な値」（区間が空なら調査の値）。調査の範囲外の気温を継承した区間にも要確認を出す（監査 v43 Major）。
+   s を渡さなければ区間の値だけを見る */
+function reachCondOdd(r, s){
+  if(!r) return [];
+  const c = s ? reachCond(r, s) : r;
+  const from = k => (s && c.inherited && c.inherited.indexOf(k)>=0) ? '（調査の値）' : '';
+  return rangeCheckAll([['気温' + from('air_temp_c'), c.air_temp_c, AIR_TEMP_RANGE[0], AIR_TEMP_RANGE[1]],
+                        ['水温' + from('water_temp_c'), c.water_temp_c, REDD_RANGE.water_temp_c[0], REDD_RANGE.water_temp_c[1]]]);
+}
+/* 条件を 1 行の文にする。opt.mark なら調査から使った項目に「(調査)」 */
+function condText(c, opt){
+  const mark = k => (opt && opt.mark && c.inherited.indexOf(k)>=0) ? '(調査)' : '';
+  const has = v => !condBlank(v);
+  return [ has(c.weather) ? c.weather + mark('weather') : '',
+           has(c.air_temp_c) ? `気温${c.air_temp_c}℃` + mark('air_temp_c') : '',
+           has(c.water_temp_c) ? `水温${c.water_temp_c}℃` + mark('water_temp_c') : '',
+           has(c.turbidity) ? c.turbidity + mark('turbidity') : '',
+           has(c.water_level) ? c.water_level + mark('water_level') : '' ].filter(Boolean).join('／') || '—';
+}
 function startReach(sv){
   if(activeReach(sv)){ toast('すでに区間を記録中です'); return; }
   const r = { uuid:uuid(), survey_uuid:sv, name:'St.'+(DB.reachesOf(sv).length+1),
@@ -1831,7 +1878,9 @@ function startReach(sv){
     start_lat: lastFix?+lastFix.lat.toFixed(6):'', start_lon: lastFix?+lastFix.lon.toFixed(6):'',
     end_lat:'', end_lon:'',
     track: (lastFix && lastFix.acc<=GPS_MAX_ACC) ? [[lastFix.lat,lastFix.lon]] : [],
-    length_m_auto:0, length_m_manual:'', river_width_m:'', memo:'' };
+    length_m_auto:0, length_m_manual:'', river_width_m:'', memo:'',
+    // この区間の条件（v43・spec 20 章）。空欄＝調査の条件を使う。1 日調査ではここは触らない
+    weather:'', air_temp_c:'', water_temp_c:'', turbidity:'', water_level:'' };
   if(!DB.upsert(DB.key.re, r)) return;
   TRACK = { reach_uuid:r.uuid, pts:(r.track||[]).slice(), lastSave:Date.now() };
   startGps();
@@ -1917,6 +1966,8 @@ SCREENS.survey = (u)=>{
     (s.air_temp_c!==''&&s.air_temp_c!=null)?`気温${s.air_temp_c}℃`:'',
     (s.water_temp_c!==''&&s.water_temp_c!=null)?`水温${s.water_temp_c}℃`:''
   ].filter(Boolean).join(' ／ ') || '—';
+  // v43 から区間ごとの条件を持てる。ここは「調査の既定」と分かるように
+  const condLine = '既定の条件：' + cond + '（区間ごとに変えられます）';
 
   const sub = [{text:s.status||'未開始', cls: started?'ok':'off'}];
   if(started){
@@ -1935,7 +1986,7 @@ SCREENS.survey = (u)=>{
         <div class="small muted">河川</div>
         <div style="font-weight:700">${esc(s.river_name||'—')}${s.water_system?`<span class="small muted">（${esc(s.water_system)}）</span>`:''}</div>
         <div class="small muted" style="margin-top:8px">調査日 ${fmtDate(s.survey_date)}${s.investigator?` ／ ${esc(s.investigator)}`:''}</div>
-        <div class="small muted" style="margin-top:4px">${esc(cond)}</div>
+        <div class="small muted" style="margin-top:4px">${esc(condLine)}</div>
         ${s.start_datetime?`<div class="small muted" style="margin-top:4px">開始 ${fmtTime(s.start_datetime)}${s.end_datetime?` ／ 終了 ${fmtTime(s.end_datetime)}`:''}</div>`:''}
         ${s.purpose?`<div class="small" style="margin-top:8px">${esc(s.purpose)}</div>`:''}
       </div>
@@ -2056,6 +2107,9 @@ SCREENS.reaches = (sv)=>{
       <div class="small muted" style="margin-top:6px">
         区間長 ${fmtDist(len)}${manual?'（手入力）':''} ／ 産卵床 ${n} 件 ／ 密度 ${dens} 件/100m
       </div>
+      <div class="small muted" style="margin-top:4px">
+        ${esc(reachDate(r)||'—')}　${esc(condText(reachCond(r, s), {mark:true}))}${reachCondOdd(r, s).length ? ' <span style="color:var(--warn)">要確認</span>' : ''}
+      </div>
     </div>`;
   }).join('');
   return {
@@ -2070,6 +2124,11 @@ SCREENS.reachEdit = (argStr)=>{
   const r = DB.get(DB.key.re, a.u);
   if(!r || r.deleted_at) return SCREENS.home();
   const redds = DB.reddsOf(a.sv).filter(x=>x.reach_uuid===r.uuid);
+  const s = DB.survey(a.sv) || {};
+  // 空欄の項目に、いま使われる調査の値を薄く出す（値があるときだけ）
+  const hint = k => (condBlank(r[k]) && !condBlank(s[k])) ? `<span class="tiny muted">（調査の値: ${esc(s[k])}）</span>` : '';
+  const ph = k => (condBlank(r[k]) && !condBlank(s[k])) ? `調査の値 ${s[k]}` : '';
+  const odd = reachCondOdd(r, s);
   return {
     title:'区間の編集',
     html:`
@@ -2084,6 +2143,21 @@ SCREENS.reachEdit = (argStr)=>{
         <input id="fRLen" type="number" step="1" inputmode="decimal" value="${esc(r.length_m_manual??'')}" placeholder="空欄ならGPSの値を使う"></label>
       <label class="field"><span class="lab">平均の川幅（m）</span>
         <input id="fRWid" type="number" step="0.1" inputmode="decimal" value="${esc(r.river_width_m??'')}"></label>
+
+      <div class="sect">この区間の条件</div>
+      <div class="tiny muted">空欄は調査の条件を使います${condText(reachCond(null, s))!=='—' ? `（いま: ${esc(condText(reachCond(null, s)))}）` : ''}。
+        日にちが変わった区間や、天候・水位が変わった区間だけ入れてください。</div>
+      <label class="field"><span class="lab">天候${hint('weather')}</span>${segHtml('rWeather', OPT.weather, r.weather||'', true)}</label>
+      <div class="two">
+        <label class="field"><span class="lab">気温（℃）${hint('air_temp_c')}</span>
+          <input id="fRAirT" type="number" step="0.1" inputmode="decimal" value="${esc(r.air_temp_c??'')}" placeholder="${esc(ph('air_temp_c'))}"></label>
+        <label class="field"><span class="lab">水温（℃）${hint('water_temp_c')}</span>
+          <input id="fRWaterT" type="number" step="0.1" inputmode="decimal" value="${esc(r.water_temp_c??'')}" placeholder="${esc(ph('water_temp_c'))}"></label>
+      </div>
+      <label class="field"><span class="lab">濁り${hint('turbidity')}</span>${segHtml('rTurbidity', OPT.turbidity, r.turbidity||'', true)}</label>
+      <label class="field"><span class="lab">水位の状況${hint('water_level')}</span>${segHtml('rWaterLevel', OPT.waterLevel, r.water_level||'', true)}</label>
+      ${odd.length ? `<div class="warnbox">${esc(odd.join(' ／ '))}<div class="tiny">このままでも保存できます。区間の一覧と集計に「要確認」と出ます。</div></div>` : ''}
+
       <label class="field"><span class="lab">備考</span>
         <textarea id="fRMemo">${esc(r.memo||'')}</textarea></label>
       <button class="btn primary big" onclick="saveReach('${r.uuid}')">保存する</button>
@@ -2096,7 +2170,10 @@ function saveReach(u){
   const name = ($('#fRName').value||'').trim();
   if(!name){ toast('区間名を入れてください'); return; }
   DB.upsert(DB.key.re, { uuid:u, name,
-    length_m_manual: numVal('#fRLen'), river_width_m: numVal('#fRWid'), memo: $('#fRMemo').value||'' });
+    length_m_manual: numVal('#fRLen'), river_width_m: numVal('#fRWid'), memo: $('#fRMemo').value||'',
+    // この区間の条件。打った生の値だけ（調査の値は写さない。空欄＝調査の値を使う）
+    weather: segVal('rWeather'), air_temp_c: numVal('#fRAirT'), water_temp_c: numVal('#fRWaterT'),
+    turbidity: segVal('rTurbidity'), water_level: segVal('rWaterLevel') });
   toast('保存しました');
   goBack();
 }
@@ -6218,10 +6295,12 @@ function fmtNum(v, d){
 // 親魚だけ・ホッチャレだけの記録を床数に混ぜると密度が過大になるため
 function reachStats(sv){
   const all = DB.reddsOf(sv);
-  const build = (name, list, len)=>{
+  const s = DB.survey(sv) || {};
+  const build = (name, list, len, r)=>{
     const redds = list.filter(x=>hasTarget(x,'産卵床'));
     const n = reddTotal(redds);                       // 床数（1 記録に複数もある・v39）
     return { name, len, n,
+      date: reachDate(r), cond: reachCond(r, s), odd: r ? reachCondOdd(r, s) : [],   // 区間の日付と条件（v43）
       density: len>0 ? n/len*100 : null,
       area: sumOf(redds,'area_m2'),
       fishOnly: list.filter(x=>!hasTarget(x,'産卵床') && hasTarget(x,'親魚')).length,
@@ -6229,9 +6308,9 @@ function reachStats(sv){
       species: reddCountBy(redds,'species','種不明') };
   };
   const rows = DB.reachesOf(sv).map(r=>
-    build(r.name, all.filter(x=>x.reach_uuid===r.uuid), reachLength(r)));
+    build(r.name, all.filter(x=>x.reach_uuid===r.uuid), reachLength(r), r));
   const noReach = all.filter(x=>!x.reach_uuid);
-  if(noReach.length) rows.push(build('区間なし', noReach, 0));
+  if(noReach.length) rows.push(build('区間なし', noReach, 0, null));
   return rows;
 }
 
@@ -6275,9 +6354,11 @@ SCREENS.summary = (sv)=>{
 
   const reachTable = rows.length ? `
     <div class="tablewrap"><table>
-      <tr><th>区間</th><th class="num">区間長</th><th class="num">産卵床</th><th class="num">密度<br>(件/100m)</th><th class="num">親魚のみ</th><th class="num">ホッチャレ</th></tr>
+      <tr><th>区間</th><th>日付</th><th>条件</th><th class="num">区間長</th><th class="num">産卵床</th><th class="num">密度<br>(件/100m)</th><th class="num">親魚のみ</th><th class="num">ホッチャレ</th></tr>
       ${rows.map(r=>`<tr>
         <td>${esc(r.name)}</td>
+        <td>${esc(r.date||'—')}</td>
+        <td style="white-space:normal;min-width:9em">${esc(condText(r.cond, {mark:true}))}${r.odd.length ? ' <span style="color:var(--warn)">要確認</span>' : ''}</td>
         <td class="num">${r.len>0?fmtDist(r.len):'—'}</td>
         <td class="num">${r.n}</td>
         <td class="num">${r.density==null?'—':fmtNum(r.density)}</td>
@@ -6285,7 +6366,7 @@ SCREENS.summary = (sv)=>{
         <td class="num">${r.carcass||'—'}</td>
       </tr>`).join('')}
     </table></div>
-    <div class="tiny muted" style="margin-top:8px">密度は「床数 ÷ 区間長 × 100」。区間長が未入力の区間は密度を出せません。</div>`
+    <div class="tiny muted" style="margin-top:8px">密度は「床数 ÷ 区間長 × 100」。区間長が未入力の区間は密度を出せません。条件の「(調査)」は、区間に入れていないので調査の条件を使ったものです。</div>`
     : `<div class="empty">区間がありません。</div>`;
 
   const listTable = (title, pairs)=>`
@@ -7526,7 +7607,9 @@ function reddRows(surveys){
 /* ---------- 区間 ---------- */
 const REACH_COLS = ['survey_id','survey_name','survey_date','river_name','reach_id','reach_name',
   'started_at','ended_at','length_m_gps','length_m_manual','length_m_used','river_width_m',
-  'start_lat','start_lon','end_lat','end_lon','redd_count','record_count','density_per_100m','memo'];
+  'start_lat','start_lon','end_lat','end_lon','redd_count','record_count','density_per_100m','memo',
+  // 区間の日付と有効な条件（区間が空欄なら調査の値）。conditions_inherited は調査の値を使った項目名（; 区切り）。v43
+  'reach_date','weather','air_temp_c','water_temp_c','turbidity','water_level','conditions_inherited'];
 function reachRows(surveys){
   const rows=[];
   surveys.forEach(s=>{
@@ -7535,6 +7618,7 @@ function reachRows(surveys){
       const inReach = redds.filter(x=>x.reach_uuid===r.uuid);
       const n = reddTotal(inReach);   // 床数は産卵床のみ（1 記録に複数もある・v39）
       const len = reachLength(r);
+      const c = reachCond(r, s);
       rows.push({
         survey_id:s.uuid, survey_name:s.name, survey_date:fmtDate(s.survey_date), river_name:s.river_name,
         reach_id:r.uuid, reach_name:r.name, started_at:r.started_at, ended_at:r.ended_at||'',
@@ -7544,6 +7628,10 @@ function reachRows(surveys){
         redd_count:n, record_count:inReach.length,
         density_per_100m: len>0 ? +(n/len*100).toFixed(2) : '',
         memo:r.memo||'',
+        reach_date: reachDate(r),
+        weather: c.weather, air_temp_c: c.air_temp_c, water_temp_c: c.water_temp_c,
+        turbidity: c.turbidity, water_level: c.water_level,
+        conditions_inherited: c.inherited.join(';'),
       });
     });
   });
