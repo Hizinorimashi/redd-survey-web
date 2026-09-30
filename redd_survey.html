@@ -160,12 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v43';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v44';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-09-30';
-const APP_NOTE = '区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる。空欄なら調査の条件を使う。区間の日付は始めた時刻から'
-  + '／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
+const APP_NOTE = '絞り込み中でも「絞り込みをやめて新しい10件に戻す」で戻せる（v44）'
+  + '／区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる（v43）／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
 const $  = (s,r)=> (r||document).querySelector(s);
@@ -4337,6 +4337,9 @@ let REDD_FILTER = reddFilterDefault();
    窓が掛かると 11 件以上の要確認が隠れ、まとめて直せない（監査 v42 Major）。区間と並びは絞り込みに数えない */
 function reddFiltering(){ return !!(REDD_FILTER.empty || REDD_FILTER.review || REDD_FILTER.species); }
 function reddFilterToggle(what, svUuid){
+  // 絞り込み中に押したら、絞り込み（まだ入れていない・要確認・魚種）を解いて新しい N 件に戻す（v44）。
+  // 絞り込み中はボタンを消していたため、「取り方」「魚種」の選択を戻し忘れると 10 件に戻せなかった
+  if(what==='reset'){ REDD_FILTER.empty = false; REDD_FILTER.review = false; REDD_FILTER.species = ''; REDD_FILTER.all = false; }
   if(what==='all')    REDD_FILTER.all    = !REDD_FILTER.all;
   if(what==='empty')  REDD_FILTER.empty  = !REDD_FILTER.empty;
   if(what==='review') REDD_FILTER.review = !REDD_FILTER.review;
@@ -4408,7 +4411,9 @@ function reddHeadHtml(svUuid){
         onclick="reddFilterToggle('empty','${svUuid}')">${REDD_FILTER.empty?'まだ入れていないものだけ：やめる':`まだ入れていないものだけ（${empty}）`}</button>
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
         onclick="reddFilterToggle('review','${svUuid}')">${REDD_FILTER.review?'要確認だけ：やめる':`要確認だけ（${review}）`}</button>
-      ${reddFiltering() ? '' : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+      ${reddFiltering() ? `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="reddFilterToggle('reset','${svUuid}')">絞り込みをやめて新しい${REDD_CHIP_MAX}件に戻す</button>`
+        : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
         onclick="reddFilterToggle('all','${svUuid}')">${REDD_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>`}
     </div>
     <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
@@ -4520,6 +4525,8 @@ function unitOdd(u){ return unitOddValues(u).length > 0; }
 /* 絞り込み（まだ入れていない・直しが要る・取り方）を使っている間は、件数の窓を掛けない（産卵床と同じ） */
 function unitFiltering(){ return !!(ENV_FILTER.empty || ENV_FILTER.odd || ENV_FILTER.kind); }
 function unitFilterToggle(what, svUuid){
+  // 絞り込み中に押したら、絞り込み（まだ入れていない・直しが要る・取り方）を解いて新しい N 件に戻す（v44）
+  if(what==='reset'){ ENV_FILTER.empty = false; ENV_FILTER.odd = false; ENV_FILTER.kind = ''; ENV_FILTER.all = false; }
   if(what==='all')   ENV_FILTER.all   = !ENV_FILTER.all;
   if(what==='empty') ENV_FILTER.empty = !ENV_FILTER.empty;
   if(what==='odd')   ENV_FILTER.odd   = !ENV_FILTER.odd;
@@ -4579,7 +4586,9 @@ function unitHeadHtml(svUuid){
         onclick="unitFilterToggle('empty','${svUuid}')">${ENV_FILTER.empty?'まだ入れていないものだけ：やめる':`まだ入れていないものだけ（${empty}）`}</button>
       <button class="btn ghost small" style="width:auto;padding:4px 10px"
         onclick="unitFilterToggle('odd','${svUuid}')">${ENV_FILTER.odd?'直しが要るものだけ：やめる':`直しが要るものだけ（${odd}）`}</button>
-      ${unitFiltering() ? '' : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+      ${unitFiltering() ? `<button class="btn ghost small" style="width:auto;padding:4px 10px"
+        onclick="unitFilterToggle('reset','${svUuid}')">絞り込みをやめて新しい${REDD_CHIP_MAX}件に戻す</button>`
+        : `<button class="btn ghost small" style="width:auto;padding:4px 10px"
         onclick="unitFilterToggle('all','${svUuid}')">${ENV_FILTER.all?`新しい${REDD_CHIP_MAX}件に戻す`:`すべて表示（${all.length}）`}</button>`}
     </div>
     <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
