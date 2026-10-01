@@ -160,11 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v46';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v47';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-10-01';
-const APP_NOTE = '写真を全部外した調査も写真ZIP（写真 0 枚）で魚類データベースに伝えられる（v46）'
+const APP_NOTE = '物理環境の CSV・GeoJSON にも写真のファイル名（写真ZIP・QGIS と照合できる）（v47）'
+  + '／写真を全部外した調査も写真ZIP（写真 0 枚）で魚類データベースに伝えられる（v46）'
   + '／写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（v45）'
   + '／絞り込み中でも新しい10件に戻せる（v44）'
   + '／区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる（v43）／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
@@ -7678,7 +7679,7 @@ function unitCols(){
              'cover_right_3','cover_right_pct_3','cover_right_length_m','cover_right_present'])
     .concat(['mesh_row_m','mesh_col_m','mesh_rows','mesh_cols','mesh_length_m','mesh_width_m',
              'mesh_cell_count','mesh_old_cell_count','mesh_grid_id'])
-    .concat(['memo']);
+    .concat(['memo','photo_files']);     // 写真ZIP のファイル名（<写真の番号>.<拡張子>）と同じ（v47・魚類DB spec 21.15.8）
 }
 function unitRows(surveys){
   const rows=[];
@@ -7727,7 +7728,8 @@ function unitRows(surveys){
         mesh_cell_count:isMesh(u)?meshCurrentCells(u,cells).length:'',
         mesh_old_cell_count:isMesh(u)?meshOldCells(u,cells).length:'',
         mesh_grid_id:u.mesh_grid_id||'',
-        memo:u.memo||'' };
+        memo:u.memo||'',
+        photo_files:(u.photos||[]).map((p,i)=>photoFilename(u,i,p)).join(';') };
       OPT.substrate.forEach(g2=>{ row['pct_'+g2] = pct[g2]??''; });
       ['left','right'].forEach(side=>{
         const cl = coverList(u, side);
