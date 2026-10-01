@@ -160,11 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v45';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v46';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
 const APP_DATE = '2026-10-01';
-const APP_NOTE = '写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（魚類データベースへ取り込めるように）（v45）'
+const APP_NOTE = '写真を全部外した調査も写真ZIP（写真 0 枚）で魚類データベースに伝えられる（v46）'
+  + '／写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（v45）'
   + '／絞り込み中でも新しい10件に戻せる（v44）'
   + '／区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる（v43）／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
 
@@ -7987,7 +7988,7 @@ function photoZipItems(sv){
 }
 /* 作る前の検査（本体を読む前に分かるもの）。止める理由を返す（無ければ ''） */
 function photoZipPrecheck(items){
-  if(!items.length) return '書き出す写真がありません';
+  // 写真 0 枚でも止めない（v46）。manifest.json だけの ZIP で「この調査の写真は 0 枚」を魚類DB に伝える
   const heic = items.filter(it=>/^(heic|heif)$/i.test(String(it.p.ext||''))).length;
   if(heic) return `HEIC 形式の写真が ${heic} 枚あります。魚類データベースで表示できないため、写真ZIPを作れません。カメラの設定を「互換性優先（JPEG）」にして撮り直すか、その写真を外してください`;
   if(items.length > PHOTO_ZIP_LIMIT.count) return `写真が ${items.length} 枚あり、上限（${PHOTO_ZIP_LIMIT.count} 枚）を超えています`;
@@ -8006,6 +8007,7 @@ async function exportPhotoZip(surveys){
   const why = photoZipPrecheck(items);
   if(why){ toast(why); return; }
   const total = items.reduce((a,it)=>a+(+it.p.size||0), 0);
+  if(!items.length && !confirm('この調査には写真がありません。「写真は 0 枚」と魚類データベースに伝える写真ZIPを作りますか？（前に取り込んだ写真は、データベースで見えなくなります）')) return;
   // SHA-256 はブラウザの暗号の道具で計算する。https か localhost で開いていないと使えない（監査 v45 Major）
   if(!sha256Available()){
     toast('この開き方では写真ZIPを作れません（安全な接続が要ります）。公開ページ（https://…）から開き直してください'); return;
@@ -8042,6 +8044,9 @@ async function exportPhotoZip(surveys){
     return;
   }
   files.push({ name:'index.csv', u8:new TextEncoder().encode('\ufeff'+toCsv(PHOTO_ZIP_COLS, idx)) });
+  // 調査の札（v46）。写真 0 枚でも、どの調査の写真一覧かを魚類DB に伝える（魚類DB 監査 Major）
+  files.push({ name:'manifest.json', u8:new TextEncoder().encode(JSON.stringify(
+    { archive_version: PHOTO_ZIP_VERSION, survey_uuid: sv.uuid, photo_count: idx.length })) });
   downloadBlob(`${exportBase(surveys)}_photos.zip`, buildZip(files));
   }catch(e){
     // 暗号の計算・メモリ不足などで失敗したら、不完全な ZIP は出さずに止める
