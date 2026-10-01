@@ -160,11 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v44';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v45';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-09-30';
-const APP_NOTE = '絞り込み中でも「絞り込みをやめて新しい10件に戻す」で戻せる（v44）'
+const APP_DATE = '2026-10-01';
+const APP_NOTE = '写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（魚類データベースへ取り込めるように）（v45）'
+  + '／絞り込み中でも新しい10件に戻せる（v44）'
   + '／区間ごとに条件（天候・気温・水温・濁り・水位）を入れられる（v43）／一覧の絞り込みを増やす（v42）／データベースに弾かれた理由の一覧（v41）／一覧はふだん新しい10件・メッシュの範囲を1行に（v40）／産卵床に「数」（v39）／データベースへ直接送る（v38）';
 
 /* ---------- 小道具 ---------- */
@@ -7555,7 +7556,12 @@ function csvCell(v){
 function toCsv(cols, rows){
   return [cols.join(',')].concat(rows.map(r=>cols.map(c=>csvCell(r[c])).join(','))).join('\r\n');
 }
-function photoFilename(rec, i, p){ return `${rec.uuid}_${i+1}.${(p&&p.ext)||'jpg'}`; }
+/* 写真のファイル名は写真の番号（v45）。魚類DB の photo_files_json（<写真 id>.<ext>）と同じ。
+   id の無い古い形だけ、以前の <記録 uuid>_<連番> にする */
+function photoFilename(rec, i, p){
+  const ext = String((p&&p.ext)||'jpg').toLowerCase();
+  return (p && p.id) ? `${p.id}.${ext}` : `${rec.uuid}_${i+1}.${ext}`;
+}
 function exportBase(surveys){
   return surveys.length===1
     ? `ReddSurvey_${(surveys[0].survey_date||'').replace(/-/g,'')}_${(surveys[0].river_name||'').replace(/[\\/:*?"<>|\s]/g,'')}`
@@ -7928,16 +7934,21 @@ function crc32(u8){ let c=~0>>>0;
 function buildZip(files){
   const enc=new TextEncoder(); const parts=[]; const central=[]; let offset=0;
   const u16=n=>[n&255,(n>>8)&255], u32=n=>[n&255,(n>>8)&255,(n>>16)&255,(n>>24)&255];
+  // 部品は { name, u8 } か { name, blob, size, crc }（v45）。後者は写真の Blob をそのまま ZIP の部品にするので、
+  // 写真全部の中身を同時に抱えない（1 枚ずつ読んで CRC と SHA-256 を計算したら手放す。監査 v45 Major）
   files.forEach(f=>{
-    const name=enc.encode(f.name), data=f.u8, crc=crc32(data);
+    const name=enc.encode(f.name);
+    const data = f.blob ? f.blob : f.u8;
+    const size = f.blob ? f.size : f.u8.length;
+    const crc = f.blob ? f.crc : crc32(f.u8);
     const lh=[].concat([0x50,0x4b,0x03,0x04], u16(20), u16(0x0800), u16(0), u16(0), u16(0),
-      u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0));
+      u32(crc), u32(size), u32(size), u16(name.length), u16(0));
     parts.push(new Uint8Array(lh), name, data);
     const ch=[].concat([0x50,0x4b,0x01,0x02], u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0),
-      u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), u16(0), u16(0), u16(0),
+      u32(crc), u32(size), u32(size), u16(name.length), u16(0), u16(0), u16(0), u16(0),
       u32(0), u32(offset));
     central.push({head:new Uint8Array(ch), name});
-    offset += lh.length + name.length + data.length;
+    offset += lh.length + name.length + size;
   });
   const cdStart=offset; let cdSize=0;
   central.forEach(c=>{ parts.push(c.head, c.name); cdSize += c.head.length + c.name.length; });
@@ -7945,34 +7956,100 @@ function buildZip(files){
     u16(central.length), u16(central.length), u32(cdSize), u32(cdStart), u16(0))));
   return new Blob(parts, {type:'application/zip'});
 }
+/* 写真ZIP（v45・魚類DB spec 21.2〜21.4）
+   - 1 調査ずつ（複数の調査を 1 つの ZIP に混ぜない）
+   - 産卵床・物理環境・メモの写真を全部入れる（v44 までは物理環境が入っていなかった）
+   - ファイル名は写真の番号（<写真 uuid>.<ext>）。並べ替えや削除で別の写真が同じ名前にならない
+   - index.csv に調査・記録・写真の番号と SHA-256 を入れる。魚類DB はこの番号だけで記録と結び付ける
+   - 写真の本体が 1 枚でも読めなければ、不完全な ZIP は作らずに止める
+   - 上限: 1 枚 25MiB・合計 1000MiB 未満・5000 枚まで。HEIC は魚類DB で表示できないので止める */
+const PHOTO_ZIP_VERSION = 2;
+const PHOTO_ZIP_LIMIT = { per: 25*1024*1024, total: 1000*1024*1024, count: 5000 };
+const PHOTO_ZIP_COLS = ['archive_version','survey_uuid','kind','record_uuid','photo_id','file','sort_order','ext',
+  'byte_size','sha256','type','survey_name','redd_no','observed_at','latitude','longitude'];
+const PHOTO_KIND_JP = { bed:'産卵床', unit:'物理環境', note:'メモ' };
+function sha256Available(){
+  try{ return !!(typeof crypto !== 'undefined' && crypto && crypto.subtle && typeof crypto.subtle.digest === 'function'); }
+  catch(e){ return false; }
+}
+async function sha256Hex(u8){
+  const h = await crypto.subtle.digest('SHA-256', u8);
+  return Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+/* 1 調査の写真の一覧（ZIP に入れる順）。記録の photos の並び順を sort_order にする */
+function photoZipItems(sv){
+  const items = [];
+  const add = (kind, rec) => (rec.photos||[]).forEach((p,i)=>{ if(p && p.id) items.push({ kind, rec, p, order:i+1 }); });
+  DB.reddsOf(sv.uuid).forEach(r=>add('bed', r));
+  DB.unitsOf(sv.uuid).forEach(u=>add('unit', u));
+  DB.notesOf(sv.uuid).forEach(n=>add('note', n));
+  return items;
+}
+/* 作る前の検査（本体を読む前に分かるもの）。止める理由を返す（無ければ ''） */
+function photoZipPrecheck(items){
+  if(!items.length) return '書き出す写真がありません';
+  const heic = items.filter(it=>/^(heic|heif)$/i.test(String(it.p.ext||''))).length;
+  if(heic) return `HEIC 形式の写真が ${heic} 枚あります。魚類データベースで表示できないため、写真ZIPを作れません。カメラの設定を「互換性優先（JPEG）」にして撮り直すか、その写真を外してください`;
+  if(items.length > PHOTO_ZIP_LIMIT.count) return `写真が ${items.length} 枚あり、上限（${PHOTO_ZIP_LIMIT.count} 枚）を超えています`;
+  const big = items.filter(it=>(+it.p.size||0) > PHOTO_ZIP_LIMIT.per).length;
+  if(big) return `1 枚 25MB を超える写真が ${big} 枚あります`;
+  const total = items.reduce((a,it)=>a+(+it.p.size||0), 0);
+  if(total >= PHOTO_ZIP_LIMIT.total) return `写真の合計が約 ${(total/1024/1024).toFixed(0)}MB あり、上限（1000MB）を超えています`;
+  return '';
+}
 async function exportPhotoZip(surveys){
-  const items=[];
-  surveys.forEach(s=>{
-    DB.reddsOf(s.uuid).forEach(r=>(r.photos||[]).forEach((p,i)=>items.push({s, rec:r, p, i, kind:'産卵床'})));
-    DB.notesOf(s.uuid).forEach(n=>(n.photos||[]).forEach((p,i)=>items.push({s, rec:n, p, i, kind:'メモ'})));
-  });
-  if(!items.length){ toast('書き出す写真がありません'); return; }
-  const total = items.reduce((a,it)=>a+((it.p&&it.p.size)||0), 0);
-  const GB=1024*1024*1024;
-  if(total >= 1.5*GB){ toast('写真が多すぎてZIPを作れません（約'+(total/GB).toFixed(1)+'GB）。調査ごとに分けて書き出してください'); return; }
-  if(total >= 0.5*GB && !confirm('約'+(total/GB).toFixed(1)+'GBあります。時間がかかり、端末によっては失敗します。続けますか？')) return;
+  if(!surveys || surveys.length !== 1){
+    toast('写真ZIPは 1 調査ずつ作ります。調査を開いて「この調査を書き出す」から作ってください'); return;
+  }
+  const sv = surveys[0];
+  const items = photoZipItems(sv);
+  const why = photoZipPrecheck(items);
+  if(why){ toast(why); return; }
+  const total = items.reduce((a,it)=>a+(+it.p.size||0), 0);
+  // SHA-256 はブラウザの暗号の道具で計算する。https か localhost で開いていないと使えない（監査 v45 Major）
+  if(!sha256Available()){
+    toast('この開き方では写真ZIPを作れません（安全な接続が要ります）。公開ページ（https://…）から開き直してください'); return;
+  }
+  if(total >= 0.5*1024*1024*1024 && !confirm('約'+(total/1024/1024/1024).toFixed(1)+'GBあります。時間がかかり、端末によっては失敗します。続けますか？')) return;
 
   toast('写真をまとめています…');
-  const files=[], idx=[];
+  const files=[], idx=[], missing=[];
+  let sum = 0;
+  try{
   for(const it of items){
-    let rec=null; try{ rec=await PhotoDB.get(it.p.id); }catch(e){}
-    if(!rec||!rec.blob) continue;
-    const name = photoFilename(it.rec, it.i, it.p);
-    files.push({ name, u8:new Uint8Array(await rec.blob.arrayBuffer()) });
-    idx.push({ file:name, type:it.kind, survey_name:it.s.name,
-      redd_no:it.rec.redd_no??'', observed_at:it.rec.observed_at||it.rec.recorded_at||'',
-      latitude:it.rec.latitude??'', longitude:it.rec.longitude??'' });
+    let got=null; try{ got=await PhotoDB.get(it.p.id); }catch(e){}
+    if(!got || !got.blob){ missing.push(it); continue; }
+    // 1 枚ずつ読み、CRC と SHA-256 を計算したら中身は手放す（ZIP には元の Blob をそのまま入れる）
+    let u8 = new Uint8Array(await got.blob.arrayBuffer());
+    const size = u8.length;
+    if(size > PHOTO_ZIP_LIMIT.per){ toast('1 枚 25MB を超える写真があります。写真ZIPを作るのをやめました'); return; }
+    sum += size;
+    if(sum >= PHOTO_ZIP_LIMIT.total){ toast('写真の合計が上限（1000MB）を超えました。写真ZIPを作るのをやめました'); return; }
+    const ext = String(it.p.ext||'jpg').toLowerCase();
+    const name = photoFilename(it.rec, it.order-1, it.p);
+    const crc = crc32(u8), hex = await sha256Hex(u8);
+    u8 = null;
+    files.push({ name, blob: got.blob, size, crc });
+    idx.push({ archive_version:PHOTO_ZIP_VERSION, survey_uuid:sv.uuid, kind:it.kind, record_uuid:it.rec.uuid,
+      photo_id:it.p.id, file:name, sort_order:it.order, ext, byte_size:size, sha256: hex,
+      type:PHOTO_KIND_JP[it.kind], survey_name:sv.name||'', redd_no: it.kind==='bed' ? (it.rec.redd_no??'') : '',
+      observed_at: it.rec.observed_at||it.rec.recorded_at||it.rec.started_at||'',
+      latitude: it.rec.latitude??'', longitude: it.rec.longitude??'' });
   }
-  if(!files.length){ toast('写真の中身が見つかりませんでした'); return; }
-  const cols=['file','type','survey_name','redd_no','observed_at','latitude','longitude'];
-  files.push({ name:'index.csv', u8:new TextEncoder().encode('﻿'+toCsv(cols, idx)) });
+  // 本体が読めない写真があれば、不完全な ZIP は作らない（以前はその写真だけ黙って飛ばしていた）
+  if(missing.length){
+    toast(`写真 ${items.length} 枚のうち ${missing.length} 枚の本体がこの端末に見つかりません。不完全な写真ZIPは作りません（${PHOTO_KIND_JP[missing[0].kind]} ${missing[0].kind==='bed' ? reddName(missing[0].rec) : (missing[0].rec.name||'')} など）`);
+    return;
+  }
+  files.push({ name:'index.csv', u8:new TextEncoder().encode('\ufeff'+toCsv(PHOTO_ZIP_COLS, idx)) });
   downloadBlob(`${exportBase(surveys)}_photos.zip`, buildZip(files));
-  toast('写真ZIPを書き出しました');
+  }catch(e){
+    // 暗号の計算・メモリ不足などで失敗したら、不完全な ZIP は出さずに止める
+    toast('写真ZIPを作れませんでした（' + ((e && (e.name || e.message)) || '不明な理由') + '）。写真の多い調査は、端末を再起動してから試してください');
+    return;
+  }
+  toast(`写真ZIPを書き出しました（${idx.length} 枚）`);
+  return { count: idx.length, index: idx };
 }
 
 /* ---------- バックアップと復元 ---------- */
