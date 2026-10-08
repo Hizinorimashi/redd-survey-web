@@ -160,11 +160,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v47';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v48';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-10-01';
-const APP_NOTE = '物理環境の CSV・GeoJSON にも写真のファイル名（写真ZIP・QGIS と照合できる）（v47）'
+const APP_DATE = '2026-10-06';
+const APP_NOTE = 'iPhone で写真が保存できなくなっても、自動でつなぎ直して保存する（v48）'
+  + '／物理環境の CSV・GeoJSON にも写真のファイル名（写真ZIP・QGIS と照合できる）（v47）'
   + '／写真を全部外した調査も写真ZIP（写真 0 枚）で魚類データベースに伝えられる（v46）'
   + '／写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（v45）'
   + '／絞り込み中でも新しい10件に戻せる（v44）'
@@ -373,6 +374,8 @@ function openMediaDB(){
       if(abandoned){ try{ db.close(); }catch(e){} return; }
       // 別のタブが新しい版で開こうとしたら、自分の接続を閉じて道を空ける（閉じないと相手が永久に待つ）
       db.onversionchange=()=>{ try{ db.close(); }catch(e){} if(_mediaDB===db) _mediaDB=null; };
+      // ブラウザ側から切られたと知らせが来たら、次に使うときに開き直す（知らせが来ない端末は idbDo でやり直す）
+      db.onclose=()=>{ if(_mediaDB===db) _mediaDB=null; };
       _mediaDB=db; release();
       res(db);
     };
@@ -383,18 +386,40 @@ function openMediaDB(){
   _mediaDBOpening = mine;
   return mine;
 }
-// 書き込みは tx.oncomplete まで待つ。ここで待たないと「保存したのに無い」が起きる
+// iPhone（ホーム画面から開いたとき）は、写真を選ぶ・カメラに切り替えるなどでアプリが裏に回ると、
+// 接続が勝手に切れることがある。切れた接続を使い回すと、アプリを開き直すまでずっと失敗する。
+// 接続切れらしい失敗のときだけ、接続を捨てて 1 回だけ開き直す（v48）。
+// 中身の操作はどれも同じ番号への上書き・読み・削除なので、やり直しても二重にならない
 function idbDo(mode, fn){
-  return openMediaDB().then(db=>new Promise((res,rej)=>{
+  let used = null;
+  const run = ()=>openMediaDB().then(db=>{ used=db; return idbTx(db, mode, fn); });
+  return run().catch(e=>{
+    if(!idbConnLost(e)) throw e;
+    if(used && _mediaDB===used){ _mediaDB=null; try{ used.close(); }catch(_){} }
+    return run();
+  });
+}
+// 接続切れのときに出る失敗（iPhone では UnknownError・InvalidStateError、理由なしの中断もある）。
+// 空き容量切れ・インデックスが無い・blocked はやり直しても同じなので含めない
+function idbConnLost(e){
+  const n = e && e.name;
+  return !e || n==='InvalidStateError' || n==='UnknownError' || n==='AbortError' || n==='TransactionInactiveError';
+}
+// 書き込みは tx.oncomplete まで待つ。ここで待たないと「保存したのに無い」が起きる
+function idbTx(db, mode, fn){
+  return new Promise((res,rej)=>{
     const tx=db.transaction(MEDIA_STORE, mode);
     let out;
     const r=fn(tx.objectStore(MEDIA_STORE));
     if(r && typeof r.then==='function'){ /* 使わない */ }
     else if(r){ r.onsuccess=()=>{ out=r.result; }; }
     tx.oncomplete=()=>res(out);
-    tx.onerror=()=>rej(tx.error);
-    tx.onabort=()=>rej(tx.error);
-  }));
+    // 失敗の知らせ（error）の時点では tx.error がまだ空のことがある。理由を取り逃がすと
+    // 接続切れと取り違えてやり直すので、要求の失敗を覚えておき、中断（abort）で返す（v48 監査 Minor）
+    let reqErr = null;
+    tx.onerror=ev=>{ reqErr = (ev && ev.target && ev.target.error) || reqErr; };
+    tx.onabort=()=>rej(tx.error || reqErr);
+  });
 }
 const PhotoDB = {
   put(rec){ return idbDo('readwrite', st=>st.put(rec)); },
@@ -486,7 +511,7 @@ async function addPhotoFiles(files, expectedMark){
   // 途中で画面に足すと、2枚目の縮小中に切り替えたとき
   // 1枚目だけがどこにも付かず迷子になる。全部そろってから一度に足す
   const done = [];
-  let ok=0, ng=0;
+  let ok=0, ng=0, ngQuota=0;
   const moved = ()=>{ toast('別の記録へ移ったので、写真は付けませんでした'); return -1; };
   for(const f of files){
     try{
@@ -500,10 +525,15 @@ async function addPhotoFiles(files, expectedMark){
       if(!envFormSame(mark)) return moved();
       done.push({ id, ext, size:blob.size });
       ok++;
-    }catch(e){ console.error(e); ng++; }
+    }catch(e){ console.error(e); ng++; if(e && e.name==='QuotaExceededError') ngQuota++; }
   }
+  // 失敗の理由で案内を分ける。空き容量切れ以外（iPhone で接続が切れたままなど）に
+  // 「容量を確認」と出すと、空いているのに何をすればよいか分からない（v48）。
+  // 空き容量の案内は、失敗が全部空き容量切れのときだけ（混ざっていたら開き直しを案内する）
+  const why = (ngQuota && ngQuota===ng) ? '端末の空き容量を確認してください'
+                    : 'アプリを一度終了して開き直してから、もう一度追加してください';
   if(!envFormSame(mark)) return moved();
-  if(!done.length){ if(ng) alert('写真を保存できませんでした（端末の空き容量を確認してください）'); return 0; }
+  if(!done.length){ if(ng) alert(`写真を保存できませんでした（${why}）`); return 0; }
   SCREENS._photos = (SCREENS._photos||[]).concat(done);
   renderPhotoPanel();
   // 縮小に時間がかかっても取りこぼさないよう、ここで記録に付ける。
@@ -511,10 +541,10 @@ async function addPhotoFiles(files, expectedMark){
   // 写真は画面の並びに残り、envPhotoTouch が知らせを出して、次に触ったときに付け直す
   if(!envPhotoTouch(owner)){
     // 写真そのものを保存できなかった分は、別に知らせる（記録に書けなかった知らせとは別の話）
-    if(ng) alert(`${ng}枚は写真そのものを保存できませんでした（端末の空き容量を確認してください）`);
+    if(ng) alert(`${ng}枚は写真そのものを保存できませんでした（${why}）`);
     return 0;
   }
-  if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（端末の空き容量を確認してください）`);
+  if(ng) alert(`写真 ${ok}枚を追加しました。${ng}枚は保存できませんでした（${why}）`);
   else toast(ok+'枚を追加しました');
   return ok;
 }
