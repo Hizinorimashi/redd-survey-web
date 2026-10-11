@@ -107,6 +107,7 @@
     background:var(--panel); color:var(--fg); border:1px solid var(--line);
     border-radius:10px; cursor:pointer; box-shadow:0 1px 5px rgba(0,0,0,.4);}
   .locate-btn:active{background:var(--panel2);}
+  .leaflet-bar a.me-follow.on{background:var(--accent);color:#04121f}
   .leaflet-popup-content{color:#111;}
   .chooser-pop .leaflet-popup-content{margin:10px 12px;}
   .chooser{display:flex; flex-direction:column; gap:6px; min-width:180px;}
@@ -160,11 +161,12 @@
    サケ科魚類の産卵床（レッド）調査を現場のスマホだけで記録する。
    保存は端末内のみ（localStorage / IndexedDB）。外部へ自動送信しない。
    ============================================================ */
-const APP_VERSION = 'v48';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
+const APP_VERSION = 'v49';   // sw.js の CACHE 名と揃える（deploy.sh が照合する）
 // いつの版か・何を直したか。画面に出して「自分の端末がどれか」を分かるようにする。
 // 版を上げるときは、この2つも一緒に直す
-const APP_DATE = '2026-10-06';
-const APP_NOTE = 'iPhone で写真が保存できなくなっても、自動でつなぎ直して保存する（v48）'
+const APP_DATE = '2026-10-11';
+const APP_NOTE = '区間を記録中は、地図がいる場所を追いかける（指で動かすと止まり、◎ で戻る）（v49）'
+  + '／iPhone で写真が保存できなくなっても、自動でつなぎ直して保存する（v48）'
   + '／物理環境の CSV・GeoJSON にも写真のファイル名（写真ZIP・QGIS と照合できる）（v47）'
   + '／写真を全部外した調査も写真ZIP（写真 0 枚）で魚類データベースに伝えられる（v46）'
   + '／写真ZIPを 1 調査ずつ・物理環境の写真も・写真の番号で（v45）'
@@ -4659,8 +4661,65 @@ function envFitAll(svUuid){
   if(!ENVMAP) return;
   const pts = envAllPoints(svUuid);
   if(!pts.length){ toast('まだ何も置かれていません'); return; }
+  // 全体を見たいときに、2 秒後にいる場所へ引き戻さない
+  envFollowStop(svUuid, '全体を出したので、いる場所を追いかけるのを止めました（◎ でまた追いかけます）');
   try{ ENVMAP.fitBounds(L.latLngBounds(pts).pad(0.3), {animate:false}); }catch(e){}
   envRememberView(svUuid);
+}
+/* ---------- 区間を記録中は、地図がいる場所を追いかける（v49） ----------
+   指で地図を動かしたら止める（置く場所を探しているのに、地図が逃げないように）。◎ でまた追いかける。
+   止めたことは区間ごとに覚える。新しい区間を始めたら、また追いかける */
+let ENV_FOLLOW_OFF = '';      // 追いかけるのを止めた区間の uuid
+function envFollowReach(svUuid){
+  if(!TRACK || !svUuid) return null;
+  const r = DB.get(DB.key.re, TRACK.reach_uuid);
+  return (r && !r.deleted_at && !r.ended_at && r.survey_uuid===svUuid) ? r : null;
+}
+function envFollowing(svUuid){
+  const r = envFollowReach(svUuid);
+  return !!r && ENV_FOLLOW_OFF !== r.uuid;
+}
+// ◎ の色で、いま追いかけているかを見せる
+function envFollowMark(svUuid){
+  const on = envFollowing(svUuid);
+  try{ document.querySelectorAll('a.me-follow').forEach(a=>a.classList.toggle('on', on)); }catch(e){}
+}
+function envFollowStop(svUuid, msg){
+  const r = envFollowReach(svUuid);
+  if(!r || ENV_FOLLOW_OFF===r.uuid) return false;
+  ENV_FOLLOW_OFF = r.uuid;
+  envFollowMark(svUuid);
+  toast(msg || '地図を動かしたので、いる場所を追いかけるのを止めました（◎ でまた追いかけます）');
+  return true;
+}
+// この調査の記録中の区間を止めていたときだけ戻す。別の調査の地図で ◎ を押しても、
+// ほかの区間を止めていたことは消さない（v49 監査 Major）
+function envFollowResume(svUuid){
+  const r = envFollowReach(svUuid);
+  if(r && ENV_FOLLOW_OFF===r.uuid) ENV_FOLLOW_OFF = '';
+  envFollowMark(svUuid);
+}
+// 地図を開くときの真ん中。追いかけている間はいまいる場所（使えなければ null＝前に見ていた場所）。
+// 記録を動かすタップ待ちの間は使わない。動かす相手が画面の外へ行ってしまう（v49 監査 Major）
+function envFollowStart(svUuid){
+  if(ENV_MOVE || !envFollowing(svUuid)) return null;
+  const f = freshFix(20000);
+  return (f && f.acc <= GPS_MAX_ACC && validPt([f.lat, f.lon])) ? [f.lat, f.lon] : null;
+}
+// 2 秒ごとに呼ぶ。地図の真ん中を、いまいる場所へ寄せる（大きさ・向きはそのまま）
+function envFollowTick(svUuid, map){
+  if(!map || !envFollowing(svUuid)) return false;
+  if(ENV_MOVE) return false;        // 記録を動かすタップを待っている間は、地図を動かさない（タップ先がずれる）
+  const f = freshFix(20000);
+  if(!f || f.acc > GPS_MAX_ACC) return false;   // 粗い位置へ寄せると、地図が行ったり来たりする
+  const pt = [f.lat, f.lon];
+  if(!validPt(pt)) return false;
+  try{
+    const c = map.getCenter();
+    if(distMeters([c.lat, c.lng], pt) < 1) return false;   // ほぼ真ん中なら動かさない（描き直しを増やさない）
+    map.panTo(pt, {animate:true, duration:0.5});
+  }catch(e){ return false; }
+  return true;
 }
 /* 指では、すでにある点とまったく同じ場所を狙えない。
    すぐ近く（指1本ぶん）に置いてあるものがあれば、そこへぴったり重ねる。
@@ -5338,6 +5397,7 @@ SCREENS.envMap = (argStr)=>{
         if(!$('#envGps')){ clearInterval(ENV_GPS_TIMER); ENV_GPS_TIMER=null; return; }
         $('#envGps').textContent = gpsHint();
         drawMe(ENVMAP);          // いる場所を追いかける
+        envFollowTick(svUuid, ENVMAP);   // 区間を記録中なら、地図もついてくる（v49）
       }, 2000);
 
       if(ENV_PICK && ENV_PICK.sv !== svUuid) ENV_PICK = null;
@@ -5355,7 +5415,9 @@ SCREENS.envMap = (argStr)=>{
       // 地図。前に見ていた場所があればそこへ戻す（勝手に動かさない）
       if(typeof L==='undefined' || !$('#envmap')) return;
       const v = ENV_VIEW[svUuid];
-      const c = v ? [v.lat, v.lon] : envMapCenter(s, cur);
+      // 区間を記録中で、いまの位置が取れていれば、いる場所から始める（大きさ・向きは前のまま）
+      const here = envFollowStart(svUuid);
+      const c = here || (v ? [v.lat, v.lon] : envMapCenter(s, cur));
       ENVMAP = makeMap('envmap', c, v ? v.zoom : 17, v ? v.bearing : 0);
       const map = ENVMAP;
       if(!map) return;
@@ -5396,8 +5458,11 @@ SCREENS.envMap = (argStr)=>{
         });
       }
       map.on('click', e=>envMapClick(svUuid, e.latlng.lat, e.latlng.lng));
-      // はじめて開いたときだけ、置いてあるものが入るようにする
-      if(!v){
+      // 指で地図を動かしたら、追いかけるのを止める（dragstart は指で動かしたときだけ来る）
+      map.on('dragstart', ()=>envFollowStop(svUuid));
+      envFollowMark(svUuid);
+      // はじめて開いたときだけ、置いてあるものが入るようにする（いる場所から始めたときは、そのまま）
+      if(!v && !here){
         const pts = envAllPoints(svUuid);
         if(pts.length>1){
           try{ map.fitBounds(L.latLngBounds(pts).pad(0.3), {animate:false}); }catch(e){}
@@ -7089,12 +7154,15 @@ function addLocateControl(map){
     options:{position:'topleft'},
     onAdd(){
       const d = L.DomUtil.create('div','leaflet-bar');
-      const a = L.DomUtil.create('a','',d);
+      // me-follow: 区間を記録中に、地図がいる場所を追いかけている間は色が付く（v49）
+      const a = L.DomUtil.create('a','me-follow',d);
       // ◎ は「いまいる場所へ」の印。絵文字は使わない（端末で「？」になる）
       a.href='#'; a.title='いまいる場所へ'; a.textContent='◎';
       a.style.cssText='font-weight:700;text-align:center;font-size:18px';
       L.DomEvent.on(a,'click',ev=>{
         L.DomEvent.stop(ev);
+        // 調査の地図なら、区間を記録中はまた追いかける
+        if(map===ENVMAP && ENV_MAP_SV) envFollowResume(ENV_MAP_SV);
         getFixOnce(f=>{
           if(!f){ toast('いまいる場所を取れませんでした。空の見えるところでお試しください'); return; }
           map.setView([f.lat,f.lon], Math.max(map.getZoom(),16), {animate:false});
